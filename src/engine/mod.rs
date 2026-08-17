@@ -119,7 +119,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(rx: mpsc::UnboundedReceiver<EngineMessage>, db: Database, config: &Config) -> Self {
-        let (world, accounts) = if db.has_world_data() {
+        let (mut world, accounts) = if db.has_world_data() {
             let world = db.load_world().expect("Failed to load world from DB");
             let accounts = db.load_accounts().expect("Failed to load accounts from DB");
             tracing::info!(
@@ -128,8 +128,25 @@ impl Engine {
             );
             (world, accounts)
         } else {
-            let world = build_starter_world(&config.spawn_room);
-            tracing::info!("No saved world found, using starter world");
+            let mut world = if config.game_dir.is_some() {
+                World::new()
+            } else {
+                build_starter_world(&config.spawn_room)
+            };
+            if let Some(game_dir) = &config.game_dir {
+                if let Err(e) = crate::loader::load_game_dir(std::path::Path::new(game_dir), &mut world) {
+                    tracing::error!(error = %e, "Failed to load game content");
+                }
+            }
+            // Ensure spawn room exists
+            if world.get(&config.spawn_room).is_none() {
+                let key = config.spawn_room.rsplit('/').next().unwrap_or("spawn");
+                let room = GameObject::new(&config.spawn_room, key, Kind::Room)
+                    .with_title("Spawn")
+                    .with_description("An empty room. Build your world from here.");
+                world.add_object(room);
+            }
+            tracing::info!("Fresh world initialized");
             (world, AccountStore::new())
         };
 
@@ -1558,10 +1575,13 @@ impl Engine {
 
         if let Some(room_ref) = &room_ref {
             let hook_name = format!("cmd_{}", cmd);
+            let global_tag = crate::world::Tag {
+                category: "system".into(),
+                key: "global".into(),
+            };
             let target_ref = {
-                // Candidates, in resolution order: the room itself (for
-                // ambient/environmental commands), objects lying in the
-                // room, then the actor's own inventory.
+                // Candidates, in resolution order: the room itself,
+                // objects in the room, actor's inventory, then global objects.
                 let room_itself = self.world.get(room_ref).into_iter();
                 let room_objs = self
                     .world
@@ -1569,8 +1589,16 @@ impl Engine {
                     .into_iter()
                     .filter(|o| o.ref_id != actor_ref);
                 let inv_objs = self.world.objects_in(actor_ref).into_iter();
-                hooks::find_cmd_hook(room_itself.chain(room_objs).chain(inv_objs), cmd)
-                    .map(|(obj, _)| obj.ref_id.clone())
+                let global_objs = self
+                    .world
+                    .objects
+                    .values()
+                    .filter(|o| o.tags.contains(&global_tag));
+                hooks::find_cmd_hook(
+                    room_itself.chain(room_objs).chain(inv_objs).chain(global_objs),
+                    cmd,
+                )
+                .map(|(obj, _)| obj.ref_id.clone())
             };
 
             if let Some(target_ref) = target_ref {

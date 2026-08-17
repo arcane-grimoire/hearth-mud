@@ -2,6 +2,7 @@ mod accounts;
 mod ansi;
 mod config;
 mod db;
+mod loader;
 mod engine;
 mod locks;
 mod net;
