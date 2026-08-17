@@ -27,6 +27,7 @@ impl Database {
                 username TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 character_ref TEXT,
+                email TEXT,
                 scopes TEXT NOT NULL DEFAULT 'player'
             );
 
@@ -67,6 +68,7 @@ impl Database {
         let _ = self.conn.execute("ALTER TABLE objects ADD COLUMN locks_json TEXT NOT NULL DEFAULT '{}'", []);
         let _ = self.conn.execute("ALTER TABLE objects ADD COLUMN target_ref TEXT", []);
         let _ = self.conn.execute("ALTER TABLE objects ADD COLUMN aliases_json TEXT NOT NULL DEFAULT '[]'", []);
+        let _ = self.conn.execute("ALTER TABLE accounts ADD COLUMN email TEXT", []);
 
         Ok(())
     }
@@ -76,7 +78,7 @@ impl Database {
         tx.execute("DELETE FROM accounts", [])?;
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO accounts (id, username, password_hash, character_ref, scopes) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO accounts (id, username, password_hash, character_ref, email, scopes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
             for account in accounts.all() {
                 let scopes: Vec<&str> = account.scopes.iter().map(|s| s.label()).collect();
@@ -86,6 +88,7 @@ impl Database {
                     account.username,
                     account.password_hash,
                     account.character_ref,
+                    account.email,
                     scopes_str,
                 ])?;
             }
@@ -96,19 +99,20 @@ impl Database {
     pub fn load_accounts(&self) -> rusqlite::Result<AccountStore> {
         let mut store = AccountStore::new();
         let mut stmt = self.conn.prepare(
-            "SELECT id, username, password_hash, character_ref, scopes FROM accounts",
+            "SELECT id, username, password_hash, character_ref, email, scopes FROM accounts",
         )?;
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
             let username: String = row.get(1)?;
             let password_hash: String = row.get(2)?;
             let character_ref: Option<String> = row.get(3)?;
-            let scopes_str: String = row.get(4)?;
-            Ok((id, username, password_hash, character_ref, scopes_str))
+            let email: Option<String> = row.get(4)?;
+            let scopes_str: String = row.get(5)?;
+            Ok((id, username, password_hash, character_ref, email, scopes_str))
         })?;
 
         for row in rows {
-            let (id, username, password_hash, character_ref, scopes_str) = row?;
+            let (id, username, password_hash, character_ref, email, scopes_str) = row?;
             let scopes: HashSet<Scope> = scopes_str
                 .split(',')
                 .filter_map(|s| Scope::parse(s.trim()))
@@ -118,6 +122,7 @@ impl Database {
                 username,
                 password_hash,
                 character_ref,
+                email,
                 scopes,
             };
             store.insert(account);

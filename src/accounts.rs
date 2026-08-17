@@ -44,6 +44,7 @@ pub struct Account {
     pub username: String,
     pub password_hash: String,
     pub character_ref: Option<String>,
+    pub email: Option<String>,
     pub scopes: HashSet<Scope>,
 }
 
@@ -118,6 +119,7 @@ impl AccountStore {
             username: username.to_string(),
             password_hash: hash,
             character_ref: Some(character_ref),
+            email: None,
             scopes,
         };
 
@@ -187,6 +189,20 @@ impl AccountStore {
         } else {
             false
         }
+    }
+
+    pub fn set_email(&mut self, account_id: &str, email: Option<String>) -> Result<(), String> {
+        let account = self
+            .accounts
+            .get_mut(account_id)
+            .ok_or("Account not found.")?;
+        if let Some(ref e) = email {
+            if !e.contains('@') || !e.contains('.') {
+                return Err("That doesn't look like a valid email address.".into());
+            }
+        }
+        account.email = email;
+        Ok(())
     }
 
     pub fn change_password(

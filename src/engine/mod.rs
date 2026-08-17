@@ -937,6 +937,7 @@ impl Engine {
             "examine" | "ex" => commands::do_examine(&self.world, &actor_ref, &args),
             "who" => self.do_who(session_id),
             "@password" => self.cmd_password(session_id, &args),
+            "@email" => self.cmd_email(session_id, &args),
             "whisper" => self.cmd_whisper(session_id, &actor_ref, &args),
             "emote" | "pose" | ":" => {
                 let msg = if cmd == ":" {
@@ -1734,6 +1735,33 @@ impl Engine {
         }
         match self.accounts.change_password(&account_id, old_pw, new_pw) {
             Ok(()) => "Password changed.\r\n".to_string(),
+            Err(e) => format!("{}\r\n", e),
+        }
+    }
+
+    fn cmd_email(&mut self, session_id: &str, args: &str) -> String {
+        let account_id = match self.session_account_id(session_id) {
+            Some(id) => id,
+            None => return "You're not logged in.\r\n".to_string(),
+        };
+        let email = args.trim();
+        if email.is_empty() {
+            // Show current email
+            let current = self
+                .accounts
+                .get(&account_id)
+                .and_then(|a| a.email.as_deref())
+                .unwrap_or("not set");
+            return format!("Email: {}\r\nUsage: @email <address> or @email clear\r\n", current);
+        }
+        if email.eq_ignore_ascii_case("clear") {
+            match self.accounts.set_email(&account_id, None) {
+                Ok(()) => return "Email cleared.\r\n".to_string(),
+                Err(e) => return format!("{}\r\n", e),
+            }
+        }
+        match self.accounts.set_email(&account_id, Some(email.to_string())) {
+            Ok(()) => format!("Email set to {}.\r\n", email),
             Err(e) => format!("{}\r\n", e),
         }
     }
