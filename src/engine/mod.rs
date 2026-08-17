@@ -29,7 +29,53 @@ pub enum EngineMessage {
         session_id: String,
         input: String,
     },
+    ApiRequest {
+        request: ApiRequest,
+        reply: tokio::sync::oneshot::Sender<ApiResponse>,
+    },
     Shutdown,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ApiRequest {
+    ListRooms,
+    ListObjects { location: Option<String> },
+    CreateRoom { area: String, key: String, title: String, description: Option<String> },
+    CreateObject { area: String, key: String, kind: String, title: Option<String>, description: Option<String>, location: Option<String> },
+    CreateExit { source: String, direction: String, target: String, aliases: Option<Vec<String>> },
+    Examine { ref_id: String },
+    SetAttribute { ref_id: String, key: String, value: serde_json::Value },
+    SetDescription { ref_id: String, description: String },
+    AddTag { ref_id: String, tag: String },
+    RemoveTag { ref_id: String, tag: String },
+    DeleteObject { ref_id: String },
+    SetProgram { ref_id: String, hook: String, source: String },
+    RemoveProgram { ref_id: String, hook: String },
+    ListPrograms { ref_id: String },
+    ListExits { room_ref: String },
+    SaveWorld,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ApiResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl ApiResponse {
+    fn success(data: serde_json::Value) -> Self {
+        Self { ok: true, data: Some(data), error: None }
+    }
+    fn error(msg: impl Into<String>) -> Self {
+        Self { ok: false, data: None, error: Some(msg.into()) }
+    }
+    fn ok() -> Self {
+        Self { ok: true, data: None, error: None }
+    }
 }
 
 enum SessionState {
@@ -120,6 +166,10 @@ impl Engine {
                         }
                         Some(EngineMessage::PlayerInput { session_id, input }) => {
                             self.handle_input(&session_id, &input);
+                        }
+                        Some(EngineMessage::ApiRequest { request, reply }) => {
+                            let response = self.handle_api_request(request);
+                            let _ = reply.send(response);
                         }
                         Some(EngineMessage::Shutdown) | None => {
                             break;
@@ -293,6 +343,223 @@ impl Engine {
         match self.db.save_accounts(&self.accounts) {
             Ok(()) => tracing::info!("Accounts saved"),
             Err(e) => tracing::error!(error = %e, "Failed to save accounts"),
+        }
+    }
+
+    fn handle_api_request(&mut self, req: ApiRequest) -> ApiResponse {
+        match req {
+            ApiRequest::ListRooms => {
+                let rooms: Vec<serde_json::Value> = self
+                    .world
+                    .objects
+                    .values()
+                    .filter(|o| o.kind == Kind::Room)
+                    .map(|o| serde_json::json!({
+                        "ref_id": o.ref_id,
+                        "key": o.key,
+                        "title": o.title,
+                        "description": o.description,
+                    }))
+                    .collect();
+                ApiResponse::success(serde_json::json!(rooms))
+            }
+            ApiRequest::ListObjects { location } => {
+                let objs: Vec<serde_json::Value> = self
+                    .world
+                    .objects
+                    .values()
+                    .filter(|o| match &location {
+                        Some(loc) => o.location_ref.as_deref() == Some(loc.as_str()),
+                        None => true,
+                    })
+                    .filter(|o| o.kind != Kind::Exit)
+                    .map(|o| serde_json::json!({
+                        "ref_id": o.ref_id,
+                        "key": o.key,
+                        "kind": o.kind.to_string(),
+                        "title": o.title,
+                        "location_ref": o.location_ref,
+                    }))
+                    .collect();
+                ApiResponse::success(serde_json::json!(objs))
+            }
+            ApiRequest::CreateRoom { area, key, title, description } => {
+                let ref_id = format!("area/{}/room/{}", area, key.to_lowercase().replace(' ', "_"));
+                if self.world.get(&ref_id).is_some() {
+                    return ApiResponse::error(format!("Room '{}' already exists", ref_id));
+                }
+                let mut room = GameObject::new(&ref_id, &key, Kind::Room).with_title(&title);
+                if let Some(desc) = description {
+                    room.description = desc;
+                }
+                self.world.add_object(room);
+                ApiResponse::success(serde_json::json!({ "ref_id": ref_id }))
+            }
+            ApiRequest::CreateObject { area, key, kind, title, description, location } => {
+                let kind_enum = match Kind::parse(&kind) {
+                    Some(k) => k,
+                    None => return ApiResponse::error(format!("Unknown kind: '{}'", kind)),
+                };
+                let ref_id = format!("area/{}/{}/{}", area, kind, key.to_lowercase().replace(' ', "_"));
+                let mut obj = GameObject::new(&ref_id, &key, kind_enum);
+                if let Some(t) = title { obj = obj.with_title(t); }
+                if let Some(d) = description { obj.description = d; }
+                if let Some(loc) = location { obj = obj.with_location(loc); }
+                self.world.add_object(obj);
+                ApiResponse::success(serde_json::json!({ "ref_id": ref_id }))
+            }
+            ApiRequest::CreateExit { source, direction, target, aliases } => {
+                if self.world.get(&source).is_none() {
+                    return ApiResponse::error(format!("Source room '{}' not found", source));
+                }
+                if self.world.get(&target).is_none() {
+                    return ApiResponse::error(format!("Target room '{}' not found", target));
+                }
+                let src_key = source.rsplit('/').next().unwrap_or("unknown");
+                let tgt_key = target.rsplit('/').next().unwrap_or("unknown");
+                let ref_id = format!("area/built/exit/{}_to_{}", src_key, tgt_key);
+                let mut exit = GameObject::new(&ref_id, &direction, Kind::Exit)
+                    .with_location(&source)
+                    .with_target(&target);
+                if let Some(al) = aliases {
+                    exit.aliases = al.into_iter().collect();
+                }
+                self.world.add_object(exit);
+                ApiResponse::success(serde_json::json!({ "ref_id": ref_id }))
+            }
+            ApiRequest::Examine { ref_id } => {
+                match self.world.get(&ref_id) {
+                    Some(obj) => {
+                        let tags: Vec<String> = obj.tags.iter().map(|t| t.as_spec()).collect();
+                        let programs: Vec<String> = obj.programs.keys().cloned().collect();
+                        let locks: &HashMap<String, String> = &obj.locks;
+                        ApiResponse::success(serde_json::json!({
+                            "ref_id": obj.ref_id,
+                            "key": obj.key,
+                            "kind": obj.kind.to_string(),
+                            "title": obj.title,
+                            "description": obj.description,
+                            "location_ref": obj.location_ref,
+                            "target_ref": obj.target_ref,
+                            "attrs": obj.attrs,
+                            "tags": tags,
+                            "programs": programs,
+                            "locks": locks,
+                            "aliases": obj.aliases.iter().collect::<Vec<_>>(),
+                        }))
+                    }
+                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
+            ApiRequest::SetAttribute { ref_id, key, value } => {
+                match self.world.get_mut(&ref_id) {
+                    Some(obj) => {
+                        obj.attrs.insert(key.clone(), value);
+                        ApiResponse::ok()
+                    }
+                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
+            ApiRequest::SetDescription { ref_id, description } => {
+                match self.world.get_mut(&ref_id) {
+                    Some(obj) => {
+                        obj.description = description;
+                        ApiResponse::ok()
+                    }
+                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
+            ApiRequest::AddTag { ref_id, tag } => {
+                let parsed = match crate::world::Tag::parse(&tag) {
+                    Ok(t) => t,
+                    Err(e) => return ApiResponse::error(e),
+                };
+                match self.world.get_mut(&ref_id) {
+                    Some(obj) => {
+                        obj.tags.insert(parsed);
+                        ApiResponse::ok()
+                    }
+                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
+            ApiRequest::RemoveTag { ref_id, tag } => {
+                let parsed = match crate::world::Tag::parse(&tag) {
+                    Ok(t) => t,
+                    Err(e) => return ApiResponse::error(e),
+                };
+                match self.world.get_mut(&ref_id) {
+                    Some(obj) => {
+                        obj.tags.remove(&parsed);
+                        ApiResponse::ok()
+                    }
+                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
+            ApiRequest::DeleteObject { ref_id } => {
+                if ref_id.starts_with("player/") {
+                    return ApiResponse::error("Cannot delete player objects");
+                }
+                if self.world.objects.remove(&ref_id).is_some() {
+                    ApiResponse::ok()
+                } else {
+                    ApiResponse::error(format!("No object with ref '{}'", ref_id))
+                }
+            }
+            ApiRequest::SetProgram { ref_id, hook, source } => {
+                if let Err(e) = self.softcode.check_syntax(&source) {
+                    return ApiResponse::error(format!("Syntax error: {}", e));
+                }
+                match self.world.get_mut(&ref_id) {
+                    Some(obj) => match hooks::set_program(obj, &hook, source) {
+                        Ok(()) => ApiResponse::ok(),
+                        Err(e) => ApiResponse::error(e),
+                    },
+                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
+            ApiRequest::RemoveProgram { ref_id, hook } => {
+                match self.world.get_mut(&ref_id) {
+                    Some(obj) => {
+                        hooks::remove_program(obj, &hook);
+                        ApiResponse::ok()
+                    }
+                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
+            ApiRequest::ListPrograms { ref_id } => {
+                match self.world.get(&ref_id) {
+                    Some(obj) => {
+                        let programs: Vec<serde_json::Value> = hooks::list_programs(obj)
+                            .iter()
+                            .map(|p| serde_json::json!({
+                                "hook": p.hook,
+                                "enabled": p.enabled,
+                                "source": p.source,
+                            }))
+                            .collect();
+                        ApiResponse::success(serde_json::json!(programs))
+                    }
+                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
+            ApiRequest::ListExits { room_ref } => {
+                let exits: Vec<serde_json::Value> = self
+                    .world
+                    .exits_from(&room_ref)
+                    .iter()
+                    .map(|e| serde_json::json!({
+                        "ref_id": e.ref_id,
+                        "direction": e.key,
+                        "target_ref": e.target_ref,
+                        "aliases": e.aliases.iter().collect::<Vec<_>>(),
+                    }))
+                    .collect();
+                ApiResponse::success(serde_json::json!(exits))
+            }
+            ApiRequest::SaveWorld => {
+                self.do_save();
+                ApiResponse::ok()
+            }
         }
     }
 

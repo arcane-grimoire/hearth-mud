@@ -1,27 +1,35 @@
 use std::net::SocketAddr;
 
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::WebSocketUpgrade;
+use axum::extract::{Json, State, WebSocketUpgrade};
 use axum::response::{Html, IntoResponse};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use tokio::sync::mpsc;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
-use crate::engine::EngineMessage;
+use crate::engine::{ApiRequest, ApiResponse, EngineMessage};
+
+#[derive(Clone)]
+struct AppState {
+    engine_tx: mpsc::UnboundedSender<EngineMessage>,
+}
 
 pub async fn start_web(
     addr: &str,
     engine_tx: mpsc::UnboundedSender<EngineMessage>,
 ) -> std::io::Result<()> {
+    let state = AppState {
+        engine_tx: engine_tx.clone(),
+    };
+
     let app = Router::new()
         .route("/", get(index_handler))
         .route("/play", get(index_handler))
-        .route(
-            "/ws",
-            get(move |ws: WebSocketUpgrade| ws_handler(ws, engine_tx)),
-        )
+        .route("/ws", get(ws_handler))
+        .route("/api", post(api_handler))
+        .with_state(state)
         .layer(CorsLayer::permissive());
 
     let addr: SocketAddr = addr.parse().map_err(|e| {
@@ -42,9 +50,40 @@ async fn index_handler() -> impl IntoResponse {
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
-    engine_tx: mpsc::UnboundedSender<EngineMessage>,
+    State(state): State<AppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, engine_tx))
+    ws.on_upgrade(move |socket| handle_ws(socket, state.engine_tx))
+}
+
+async fn api_handler(
+    State(state): State<AppState>,
+    Json(request): Json<ApiRequest>,
+) -> impl IntoResponse {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+
+    if state
+        .engine_tx
+        .send(EngineMessage::ApiRequest {
+            request,
+            reply: reply_tx,
+        })
+        .is_err()
+    {
+        return Json(ApiResponse {
+            ok: false,
+            data: None,
+            error: Some("Engine unavailable".into()),
+        });
+    }
+
+    match reply_rx.await {
+        Ok(response) => Json(response),
+        Err(_) => Json(ApiResponse {
+            ok: false,
+            data: None,
+            error: Some("Engine did not respond".into()),
+        }),
+    }
 }
 
 async fn handle_ws(socket: WebSocket, engine_tx: mpsc::UnboundedSender<EngineMessage>) {
