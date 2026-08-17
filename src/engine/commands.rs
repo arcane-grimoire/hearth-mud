@@ -42,7 +42,7 @@ pub fn format_look(world: &World, room_ref: &str, viewer_ref: &str) -> String {
                 Kind::Player => format!("{} is here.", obj.display_name()),
                 Kind::Npc => format!("{} is here.", obj.display_name()),
                 Kind::Item => format!("{} is here.", obj.display_name()),
-                Kind::Room => continue,
+                Kind::Room | Kind::Exit => continue,
             };
             out.push_str(&label);
             out.push_str("\r\n");
@@ -62,8 +62,11 @@ pub fn do_go(world: &mut World, actor_ref: &str, args: &str) -> String {
         None => return "You're nowhere.\r\n".to_string(),
     };
 
-    let target = match world.find_exit(&room_ref, args) {
-        Some(e) => e.target_ref.clone(),
+    let target = match world
+        .find_exit(&room_ref, args)
+        .and_then(|e| e.target_ref.clone())
+    {
+        Some(t) => t,
         None => return format!("You can't go '{}'.\r\n", args),
     };
 

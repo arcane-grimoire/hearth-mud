@@ -13,6 +13,7 @@ pub enum Kind {
     Item,
     Npc,
     Player,
+    Exit,
 }
 
 impl std::fmt::Display for Kind {
@@ -22,6 +23,7 @@ impl std::fmt::Display for Kind {
             Kind::Item => write!(f, "item"),
             Kind::Npc => write!(f, "npc"),
             Kind::Player => write!(f, "player"),
+            Kind::Exit => write!(f, "exit"),
         }
     }
 }
@@ -33,16 +35,10 @@ impl Kind {
             "item" => Some(Kind::Item),
             "npc" => Some(Kind::Npc),
             "player" => Some(Kind::Player),
+            "exit" => Some(Kind::Exit),
             _ => None,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Attribute {
-    pub key: String,
-    pub value: serde_json::Value,
-    pub category: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,8 +49,12 @@ pub struct GameObject {
     pub title: Option<String>,
     pub description: String,
     pub location_ref: Option<String>,
+    #[serde(default)]
+    pub target_ref: Option<String>,
     pub attrs: HashMap<String, serde_json::Value>,
     pub tags: HashSet<Tag>,
+    #[serde(default)]
+    pub aliases: HashSet<String>,
     #[serde(default)]
     pub programs: HashMap<String, ProgramRecord>,
     #[serde(default)]
@@ -71,8 +71,10 @@ impl GameObject {
             title: None,
             description: String::new(),
             location_ref: None,
+            target_ref: None,
             attrs: HashMap::new(),
             tags: HashSet::new(),
+            aliases: HashSet::new(),
             programs: HashMap::new(),
             locks: HashMap::new(),
             id: Uuid::new_v4().to_string(),
@@ -94,43 +96,22 @@ impl GameObject {
         self
     }
 
-    pub fn display_name(&self) -> &str {
-        self.title.as_deref().unwrap_or(&self.key)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Exit {
-    pub ref_id: String,
-    pub source_ref: String,
-    pub target_ref: String,
-    pub key: String,
-    pub aliases: Vec<String>,
-    #[serde(default)]
-    pub locks: HashMap<String, String>,
-    pub id: String,
-}
-
-impl Exit {
-    pub fn new(
-        ref_id: impl Into<String>,
-        source: impl Into<String>,
-        target: impl Into<String>,
-        key: impl Into<String>,
-    ) -> Self {
-        Self {
-            ref_id: ref_id.into(),
-            source_ref: source.into(),
-            target_ref: target.into(),
-            key: key.into(),
-            aliases: Vec::new(),
-            locks: HashMap::new(),
-            id: Uuid::new_v4().to_string(),
-        }
+    pub fn with_target(mut self, target: impl Into<String>) -> Self {
+        self.target_ref = Some(target.into());
+        self
     }
 
     pub fn with_aliases(mut self, aliases: Vec<&str>) -> Self {
         self.aliases = aliases.into_iter().map(String::from).collect();
         self
+    }
+
+    pub fn display_name(&self) -> &str {
+        self.title.as_deref().unwrap_or(&self.key)
+    }
+
+    pub fn matches_direction(&self, direction: &str) -> bool {
+        let dir = direction.to_lowercase();
+        self.key.to_lowercase() == dir || self.aliases.iter().any(|a| a.to_lowercase() == dir)
     }
 }

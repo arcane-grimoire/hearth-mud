@@ -9,7 +9,7 @@ use crate::db::Database;
 use crate::locks::{self, AccessContext};
 use crate::softcode::hooks::{self, ProgramRecord};
 use crate::softcode::{self, Budget, Effect, SoftcodeRuntime};
-use crate::world::{self, GameObject, Kind, World};
+use crate::world::{GameObject, Kind, Script, World};
 
 const IAC: u8 = 255;
 const WILL: u8 = 251;
@@ -76,7 +76,6 @@ impl Engine {
             let accounts = db.load_accounts().expect("Failed to load accounts from DB");
             tracing::info!(
                 objects = world.objects.len(),
-                exits = world.exits.len(),
                 "World loaded from database"
             );
             (world, accounts)
@@ -287,7 +286,6 @@ impl Engine {
         match self.db.save_world(&self.world) {
             Ok(()) => tracing::info!(
                 objects = self.world.objects.len(),
-                exits = self.world.exits.len(),
                 "World saved"
             ),
             Err(e) => tracing::error!(error = %e, "Failed to save world"),
@@ -732,8 +730,10 @@ impl Engine {
             room_ref.rsplit('/').next().unwrap_or("unknown"),
             target.rsplit('/').next().unwrap_or("unknown")
         );
-        let exit = world::Exit::new(&exit_ref, &room_ref, &target, &direction);
-        self.world.add_exit(exit);
+        let exit = GameObject::new(&exit_ref, &direction, Kind::Exit)
+            .with_location(&room_ref)
+            .with_target(&target);
+        self.world.add_object(exit);
         format!("Exit '{}' created from {} to {}.\r\n", direction, room_ref, target)
     }
 
@@ -821,8 +821,24 @@ impl Engine {
                 }
             }
             let name = obj.display_name().to_string();
+            // If it's a room, also remove exits that source from or target it
+            if obj.kind == Kind::Room {
+                let exit_refs: Vec<String> = self
+                    .world
+                    .objects
+                    .values()
+                    .filter(|o| {
+                        o.kind == Kind::Exit
+                            && (o.location_ref.as_deref() == Some(target_ref)
+                                || o.target_ref.as_deref() == Some(target_ref))
+                    })
+                    .map(|o| o.ref_id.clone())
+                    .collect();
+                for r in exit_refs {
+                    self.world.objects.remove(&r);
+                }
+            }
             self.world.objects.remove(target_ref);
-            self.world.exits.retain(|e| e.source_ref != target_ref && e.target_ref != target_ref);
             format!("Destroyed {} ({}).\r\n", name, target_ref)
         } else {
             format!("No object with ref '{}'.\r\n", target_ref)
@@ -1234,7 +1250,7 @@ impl Engine {
 
         if let Some(exit) = room_ref.as_deref().and_then(|r| self.world.find_exit(r, cmd)) {
             let exit_ref = exit.ref_id.clone();
-            let target = exit.target_ref.clone();
+            let target = exit.target_ref.clone().unwrap_or_default();
             self.do_move(actor_ref, &exit_ref, &target)
         } else {
             "Huh? Type 'help' for commands.\r\n".to_string()
@@ -1331,9 +1347,8 @@ impl Engine {
         }
         self.do_save();
         format!(
-            "World saved ({} objects, {} exits).\r\n",
-            self.world.objects.len(),
-            self.world.exits.len()
+            "World saved ({} objects).\r\n",
+            self.world.objects.len()
         )
     }
 
@@ -1465,7 +1480,7 @@ impl Engine {
             return format!("Syntax error: {}\r\n", e);
         }
         let is_new = !self.world.scripts.contains_key(name);
-        let script = world::Script::new(name, source);
+        let script = Script::new(name, source);
         self.world.scripts.insert(name.to_string(), script);
         if is_new {
             format!("Script '{}' created (ticks every 1s).\r\n", name)
@@ -1709,7 +1724,10 @@ impl Engine {
             None => return "You're nowhere.\r\n".to_string(),
         };
         let (exit_ref, target_ref) = match self.world.find_exit(&room_ref, args) {
-            Some(e) => (e.ref_id.clone(), e.target_ref.clone()),
+            Some(e) => (
+                e.ref_id.clone(),
+                e.target_ref.clone().unwrap_or_default(),
+            ),
             None => return format!("You can't go '{}'.\r\n", args),
         };
         self.do_move(actor_ref, &exit_ref, &target_ref)
@@ -1725,10 +1743,8 @@ impl Engine {
         // Check traverse lock on the exit (DSL)
         let exit_locks = self
             .world
-            .exits
-            .iter()
-            .find(|e| e.ref_id == exit_ref)
-            .map(|e| e.locks.clone())
+            .get(exit_ref)
+            .map(|o| o.locks.clone())
             .unwrap_or_default();
         if let Some(false) = self.check_lock("traverse", &exit_locks, actor_ref) {
             return "You can't go that way.\r\n".to_string();
@@ -1990,17 +2006,11 @@ impl Engine {
             return format!("Invalid lock expression: {}\r\n", e);
         }
 
-        // Check if it's an exit
-        if let Some(exit) = self.world.exits.iter_mut().find(|e| e.ref_id == resolved) {
-            exit.locks.insert(lock_type.to_string(), expr_str.to_string());
-            return format!("Lock '{}' set on exit {}.\r\n", lock_type, resolved);
-        }
-
         if let Some(obj) = self.world.get_mut(&resolved) {
             obj.locks.insert(lock_type.to_string(), expr_str.to_string());
             format!("Lock '{}' set on {}.\r\n", lock_type, resolved)
         } else {
-            format!("No object or exit with ref '{}'.\r\n", resolved)
+            format!("No object with ref '{}'.\r\n", resolved)
         }
     }
 
@@ -2021,14 +2031,6 @@ impl Engine {
         } else {
             target_ref.to_string()
         };
-
-        if let Some(exit) = self.world.exits.iter_mut().find(|e| e.ref_id == resolved) {
-            if exit.locks.remove(lock_type).is_some() {
-                return format!("Lock '{}' removed from exit {}.\r\n", lock_type, resolved);
-            } else {
-                return format!("Exit {} has no '{}' lock.\r\n", resolved, lock_type);
-            }
-        }
 
         if let Some(obj) = self.world.get_mut(&resolved) {
             if obj.locks.remove(lock_type).is_some() {
@@ -2053,18 +2055,6 @@ impl Engine {
         } else {
             args.trim().to_string()
         };
-
-        // Check exits first
-        if let Some(exit) = self.world.exits.iter().find(|e| e.ref_id == target_ref) {
-            if exit.locks.is_empty() {
-                return format!("Exit {} has no locks.\r\n", target_ref);
-            }
-            let mut out = format!("Locks on exit {}:\r\n", target_ref);
-            for (lock_type, expr) in &exit.locks {
-                out.push_str(&format!("  {}: {}\r\n", lock_type, expr));
-            }
-            return out;
-        }
 
         match self.world.get(&target_ref) {
             Some(obj) => {
@@ -2119,41 +2109,29 @@ fn build_starter_world() -> World {
             .into();
     world.add_object(tavern);
 
-    world.add_exit(
-        world::Exit::new(
-            "area/starter/exit/square_to_market",
-            "area/starter/room/town_square",
-            "area/starter/room/market",
-            "north",
-        )
-        .with_aliases(vec!["n"]),
+    world.add_object(
+        GameObject::new("area/starter/exit/square_to_market", "north", Kind::Exit)
+            .with_location("area/starter/room/town_square")
+            .with_target("area/starter/room/market")
+            .with_aliases(vec!["n"]),
     );
-    world.add_exit(
-        world::Exit::new(
-            "area/starter/exit/market_to_square",
-            "area/starter/room/market",
-            "area/starter/room/town_square",
-            "south",
-        )
-        .with_aliases(vec!["s"]),
+    world.add_object(
+        GameObject::new("area/starter/exit/market_to_square", "south", Kind::Exit)
+            .with_location("area/starter/room/market")
+            .with_target("area/starter/room/town_square")
+            .with_aliases(vec!["s"]),
     );
-    world.add_exit(
-        world::Exit::new(
-            "area/starter/exit/square_to_tavern",
-            "area/starter/room/town_square",
-            "area/starter/room/tavern",
-            "east",
-        )
-        .with_aliases(vec!["e"]),
+    world.add_object(
+        GameObject::new("area/starter/exit/square_to_tavern", "east", Kind::Exit)
+            .with_location("area/starter/room/town_square")
+            .with_target("area/starter/room/tavern")
+            .with_aliases(vec!["e"]),
     );
-    world.add_exit(
-        world::Exit::new(
-            "area/starter/exit/tavern_to_square",
-            "area/starter/room/tavern",
-            "area/starter/room/town_square",
-            "west",
-        )
-        .with_aliases(vec!["w"]),
+    world.add_object(
+        GameObject::new("area/starter/exit/tavern_to_square", "west", Kind::Exit)
+            .with_location("area/starter/room/tavern")
+            .with_target("area/starter/room/town_square")
+            .with_aliases(vec!["w"]),
     );
 
     let sword = GameObject::new(

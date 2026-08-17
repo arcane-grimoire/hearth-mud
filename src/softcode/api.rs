@@ -89,6 +89,7 @@ fn exits_table(lua: &Lua, world: &World, room_ref: &str) -> mlua::Result<Table> 
     let out = lua.create_table()?;
     for (i, exit) in world.exits_from(room_ref).into_iter().enumerate() {
         let e = lua.create_table()?;
+        e.set("ref_id", exit.ref_id.clone())?;
         e.set("key", exit.key.clone())?;
         e.set("target_ref", exit.target_ref.clone())?;
         let aliases = lua.create_table()?;
