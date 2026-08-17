@@ -1,0 +1,4 @@
+/target
+hearth.db
+hearth.db-wal
+hearth.db-shm
