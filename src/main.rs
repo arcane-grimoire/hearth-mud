@@ -1,6 +1,7 @@
 mod accounts;
 mod db;
 mod engine;
+mod locks;
 mod net;
 mod softcode;
 mod world;

@@ -57,6 +57,8 @@ pub struct GameObject {
     pub tags: HashSet<Tag>,
     #[serde(default)]
     pub programs: HashMap<String, ProgramRecord>,
+    #[serde(default)]
+    pub locks: HashMap<String, String>,
     pub id: String,
 }
 
@@ -72,6 +74,7 @@ impl GameObject {
             attrs: HashMap::new(),
             tags: HashSet::new(),
             programs: HashMap::new(),
+            locks: HashMap::new(),
             id: Uuid::new_v4().to_string(),
         }
     }
@@ -103,6 +106,8 @@ pub struct Exit {
     pub target_ref: String,
     pub key: String,
     pub aliases: Vec<String>,
+    #[serde(default)]
+    pub locks: HashMap<String, String>,
     pub id: String,
 }
 
@@ -119,6 +124,7 @@ impl Exit {
             target_ref: target.into(),
             key: key.into(),
             aliases: Vec::new(),
+            locks: HashMap::new(),
             id: Uuid::new_v4().to_string(),
         }
     }

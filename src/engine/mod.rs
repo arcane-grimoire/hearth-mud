@@ -6,9 +6,15 @@ use tokio::sync::mpsc;
 
 use crate::accounts::{AccountStore, Scope};
 use crate::db::Database;
+use crate::locks::{self, AccessContext};
 use crate::softcode::hooks::{self, ProgramRecord};
 use crate::softcode::{self, Budget, Effect, SoftcodeRuntime};
 use crate::world::{self, GameObject, Kind, World};
+
+const IAC: u8 = 255;
+const WILL: u8 = 251;
+const WONT: u8 = 252;
+const ECHO_OPT: u8 = 1;
 
 #[derive(Debug)]
 pub enum EngineMessage {
@@ -23,6 +29,7 @@ pub enum EngineMessage {
         session_id: String,
         input: String,
     },
+    Shutdown,
 }
 
 enum SessionState {
@@ -97,6 +104,9 @@ impl Engine {
                 }
                 EngineMessage::PlayerInput { session_id, input } => {
                     self.handle_input(&session_id, &input);
+                }
+                EngineMessage::Shutdown => {
+                    break;
                 }
             }
         }
@@ -192,6 +202,7 @@ impl Engine {
         if let Some(session) = self.sessions.get_mut(session_id) {
             session.state = SessionState::PromptPassword { username };
         }
+        self.send_echo_off(session_id);
         self.send(session_id, "Password: ");
     }
 
@@ -203,6 +214,8 @@ impl Engine {
             }) => username.clone(),
             _ => return,
         };
+
+        self.send_echo_on(session_id);
 
         match self.accounts.authenticate(&username, input) {
             Ok(account) => {
@@ -223,7 +236,7 @@ impl Engine {
                     } = &other_session.state
                     {
                         if *other_account_id == account_id {
-                            self.send(session_id, "That account is already logged in.\r\nUsername: ");
+                            self.send(session_id, "\r\nThat account is already logged in.\r\nUsername: ");
                             if let Some(session) = self.sessions.get_mut(session_id) {
                                 session.state = SessionState::PromptUsername;
                             }
@@ -275,6 +288,7 @@ impl Engine {
         if let Some(session) = self.sessions.get_mut(session_id) {
             session.state = SessionState::CreatePassword { username };
         }
+        self.send_echo_off(session_id);
         self.send(session_id, "Choose a password (6+ characters): ");
     }
 
@@ -311,13 +325,15 @@ impl Engine {
         if input != password {
             self.send(
                 session_id,
-                "Passwords don't match.\r\nChoose a password (6+ characters): ",
+                "\r\nPasswords don't match.\r\nChoose a password (6+ characters): ",
             );
             if let Some(session) = self.sessions.get_mut(session_id) {
                 session.state = SessionState::CreatePassword { username };
             }
             return;
         }
+
+        self.send_echo_on(session_id);
 
         match self.accounts.create(&username, &password) {
             Ok(account) => {
@@ -421,16 +437,16 @@ impl Engine {
 
         let output = match cmd.as_str() {
             // Player commands
-            "look" | "l" => commands::do_look(&self.world, &actor_ref),
+            "look" | "l" => self.cmd_look(&actor_ref, &args),
             "say" | "\"" => {
                 let msg = if cmd == "\"" {
                     input[1..].trim().to_string()
                 } else {
                     args.clone()
                 };
-                self.do_say(session_id, &actor_ref, &msg)
+                self.cmd_say(session_id, &actor_ref, &msg)
             }
-            "go" => commands::do_go(&mut self.world, &actor_ref, &args),
+            "go" => self.cmd_go(&actor_ref, &args),
             "quit" | "q" => {
                 self.send(session_id, "Farewell.\r\n");
                 self.handle_disconnect(session_id);
@@ -438,9 +454,17 @@ impl Engine {
             }
             "inventory" | "inv" | "i" => commands::do_inventory(&self.world, &actor_ref),
             "get" | "take" => self.cmd_get(&actor_ref, &args),
-            "drop" => commands::do_drop(&mut self.world, &actor_ref, &args),
+            "drop" => self.cmd_drop(&actor_ref, &args),
             "examine" | "ex" => commands::do_examine(&self.world, &actor_ref, &args),
             "who" => self.do_who(session_id),
+            "emote" | "pose" | ":" => {
+                let msg = if cmd == ":" {
+                    input[1..].trim().to_string()
+                } else {
+                    args.clone()
+                };
+                self.do_emote(session_id, &actor_ref, &msg)
+            }
 
             // Builder commands (@ prefix)
             "@dig" => self.cmd_dig(session_id, &args),
@@ -454,6 +478,11 @@ impl Engine {
             "@program" => self.cmd_program(session_id, &actor_ref, &args),
             "@programs" => self.cmd_programs(session_id, &actor_ref, &args),
             "@rmprogram" => self.cmd_rmprogram(session_id, &actor_ref, &args),
+            "@tag" => self.cmd_tag(session_id, &actor_ref, &args),
+            "@untag" => self.cmd_untag(session_id, &actor_ref, &args),
+            "@lock" => self.cmd_lock(session_id, &actor_ref, &args),
+            "@unlock" => self.cmd_unlock(session_id, &actor_ref, &args),
+            "@locks" => self.cmd_locks(session_id, &actor_ref, &args),
 
             // Admin commands
             "@grant" => self.cmd_grant(session_id, &args),
@@ -462,6 +491,7 @@ impl Engine {
             "@wall" => self.cmd_wall(session_id, &args),
             "@boot" => self.cmd_boot(session_id, &args),
             "@save" => self.cmd_save(session_id),
+            "@shutdown" => self.cmd_shutdown(session_id),
 
             "help" | "?" => {
                 let is_builder = self.session_has_scope(session_id, Scope::Builder);
@@ -1018,8 +1048,9 @@ impl Engine {
         }
 
         if let Some(exit) = room_ref.as_deref().and_then(|r| self.world.find_exit(r, cmd)) {
+            let exit_ref = exit.ref_id.clone();
             let target = exit.target_ref.clone();
-            commands::move_player(&mut self.world, actor_ref, &target)
+            self.do_move(actor_ref, &exit_ref, &target)
         } else {
             "Huh? Type 'help' for commands.\r\n".to_string()
         }
@@ -1157,40 +1188,6 @@ impl Engine {
         }
     }
 
-    fn do_say(&self, speaker_session: &str, actor_ref: &str, message: &str) -> String {
-        if message.is_empty() {
-            return "Say what?\r\n".to_string();
-        }
-
-        let actor = match self.world.get(actor_ref) {
-            Some(a) => a,
-            None => return "You don't exist.\r\n".to_string(),
-        };
-
-        let room_ref = match &actor.location_ref {
-            Some(r) => r.clone(),
-            None => return "You're nowhere.\r\n".to_string(),
-        };
-
-        let speaker_name = actor.display_name().to_string();
-
-        let others_msg = format!("{} says, \"{}\"\r\n", speaker_name, message);
-        for (sid, session) in &self.sessions {
-            if sid == speaker_session {
-                continue;
-            }
-            if let SessionState::Playing { actor_ref, .. } = &session.state {
-                if let Some(other_actor) = self.world.get(actor_ref) {
-                    if other_actor.location_ref.as_deref() == Some(&room_ref) {
-                        let _ = session.tx.send(others_msg.clone());
-                    }
-                }
-            }
-        }
-
-        format!("You say, \"{}\"\r\n", message)
-    }
-
     fn do_who(&self, _session_id: &str) -> String {
         let mut out = "\r\nOnline players:\r\n".to_string();
         let mut count = 0;
@@ -1220,6 +1217,500 @@ impl Engine {
     fn send(&self, session_id: &str, msg: &str) {
         if let Some(session) = self.sessions.get(session_id) {
             let _ = session.tx.send(msg.to_string());
+        }
+    }
+
+    fn send_echo_off(&self, session_id: &str) {
+        self.send(session_id, &String::from_utf8_lossy(&[IAC, WILL, ECHO_OPT]).to_string());
+    }
+
+    fn send_echo_on(&self, session_id: &str) {
+        self.send(session_id, &String::from_utf8_lossy(&[IAC, WONT, ECHO_OPT]).to_string());
+    }
+
+    fn do_emote(&self, speaker_session: &str, actor_ref: &str, message: &str) -> String {
+        if message.is_empty() {
+            return "Emote what?\r\n".to_string();
+        }
+
+        let actor = match self.world.get(actor_ref) {
+            Some(a) => a,
+            None => return "You don't exist.\r\n".to_string(),
+        };
+
+        let room_ref = match &actor.location_ref {
+            Some(r) => r.clone(),
+            None => return "You're nowhere.\r\n".to_string(),
+        };
+
+        let name = actor.display_name().to_string();
+
+        let others_msg = format!("{} {}\r\n", name, message);
+        for (sid, session) in &self.sessions {
+            if sid == speaker_session {
+                continue;
+            }
+            if let SessionState::Playing { actor_ref, .. } = &session.state {
+                if let Some(other_actor) = self.world.get(actor_ref) {
+                    if other_actor.location_ref.as_deref() == Some(&room_ref) {
+                        let _ = session.tx.send(others_msg.clone());
+                    }
+                }
+            }
+        }
+
+        format!("{} {}\r\n", name, message)
+    }
+
+    fn cmd_tag(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Builder) {
+            return "Permission denied.\r\n".to_string();
+        }
+        // @tag <ref> = <tag_spec>
+        let (target_ref, tag_spec) = match args.split_once('=') {
+            Some((r, t)) => (r.trim(), t.trim()),
+            None => return "Usage: @tag <ref> = <tag_spec>\r\n".to_string(),
+        };
+        if target_ref.is_empty() || tag_spec.is_empty() {
+            return "Usage: @tag <ref> = <tag_spec>\r\n".to_string();
+        }
+        let resolved = if target_ref == "here" {
+            match self.world.get(actor_ref).and_then(|a| a.location_ref.clone()) {
+                Some(r) => r,
+                None => return "You're nowhere.\r\n".to_string(),
+            }
+        } else {
+            target_ref.to_string()
+        };
+        let tag = match crate::world::Tag::parse(tag_spec) {
+            Ok(t) => t,
+            Err(e) => return format!("{}\r\n", e),
+        };
+        if let Some(obj) = self.world.get_mut(&resolved) {
+            obj.tags.insert(tag.clone());
+            format!("Tag '{}' added to {}.\r\n", tag.as_spec(), resolved)
+        } else {
+            format!("No object with ref '{}'.\r\n", resolved)
+        }
+    }
+
+    fn cmd_untag(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Builder) {
+            return "Permission denied.\r\n".to_string();
+        }
+        let (target_ref, tag_spec) = match args.split_once('=') {
+            Some((r, t)) => (r.trim(), t.trim()),
+            None => return "Usage: @untag <ref> = <tag_spec>\r\n".to_string(),
+        };
+        if target_ref.is_empty() || tag_spec.is_empty() {
+            return "Usage: @untag <ref> = <tag_spec>\r\n".to_string();
+        }
+        let resolved = if target_ref == "here" {
+            match self.world.get(actor_ref).and_then(|a| a.location_ref.clone()) {
+                Some(r) => r,
+                None => return "You're nowhere.\r\n".to_string(),
+            }
+        } else {
+            target_ref.to_string()
+        };
+        let tag = match crate::world::Tag::parse(tag_spec) {
+            Ok(t) => t,
+            Err(e) => return format!("{}\r\n", e),
+        };
+        if let Some(obj) = self.world.get_mut(&resolved) {
+            if obj.tags.remove(&tag) {
+                format!("Tag '{}' removed from {}.\r\n", tag.as_spec(), resolved)
+            } else {
+                format!("Object {} doesn't have tag '{}'.\r\n", resolved, tag.as_spec())
+            }
+        } else {
+            format!("No object with ref '{}'.\r\n", resolved)
+        }
+    }
+
+    fn cmd_shutdown(&mut self, session_id: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Admin) {
+            return "Permission denied.\r\n".to_string();
+        }
+        self.broadcast_to_all("\r\n[ADMIN] Server is shutting down...\r\n", "");
+        self.do_save();
+        self.rx.close();
+        "Shutting down.\r\n".to_string()
+    }
+
+    // -- Hook-aware gameplay commands --
+
+    fn account_scopes_for_actor(&self, actor_ref: &str) -> Vec<String> {
+        for session in self.sessions.values() {
+            if let SessionState::Playing {
+                actor_ref: ar,
+                account_id,
+                ..
+            } = &session.state
+            {
+                if ar == actor_ref {
+                    if let Some(acct) = self.accounts.get(account_id) {
+                        return acct.scope_labels().iter().map(|s| s.to_string()).collect();
+                    }
+                }
+            }
+        }
+        vec![]
+    }
+
+    fn check_lock(
+        &self,
+        lock_type: &str,
+        locks: &HashMap<String, String>,
+        actor_ref: &str,
+    ) -> Option<bool> {
+        let expr_str = locks.get(lock_type)?;
+        let actor = self.world.get(actor_ref)?;
+        let scopes = self.account_scopes_for_actor(actor_ref);
+        let ctx = AccessContext {
+            actor,
+            world: &self.world,
+            account_scopes: &scopes,
+        };
+        match locks::evaluate_lock_string(expr_str, &ctx) {
+            Ok(result) => Some(result),
+            Err(e) => {
+                tracing::warn!(lock_type, error = %e, "Lock evaluation error");
+                Some(false)
+            }
+        }
+    }
+
+    fn cmd_look(&mut self, actor_ref: &str, args: &str) -> String {
+        if !args.is_empty() {
+            let room_ref = self
+                .world
+                .get(actor_ref)
+                .and_then(|a| a.location_ref.clone())
+                .unwrap_or_default();
+            let target_name = args.to_lowercase();
+            let target_ref = self
+                .world
+                .objects_in(&room_ref)
+                .into_iter()
+                .chain(self.world.objects_in(actor_ref))
+                .find(|o| {
+                    o.key.to_lowercase().contains(&target_name)
+                        || o.display_name().to_lowercase().contains(&target_name)
+                })
+                .map(|o| o.ref_id.clone());
+
+            if let Some(ref target_ref) = target_ref {
+                let locks = self
+                    .world
+                    .get(target_ref)
+                    .map(|o| o.locks.clone())
+                    .unwrap_or_default();
+                if let Some(false) = self.check_lock("look", &locks, actor_ref) {
+                    return "You can't see that.\r\n".to_string();
+                }
+                if let Ok(run) = self.fire_hook(target_ref, "can_look", actor_ref, Some(&room_ref), None) {
+                    if run.denied {
+                        return if run.emitted_to_actor {
+                            String::new()
+                        } else {
+                            "You can't see that.\r\n".to_string()
+                        };
+                    }
+                }
+                let _ = self.fire_hook(target_ref, "on_look", actor_ref, Some(&room_ref), None);
+            }
+            return commands::do_examine(&self.world, actor_ref, args);
+        }
+
+        commands::do_look(&self.world, actor_ref)
+    }
+
+    fn cmd_go(&mut self, actor_ref: &str, args: &str) -> String {
+        if args.is_empty() {
+            return "Go where?\r\n".to_string();
+        }
+        let room_ref = match self.world.get(actor_ref).and_then(|a| a.location_ref.clone()) {
+            Some(r) => r,
+            None => return "You're nowhere.\r\n".to_string(),
+        };
+        let (exit_ref, target_ref) = match self.world.find_exit(&room_ref, args) {
+            Some(e) => (e.ref_id.clone(), e.target_ref.clone()),
+            None => return format!("You can't go '{}'.\r\n", args),
+        };
+        self.do_move(actor_ref, &exit_ref, &target_ref)
+    }
+
+    fn do_move(&mut self, actor_ref: &str, exit_ref: &str, target_ref: &str) -> String {
+        let old_room = self
+            .world
+            .get(actor_ref)
+            .and_then(|a| a.location_ref.clone())
+            .unwrap_or_default();
+
+        // Check traverse lock on the exit
+        let exit_locks = self
+            .world
+            .exits
+            .iter()
+            .find(|e| e.ref_id == exit_ref)
+            .map(|e| e.locks.clone())
+            .unwrap_or_default();
+        if let Some(false) = self.check_lock("traverse", &exit_locks, actor_ref) {
+            return "You can't go that way.\r\n".to_string();
+        }
+
+        // Check enter lock on the destination room
+        let room_locks = self
+            .world
+            .get(target_ref)
+            .map(|o| o.locks.clone())
+            .unwrap_or_default();
+        if let Some(false) = self.check_lock("enter", &room_locks, actor_ref) {
+            return "You can't go there.\r\n".to_string();
+        }
+
+        // Fire on_leave on old room
+        let _ = self.fire_hook(&old_room, "on_leave", actor_ref, Some(&old_room), None);
+
+        // Move the player
+        if self.world.get(target_ref).is_none() {
+            return "That destination doesn't exist.\r\n".to_string();
+        }
+        if let Some(actor) = self.world.get_mut(actor_ref) {
+            actor.location_ref = Some(target_ref.to_string());
+        }
+
+        // Fire on_enter on new room
+        let _ = self.fire_hook(target_ref, "on_enter", actor_ref, Some(target_ref), None);
+
+        commands::do_look(&self.world, actor_ref)
+    }
+
+    fn cmd_drop(&mut self, actor_ref: &str, args: &str) -> String {
+        if args.is_empty() {
+            return "Drop what?\r\n".to_string();
+        }
+        let room_ref = match self.world.get(actor_ref).and_then(|a| a.location_ref.clone()) {
+            Some(r) => r,
+            None => return "You're nowhere.\r\n".to_string(),
+        };
+        let target_name = args.to_lowercase();
+        let item_ref = self
+            .world
+            .objects_in(actor_ref)
+            .into_iter()
+            .find(|o| {
+                o.kind == Kind::Item
+                    && (o.key.to_lowercase().contains(&target_name)
+                        || o.display_name().to_lowercase().contains(&target_name))
+            })
+            .map(|o| o.ref_id.clone());
+
+        let item_ref = match item_ref {
+            Some(r) => r,
+            None => return format!("You aren't carrying '{}'.\r\n", args),
+        };
+
+        // Check can_drop hook
+        match self.fire_hook(&item_ref, "can_drop", actor_ref, Some(&room_ref), None) {
+            Ok(run) if run.denied => {
+                return if run.emitted_to_actor {
+                    String::new()
+                } else {
+                    "You can't drop that.\r\n".to_string()
+                };
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(hook = "can_drop", target = %item_ref, error = %e, "softcode error");
+            }
+        }
+
+        let name = self.world.get(&item_ref).unwrap().display_name().to_string();
+        if let Some(obj) = self.world.get_mut(&item_ref) {
+            obj.location_ref = Some(room_ref.clone());
+        }
+
+        // Fire on_drop
+        let _ = self.fire_hook(&item_ref, "on_drop", actor_ref, Some(&room_ref), None);
+
+        format!("You drop {}.\r\n", name)
+    }
+
+    fn cmd_say(&mut self, speaker_session: &str, actor_ref: &str, message: &str) -> String {
+        if message.is_empty() {
+            return "Say what?\r\n".to_string();
+        }
+
+        let actor = match self.world.get(actor_ref) {
+            Some(a) => a,
+            None => return "You don't exist.\r\n".to_string(),
+        };
+        let room_ref = match &actor.location_ref {
+            Some(r) => r.clone(),
+            None => return "You're nowhere.\r\n".to_string(),
+        };
+
+        // Check can_say on the room
+        match self.fire_hook(&room_ref, "can_say", actor_ref, Some(&room_ref), None) {
+            Ok(run) if run.denied => {
+                return if run.emitted_to_actor {
+                    String::new()
+                } else {
+                    "You can't speak here.\r\n".to_string()
+                };
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(hook = "can_say", target = %room_ref, error = %e, "softcode error");
+            }
+        }
+
+        let speaker_name = self
+            .world
+            .get(actor_ref)
+            .map(|a| a.display_name().to_string())
+            .unwrap_or_default();
+
+        let others_msg = format!("{} says, \"{}\"\r\n", speaker_name, message);
+        for (sid, session) in &self.sessions {
+            if sid == speaker_session {
+                continue;
+            }
+            if let SessionState::Playing { actor_ref: ar, .. } = &session.state {
+                if let Some(other_actor) = self.world.get(ar) {
+                    if other_actor.location_ref.as_deref() == Some(&room_ref) {
+                        let _ = session.tx.send(others_msg.clone());
+                    }
+                }
+            }
+        }
+
+        // Fire on_say on the room
+        let _ = self.fire_hook(&room_ref, "on_say", actor_ref, Some(&room_ref), None);
+
+        format!("You say, \"{}\"\r\n", message)
+    }
+
+    // -- Lock builder commands --
+
+    fn cmd_lock(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Builder) {
+            return "Permission denied.\r\n".to_string();
+        }
+        // @lock <ref>/<type> = <expression>
+        let (path, expr_str) = match args.split_once('=') {
+            Some((p, e)) => (p.trim(), e.trim()),
+            None => return "Usage: @lock <ref>/<type> = <expression>\r\nTypes: traverse, get, drop, enter, use, look, teleport\r\n".to_string(),
+        };
+        let (target_ref, lock_type) = match path.rsplit_once('/') {
+            Some((r, t)) => (r.trim(), t.trim()),
+            None => return "Usage: @lock <ref>/<type> = <expression>\r\n".to_string(),
+        };
+        let resolved = if target_ref == "here" {
+            match self.world.get(actor_ref).and_then(|a| a.location_ref.clone()) {
+                Some(r) => r,
+                None => return "You're nowhere.\r\n".to_string(),
+            }
+        } else {
+            target_ref.to_string()
+        };
+
+        // Validate the expression parses
+        if let Err(e) = locks::parse(expr_str) {
+            return format!("Invalid lock expression: {}\r\n", e);
+        }
+
+        // Check if it's an exit
+        if let Some(exit) = self.world.exits.iter_mut().find(|e| e.ref_id == resolved) {
+            exit.locks.insert(lock_type.to_string(), expr_str.to_string());
+            return format!("Lock '{}' set on exit {}.\r\n", lock_type, resolved);
+        }
+
+        if let Some(obj) = self.world.get_mut(&resolved) {
+            obj.locks.insert(lock_type.to_string(), expr_str.to_string());
+            format!("Lock '{}' set on {}.\r\n", lock_type, resolved)
+        } else {
+            format!("No object or exit with ref '{}'.\r\n", resolved)
+        }
+    }
+
+    fn cmd_unlock(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Builder) {
+            return "Permission denied.\r\n".to_string();
+        }
+        // @unlock <ref>/<type>
+        let (target_ref, lock_type) = match args.trim().rsplit_once('/') {
+            Some((r, t)) => (r.trim(), t.trim()),
+            None => return "Usage: @unlock <ref>/<type>\r\n".to_string(),
+        };
+        let resolved = if target_ref == "here" {
+            match self.world.get(actor_ref).and_then(|a| a.location_ref.clone()) {
+                Some(r) => r,
+                None => return "You're nowhere.\r\n".to_string(),
+            }
+        } else {
+            target_ref.to_string()
+        };
+
+        if let Some(exit) = self.world.exits.iter_mut().find(|e| e.ref_id == resolved) {
+            if exit.locks.remove(lock_type).is_some() {
+                return format!("Lock '{}' removed from exit {}.\r\n", lock_type, resolved);
+            } else {
+                return format!("Exit {} has no '{}' lock.\r\n", resolved, lock_type);
+            }
+        }
+
+        if let Some(obj) = self.world.get_mut(&resolved) {
+            if obj.locks.remove(lock_type).is_some() {
+                format!("Lock '{}' removed from {}.\r\n", lock_type, resolved)
+            } else {
+                format!("{} has no '{}' lock.\r\n", resolved, lock_type)
+            }
+        } else {
+            format!("No object or exit with ref '{}'.\r\n", resolved)
+        }
+    }
+
+    fn cmd_locks(&self, session_id: &str, actor_ref: &str, args: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Builder) {
+            return "Permission denied.\r\n".to_string();
+        }
+        let target_ref = if args.trim().is_empty() {
+            self.world
+                .get(actor_ref)
+                .and_then(|a| a.location_ref.clone())
+                .unwrap_or_default()
+        } else {
+            args.trim().to_string()
+        };
+
+        // Check exits first
+        if let Some(exit) = self.world.exits.iter().find(|e| e.ref_id == target_ref) {
+            if exit.locks.is_empty() {
+                return format!("Exit {} has no locks.\r\n", target_ref);
+            }
+            let mut out = format!("Locks on exit {}:\r\n", target_ref);
+            for (lock_type, expr) in &exit.locks {
+                out.push_str(&format!("  {}: {}\r\n", lock_type, expr));
+            }
+            return out;
+        }
+
+        match self.world.get(&target_ref) {
+            Some(obj) => {
+                if obj.locks.is_empty() {
+                    format!("{} has no locks.\r\n", target_ref)
+                } else {
+                    let mut out = format!("Locks on {}:\r\n", target_ref);
+                    for (lock_type, expr) in &obj.locks {
+                        out.push_str(&format!("  {}: {}\r\n", lock_type, expr));
+                    }
+                    out
+                }
+            }
+            None => format!("No object with ref '{}'.\r\n", target_ref),
         }
     }
 }

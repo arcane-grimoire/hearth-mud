@@ -39,6 +39,7 @@ impl Database {
                 location_ref TEXT,
                 attrs_json TEXT NOT NULL DEFAULT '{}',
                 programs_json TEXT NOT NULL DEFAULT '{}',
+                locks_json TEXT NOT NULL DEFAULT '{}',
                 id TEXT NOT NULL
             );
 
@@ -55,15 +56,20 @@ impl Database {
                 target_ref TEXT NOT NULL,
                 key TEXT NOT NULL,
                 aliases_json TEXT NOT NULL DEFAULT '[]',
+                locks_json TEXT NOT NULL DEFAULT '{}',
                 id TEXT NOT NULL
             );",
         )?;
 
-        // Databases created before Programs existed won't have this column;
-        // CREATE TABLE IF NOT EXISTS above is a no-op for them.
         let _ = self
             .conn
             .execute("ALTER TABLE objects ADD COLUMN programs_json TEXT NOT NULL DEFAULT '{}'", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE objects ADD COLUMN locks_json TEXT NOT NULL DEFAULT '{}'", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE exits ADD COLUMN locks_json TEXT NOT NULL DEFAULT '{}'", []);
 
         Ok(())
     }
@@ -130,7 +136,7 @@ impl Database {
 
         {
             let mut obj_stmt = tx.prepare(
-                "INSERT INTO objects (ref_id, key, kind, title, description, location_ref, attrs_json, programs_json, id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO objects (ref_id, key, kind, title, description, location_ref, attrs_json, programs_json, locks_json, id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?;
             let mut tag_stmt = tx.prepare(
                 "INSERT INTO tags (object_ref, category, key) VALUES (?1, ?2, ?3)",
@@ -141,6 +147,8 @@ impl Database {
                 let attrs_json = serde_json::to_string(&obj.attrs).unwrap_or_else(|_| "{}".into());
                 let programs_json =
                     serde_json::to_string(&obj.programs).unwrap_or_else(|_| "{}".into());
+                let locks_json =
+                    serde_json::to_string(&obj.locks).unwrap_or_else(|_| "{}".into());
                 obj_stmt.execute(params![
                     obj.ref_id,
                     obj.key,
@@ -150,6 +158,7 @@ impl Database {
                     obj.location_ref,
                     attrs_json,
                     programs_json,
+                    locks_json,
                     obj.id,
                 ])?;
                 for tag in &obj.tags {
@@ -160,16 +169,18 @@ impl Database {
 
         {
             let mut exit_stmt = tx.prepare(
-                "INSERT INTO exits (ref_id, source_ref, target_ref, key, aliases_json, id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO exits (ref_id, source_ref, target_ref, key, aliases_json, locks_json, id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
             for exit in &world.exits {
                 let aliases_json = serde_json::to_string(&exit.aliases).unwrap_or_else(|_| "[]".into());
+                let locks_json = serde_json::to_string(&exit.locks).unwrap_or_else(|_| "{}".into());
                 exit_stmt.execute(params![
                     exit.ref_id,
                     exit.source_ref,
                     exit.target_ref,
                     exit.key,
                     aliases_json,
+                    locks_json,
                     exit.id,
                 ])?;
             }
@@ -182,7 +193,7 @@ impl Database {
         let mut world = World::new();
 
         let mut obj_stmt = self.conn.prepare(
-            "SELECT ref_id, key, kind, title, description, location_ref, attrs_json, programs_json, id FROM objects",
+            "SELECT ref_id, key, kind, title, description, location_ref, attrs_json, programs_json, locks_json, id FROM objects",
         )?;
         let obj_rows = obj_stmt.query_map([], |row| {
             let ref_id: String = row.get(0)?;
@@ -193,23 +204,17 @@ impl Database {
             let location_ref: Option<String> = row.get(5)?;
             let attrs_json: String = row.get(6)?;
             let programs_json: String = row.get(7)?;
-            let id: String = row.get(8)?;
+            let locks_json: String = row.get(8)?;
+            let id: String = row.get(9)?;
             Ok((
-                ref_id,
-                key,
-                kind_str,
-                title,
-                description,
-                location_ref,
-                attrs_json,
-                programs_json,
-                id,
+                ref_id, key, kind_str, title, description, location_ref,
+                attrs_json, programs_json, locks_json, id,
             ))
         })?;
 
         for row in obj_rows {
-            let (ref_id, key, kind_str, title, description, location_ref, attrs_json, programs_json, id) =
-                row?;
+            let (ref_id, key, kind_str, title, description, location_ref,
+                attrs_json, programs_json, locks_json, id) = row?;
             let kind = match kind_str.as_str() {
                 "room" => Kind::Room,
                 "item" => Kind::Item,
@@ -221,6 +226,8 @@ impl Database {
                 serde_json::from_str(&attrs_json).unwrap_or_default();
             let programs: HashMap<String, ProgramRecord> =
                 serde_json::from_str(&programs_json).unwrap_or_default();
+            let locks: HashMap<String, String> =
+                serde_json::from_str(&locks_json).unwrap_or_default();
             let obj = GameObject {
                 ref_id: ref_id.clone(),
                 key,
@@ -231,6 +238,7 @@ impl Database {
                 attrs,
                 tags: HashSet::new(),
                 programs,
+                locks,
                 id,
             };
             world.add_object(obj);
@@ -255,7 +263,7 @@ impl Database {
 
         // Load exits
         let mut exit_stmt = self.conn.prepare(
-            "SELECT ref_id, source_ref, target_ref, key, aliases_json, id FROM exits",
+            "SELECT ref_id, source_ref, target_ref, key, aliases_json, locks_json, id FROM exits",
         )?;
         let exit_rows = exit_stmt.query_map([], |row| {
             let ref_id: String = row.get(0)?;
@@ -263,18 +271,21 @@ impl Database {
             let target_ref: String = row.get(2)?;
             let key: String = row.get(3)?;
             let aliases_json: String = row.get(4)?;
-            let id: String = row.get(5)?;
-            Ok((ref_id, source_ref, target_ref, key, aliases_json, id))
+            let locks_json: String = row.get(5)?;
+            let id: String = row.get(6)?;
+            Ok((ref_id, source_ref, target_ref, key, aliases_json, locks_json, id))
         })?;
         for row in exit_rows {
-            let (ref_id, source_ref, target_ref, key, aliases_json, id) = row?;
+            let (ref_id, source_ref, target_ref, key, aliases_json, locks_json, id) = row?;
             let aliases: Vec<String> = serde_json::from_str(&aliases_json).unwrap_or_default();
+            let locks: HashMap<String, String> = serde_json::from_str(&locks_json).unwrap_or_default();
             let exit = Exit {
                 ref_id,
                 source_ref,
                 target_ref,
                 key,
                 aliases,
+                locks,
                 id,
             };
             world.add_exit(exit);

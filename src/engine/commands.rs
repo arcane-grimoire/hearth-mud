@@ -204,6 +204,7 @@ pub fn do_help_with_roles(is_builder: bool, is_admin: bool) -> String {
         "  drop <item>       - Drop an item\r\n",
         "  inventory (i)     - Check what you're carrying\r\n",
         "  examine <target>  - Examine something closely\r\n",
+        "  emote <action>    - Emote (or :action)\r\n",
         "  who               - See who's online\r\n",
         "  quit              - Disconnect\r\n",
         "  help (?)          - This message\r\n",
@@ -224,6 +225,11 @@ pub fn do_help_with_roles(is_builder: bool, is_admin: bool) -> String {
             "  @program <ref>/<hook> = <luau>   - Attach a Luau program to a hook\r\n",
             "  @programs [<ref>]                - List programs (default: room)\r\n",
             "  @rmprogram <ref>/<hook>          - Remove a program\r\n",
+            "  @tag <ref> = <tag_spec>          - Add a tag\r\n",
+            "  @untag <ref> = <tag_spec>        - Remove a tag\r\n",
+            "  @lock <ref>/<type> = <expr>      - Set a lock\r\n",
+            "  @unlock <ref>/<type>             - Remove a lock\r\n",
+            "  @locks [<ref>]                   - View locks\r\n",
         ));
     }
 
@@ -236,6 +242,7 @@ pub fn do_help_with_roles(is_builder: bool, is_admin: bool) -> String {
             "  @wall <message>                  - Broadcast to all players\r\n",
             "  @boot <user>                     - Disconnect a player\r\n",
             "  @save                            - Save world to database\r\n",
+            "  @shutdown                        - Graceful server shutdown\r\n",
         ));
     }
 
