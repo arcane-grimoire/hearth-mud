@@ -62,6 +62,17 @@ pub enum Intent {
         description: Option<String>,
         location: String,
     },
+    SetTitle {
+        target: String,
+        title: String,
+    },
+    SetDescription {
+        target: String,
+        description: String,
+    },
+    Destroy {
+        target: String,
+    },
 }
 
 /// The intents a Program has queued during a single run. Collected while the
@@ -202,6 +213,26 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                     obj = obj.with_description(d.clone());
                 }
                 world.add_object(obj);
+            }
+            Intent::SetTitle { target, title } => {
+                let obj = world
+                    .get_mut(target)
+                    .ok_or_else(|| format!("set_title: no object '{}'", target))?;
+                obj.title = Some(title.clone());
+            }
+            Intent::SetDescription { target, description } => {
+                let obj = world
+                    .get_mut(target)
+                    .ok_or_else(|| format!("set_description: no object '{}'", target))?;
+                obj.description = description.clone();
+            }
+            Intent::Destroy { target } => {
+                if target.starts_with("player/") {
+                    return Err("destroy: cannot destroy player objects".into());
+                }
+                if world.objects.remove(target).is_none() {
+                    return Err(format!("destroy: no object '{}'", target));
+                }
             }
         }
     }

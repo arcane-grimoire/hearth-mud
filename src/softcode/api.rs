@@ -207,6 +207,169 @@ pub fn install<'scope, 'env>(
         })?,
     )?;
 
+    // -- Extended read API --
+
+    env.set(
+        "find_by_tag",
+        scope.create_function(move |lua, spec: String| {
+            let tag = parse_tag(&spec)?;
+            let out = lua.create_table()?;
+            let mut i = 1;
+            for obj in world.objects.values() {
+                if obj.tags.contains(&tag) {
+                    out.set(i, object_to_table(lua, obj)?)?;
+                    i += 1;
+                }
+            }
+            Ok(out)
+        })?,
+    )?;
+
+    env.set(
+        "find_in_room",
+        scope.create_function(move |lua, (r, name): (Value, String)| {
+            let room = ref_of(&r)?;
+            let lower = name.to_lowercase();
+            for obj in world.objects_in(&room) {
+                if obj.key.to_lowercase().contains(&lower)
+                    || obj.display_name().to_lowercase().contains(&lower)
+                {
+                    return object_to_value(lua, world, &obj.ref_id);
+                }
+            }
+            Ok(Value::Nil)
+        })?,
+    )?;
+
+    env.set(
+        "get_inventory",
+        scope.create_function(move |lua, r: Value| {
+            let r = ref_of(&r)?;
+            let out = lua.create_table()?;
+            let mut i = 1;
+            for obj in world.objects_in(&r) {
+                if obj.kind == Kind::Item {
+                    out.set(i, object_to_table(lua, obj)?)?;
+                    i += 1;
+                }
+            }
+            Ok(out)
+        })?,
+    )?;
+
+    env.set(
+        "get_players_in_room",
+        scope.create_function(move |lua, r: Value| {
+            let r = ref_of(&r)?;
+            let offline = Tag { category: "system".into(), key: "offline".into() };
+            let out = lua.create_table()?;
+            let mut i = 1;
+            for obj in world.objects_in(&r) {
+                if obj.kind == Kind::Player && !obj.tags.contains(&offline) {
+                    out.set(i, object_to_table(lua, obj)?)?;
+                    i += 1;
+                }
+            }
+            Ok(out)
+        })?,
+    )?;
+
+    env.set(
+        "get_all_by_kind",
+        scope.create_function(move |lua, kind_str: String| {
+            let kind = Kind::parse(&kind_str).ok_or_else(|| {
+                mlua::Error::RuntimeError(format!("unknown kind '{}'", kind_str))
+            })?;
+            let out = lua.create_table()?;
+            let mut i = 1;
+            for obj in world.objects.values() {
+                if obj.kind == kind {
+                    out.set(i, object_to_table(lua, obj)?)?;
+                    i += 1;
+                }
+            }
+            Ok(out)
+        })?,
+    )?;
+
+    // -- Predicates --
+
+    env.set(
+        "is_player",
+        scope.create_function(move |_, r: Value| {
+            let r = ref_of(&r)?;
+            Ok(world.get(&r).map(|o| o.kind == Kind::Player).unwrap_or(false))
+        })?,
+    )?;
+
+    env.set(
+        "is_npc",
+        scope.create_function(move |_, r: Value| {
+            let r = ref_of(&r)?;
+            Ok(world.get(&r).map(|o| o.kind == Kind::Npc).unwrap_or(false))
+        })?,
+    )?;
+
+    env.set(
+        "is_item",
+        scope.create_function(move |_, r: Value| {
+            let r = ref_of(&r)?;
+            Ok(world.get(&r).map(|o| o.kind == Kind::Item).unwrap_or(false))
+        })?,
+    )?;
+
+    env.set(
+        "is_room",
+        scope.create_function(move |_, r: Value| {
+            let r = ref_of(&r)?;
+            Ok(world.get(&r).map(|o| o.kind == Kind::Room).unwrap_or(false))
+        })?,
+    )?;
+
+    env.set(
+        "is_exit",
+        scope.create_function(move |_, r: Value| {
+            let r = ref_of(&r)?;
+            Ok(world.get(&r).map(|o| o.kind == Kind::Exit).unwrap_or(false))
+        })?,
+    )?;
+
+    env.set(
+        "exists",
+        scope.create_function(move |_, r: Value| {
+            let r = ref_of(&r)?;
+            Ok(world.get(&r).is_some())
+        })?,
+    )?;
+
+    env.set(
+        "is_carrying",
+        scope.create_function(move |_, (actor, item_tag): (Value, String)| {
+            let actor_ref = ref_of(&actor)?;
+            let tag = parse_tag(&item_tag)?;
+            Ok(world.objects_in(&actor_ref).iter().any(|o| o.tags.contains(&tag)))
+        })?,
+    )?;
+
+    env.set(
+        "same_room",
+        scope.create_function(move |_, (a, b): (Value, Value)| {
+            let a_ref = ref_of(&a)?;
+            let b_ref = ref_of(&b)?;
+            let a_loc = world.get(&a_ref).and_then(|o| o.location_ref.as_deref());
+            let b_loc = world.get(&b_ref).and_then(|o| o.location_ref.as_deref());
+            Ok(a_loc.is_some() && a_loc == b_loc)
+        })?,
+    )?;
+
+    env.set(
+        "log",
+        scope.create_function(move |_, msg: String| {
+            tracing::info!(softcode = true, "{}", msg);
+            Ok(())
+        })?,
+    )?;
+
     // -- Write API (queues Intents; nothing here touches the world) --
 
     let b = Rc::clone(&batch);
@@ -346,6 +509,37 @@ pub fn install<'scope, 'env>(
                 location,
             });
             Ok(ref_id)
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
+        "set_title",
+        scope.create_function(move |_, (r, title): (Value, String)| {
+            let target = ref_of(&r)?;
+            b.borrow_mut().push(Intent::SetTitle { target, title });
+            Ok(())
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
+        "set_description",
+        scope.create_function(move |_, (r, description): (Value, String)| {
+            let target = ref_of(&r)?;
+            b.borrow_mut()
+                .push(Intent::SetDescription { target, description });
+            Ok(())
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
+        "destroy",
+        scope.create_function(move |_, r: Value| {
+            let target = ref_of(&r)?;
+            b.borrow_mut().push(Intent::Destroy { target });
+            Ok(())
         })?,
     )?;
 
