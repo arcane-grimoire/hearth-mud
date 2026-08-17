@@ -1153,6 +1153,17 @@ impl Engine {
             None => return format!("You don't see '{}' here.\r\n", args),
         };
 
+        // Check get lock (DSL)
+        let item_locks = self
+            .world
+            .get(&item_ref)
+            .map(|o| o.locks.clone())
+            .unwrap_or_default();
+        if let Some(false) = self.check_lock("get", &item_locks, actor_ref) {
+            return "You can't pick that up.\r\n".to_string();
+        }
+
+        // Check can_get hook (Luau)
         match self.fire_hook(&item_ref, "can_get", actor_ref, Some(&room_ref), None) {
             Ok(run) if run.denied => {
                 return if run.emitted_to_actor {
@@ -1710,7 +1721,7 @@ impl Engine {
             .and_then(|a| a.location_ref.clone())
             .unwrap_or_default();
 
-        // Check traverse lock on the exit
+        // Check traverse lock on the exit (DSL)
         let exit_locks = self
             .world
             .exits
@@ -1722,7 +1733,22 @@ impl Engine {
             return "You can't go that way.\r\n".to_string();
         }
 
-        // Check enter lock on the destination room
+        // Check can_traverse hook on the exit's target room (Luau)
+        match self.fire_hook(target_ref, "can_traverse", actor_ref, Some(&old_room), None) {
+            Ok(run) if run.denied => {
+                return if run.emitted_to_actor {
+                    String::new()
+                } else {
+                    "You can't go that way.\r\n".to_string()
+                };
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(hook = "can_traverse", error = %e, "softcode error");
+            }
+        }
+
+        // Check enter lock on the destination room (DSL)
         let room_locks = self
             .world
             .get(target_ref)
@@ -1774,7 +1800,17 @@ impl Engine {
             None => return format!("You aren't carrying '{}'.\r\n", args),
         };
 
-        // Check can_drop hook
+        // Check drop lock (DSL)
+        let item_locks = self
+            .world
+            .get(&item_ref)
+            .map(|o| o.locks.clone())
+            .unwrap_or_default();
+        if let Some(false) = self.check_lock("drop", &item_locks, actor_ref) {
+            return "You can't drop that.\r\n".to_string();
+        }
+
+        // Check can_drop hook (Luau)
         match self.fire_hook(&item_ref, "can_drop", actor_ref, Some(&room_ref), None) {
             Ok(run) if run.denied => {
                 return if run.emitted_to_actor {
