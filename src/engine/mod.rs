@@ -855,7 +855,7 @@ impl Engine {
             session_id,
             &format!("\r\nWelcome back, {}.{}\r\n\r\n", username, scope_msg),
         );
-        let look_output = commands::do_look(&self.world, character_ref);
+        let look_output = self.look_with_visibility(character_ref);
         self.send(session_id, &look_output);
 
         self.broadcast_to_all(
@@ -2025,6 +2025,42 @@ impl Engine {
         }
     }
 
+    fn look_with_visibility(&mut self, actor_ref: &str) -> String {
+        let room_ref = match self.world.get(actor_ref).and_then(|a| a.location_ref.clone()) {
+            Some(r) => r,
+            None => return "You're floating in the void.\r\n".to_string(),
+        };
+
+        let hidden_tag = crate::world::Tag {
+            category: "system".into(),
+            key: "hidden".into(),
+        };
+
+        let mut hidden_refs = Vec::new();
+        let candidates: Vec<(String, bool)> = self
+            .world
+            .objects_in(&room_ref)
+            .iter()
+            .filter(|o| o.tags.contains(&hidden_tag) && o.ref_id != actor_ref)
+            .map(|o| (o.ref_id.clone(), o.programs.contains_key("can_see")))
+            .collect();
+
+        for (ref_id, has_can_see) in candidates {
+            if !has_can_see {
+                // No can_see hook — hidden means hidden
+                hidden_refs.push(ref_id);
+                continue;
+            }
+            // Fire can_see — if it returns false (denied), stay hidden
+            match self.fire_hook(&ref_id, "can_see", actor_ref, Some(&room_ref), None) {
+                Ok(run) if !run.denied => {} // can_see returned true — viewer sees it
+                _ => hidden_refs.push(ref_id),
+            }
+        }
+
+        commands::format_look(&self.world, &room_ref, actor_ref, &hidden_refs)
+    }
+
     fn cmd_look(&mut self, actor_ref: &str, args: &str) -> String {
         if !args.is_empty() {
             let room_ref = self
@@ -2067,7 +2103,7 @@ impl Engine {
             return commands::do_examine(&self.world, actor_ref, args);
         }
 
-        commands::do_look(&self.world, actor_ref)
+        self.look_with_visibility(actor_ref)
     }
 
     fn cmd_go(&mut self, actor_ref: &str, args: &str) -> String {
@@ -2144,7 +2180,7 @@ impl Engine {
         // Fire on_enter on new room
         let _ = self.fire_hook(target_ref, "on_enter", actor_ref, Some(target_ref), None);
 
-        commands::do_look(&self.world, actor_ref)
+        self.look_with_visibility(actor_ref)
     }
 
     fn cmd_drop(&mut self, actor_ref: &str, args: &str) -> String {

@@ -12,10 +12,15 @@ pub fn do_look(world: &World, actor_ref: &str) -> String {
         None => return "You're floating in the void.\r\n".to_string(),
     };
 
-    format_look(world, room_ref, actor_ref)
+    format_look(world, room_ref, actor_ref, &[])
 }
 
-pub fn format_look(world: &World, room_ref: &str, viewer_ref: &str) -> String {
+pub fn format_look(
+    world: &World,
+    room_ref: &str,
+    viewer_ref: &str,
+    hidden_refs: &[String],
+) -> String {
     let room = match world.get(room_ref) {
         Some(r) => r,
         None => return "You see nothing.\r\n".to_string(),
@@ -35,7 +40,11 @@ pub fn format_look(world: &World, room_ref: &str, viewer_ref: &str) -> String {
     let contents: Vec<_> = world
         .objects_in(room_ref)
         .into_iter()
-        .filter(|o| o.ref_id != viewer_ref && !o.tags.contains(&offline_tag))
+        .filter(|o| {
+            o.ref_id != viewer_ref
+                && !o.tags.contains(&offline_tag)
+                && !hidden_refs.contains(&o.ref_id)
+        })
         .collect();
 
     if !contents.is_empty() {
