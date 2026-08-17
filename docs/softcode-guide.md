@@ -136,13 +136,48 @@ These functions read from the world. They're safe to call anytime.
 | `has_attr(ref, key)` | boolean | Check if an attribute exists |
 | `has_tag(ref, spec)` | boolean | Check if a tag exists (e.g., `"quest:worthy"`) |
 | `get_tags(ref)` | table | List all tags as spec strings |
-| `get_room_contents(ref)` | table | List objects in a room |
+| `get_room_contents(ref)` | table | List objects in a room (excludes exits) |
 | `get_exits(ref)` | table | List exits from a room |
 | `get_location(ref)` | table or nil | Get the object's container |
 | `kind_of(ref)` | string or nil | Get the object's kind |
+| `find_by_tag(spec)` | table | Find all objects with a tag |
+| `find_in_room(room, name)` | table or nil | Fuzzy-match an object by name in a room |
+| `get_inventory(ref)` | table | List items carried by an object |
+| `get_players_in_room(room)` | table | Online players in a room |
+| `get_all_by_kind(kind)` | table | All objects of a kind (`"room"`, `"npc"`, etc.) |
 
 The `ref` argument can be either a ref string (`"area/starter/item/sword"`) or
 an object table (like `this` or `actor`). Both work everywhere.
+
+## Predicates
+
+Boolean checks for common conditions.
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `is_player(ref)` | boolean | Is this a player? |
+| `is_npc(ref)` | boolean | Is this an NPC? |
+| `is_item(ref)` | boolean | Is this an item? |
+| `is_room(ref)` | boolean | Is this a room? |
+| `is_exit(ref)` | boolean | Is this an exit? |
+| `exists(ref)` | boolean | Does this ref point to a real object? |
+| `is_carrying(actor, tag)` | boolean | Is the actor carrying an item with this tag? |
+| `same_room(a, b)` | boolean | Are two objects in the same room? |
+
+Example:
+
+```lua
+function can_get(this, actor, room)
+  if is_npc(actor) then
+    return false  -- NPCs can't pick things up
+  end
+  if not is_carrying(actor, "quest:key") then
+    emit(actor, "You need the key to take this.")
+    return false
+  end
+  return true
+end
+```
 
 ## Write API
 
@@ -159,6 +194,10 @@ invalid, the entire batch is rolled back.
 | `move_object(ref, destination)` | Move an object to a new location |
 | `set_tag(ref, spec)` | Add a tag (e.g., `"quest:completed"`) |
 | `unset_tag(ref, spec)` | Remove a tag |
+| `set_title(ref, title)` | Change an object's display name |
+| `set_description(ref, desc)` | Change an object's description |
+| `destroy(ref)` | Remove an object from the world (not players) |
+| `trigger(ref, hook)` | Fire a hook on another object (see below) |
 | `spawn(opts)` | Create a new object (see below) |
 
 ### spawn
@@ -175,6 +214,52 @@ local ref = spawn({
 })
 -- ref is the new object's ref_id, usable immediately in this script
 emit(actor, "A gold coin materializes!")
+```
+
+### trigger
+
+Fires a hook on another object. The triggered hook runs after the current
+script's intents are applied, so it sees the updated world state. This is
+how you build connected machinery, puzzles, and chain reactions.
+
+```lua
+-- A lever that opens a gate in another room
+function cmd_pull(this, actor, room, args)
+  emit(actor, "You pull the lever. A grinding sound echoes.")
+  emit_room(room, actor.display_name .. " pulls the lever.", {actor.ref_id})
+  set_attr("area/dungeon/item/gate", "open", true)
+  trigger("area/dungeon/item/gate", "on_activate")
+end
+```
+
+The gate's `on_activate` program could then emit to its own room:
+
+```lua
+function on_activate(this, actor, room)
+  if get_attr(this, "open") then
+    emit_room(room, "The iron gate grinds open!")
+    set_description(this, "An iron gate, standing open.")
+  end
+end
+```
+
+Triggers don't recurse — if the triggered hook also calls `trigger`, the
+second trigger fires after the first finishes. This prevents infinite loops.
+
+## Utility
+
+| Function | Description |
+|----------|-------------|
+| `log(message)` | Print a debug message to the server console |
+
+Use `log()` to debug scripts during development. Messages appear in the
+server's log output with a `softcode=true` marker.
+
+```lua
+function on_tick(this, state, room)
+  state.count = (state.count or 0) + 1
+  log("tick #" .. state.count .. " on " .. this.ref_id)
+end
 ```
 
 ## Global scripts
