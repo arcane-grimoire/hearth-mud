@@ -188,6 +188,27 @@ impl AccountStore {
             false
         }
     }
+
+    pub fn change_password(
+        &mut self,
+        account_id: &str,
+        old_password: &str,
+        new_password: &str,
+    ) -> Result<(), String> {
+        let account = self
+            .accounts
+            .get(account_id)
+            .ok_or("Account not found.")?;
+        if !verify_password(old_password, &account.password_hash) {
+            return Err("Incorrect current password.".into());
+        }
+        if new_password.len() < 6 {
+            return Err("New password must be at least 6 characters.".into());
+        }
+        let hash = hash_password(new_password)?;
+        self.accounts.get_mut(account_id).unwrap().password_hash = hash;
+        Ok(())
+    }
 }
 
 fn hash_password(password: &str) -> Result<String, String> {

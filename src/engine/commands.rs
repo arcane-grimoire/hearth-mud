@@ -1,4 +1,4 @@
-use crate::world::{Kind, World};
+use crate::world::{Kind, Tag, World};
 
 pub fn do_look(world: &World, actor_ref: &str) -> String {
     let actor = match world.get(actor_ref) {
@@ -30,10 +30,11 @@ pub fn format_look(world: &World, room_ref: &str, viewer_ref: &str) -> String {
         out.push_str(&format!("[Exits: {}]\r\n", exit_names.join(", ")));
     }
 
+    let offline_tag = Tag { category: "system".into(), key: "offline".into() };
     let contents: Vec<_> = world
         .objects_in(room_ref)
         .into_iter()
-        .filter(|o| o.ref_id != viewer_ref)
+        .filter(|o| o.ref_id != viewer_ref && !o.tags.contains(&offline_tag))
         .collect();
 
     if !contents.is_empty() {

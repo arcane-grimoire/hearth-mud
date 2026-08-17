@@ -317,7 +317,14 @@ impl Engine {
                     .get(actor_ref)
                     .map(|o| o.display_name().to_string())
                     .unwrap_or_default();
-                self.world.objects.remove(actor_ref);
+                // Mark player as offline but keep them in the world.
+                // Attrs, tags, inventory, location all persist.
+                if let Some(obj) = self.world.get_mut(actor_ref) {
+                    obj.tags.insert(crate::world::Tag {
+                        category: "system".to_string(),
+                        key: "offline".to_string(),
+                    });
+                }
                 if !name.is_empty() {
                     self.broadcast_to_all(&format!("{} has disconnected.\r\n", name), session_id);
                 }
@@ -527,8 +534,27 @@ impl Engine {
     ) {
         let spawn_room = "area/starter/room/town_square";
 
-        // Reuse existing character object or create a new one
-        if self.world.get(character_ref).is_none() {
+        let needs_location_fix = self
+            .world
+            .get(character_ref)
+            .map(|obj| {
+                obj.location_ref
+                    .as_ref()
+                    .map(|r| !self.world.objects.contains_key(r.as_str()))
+                    .unwrap_or(true)
+            });
+
+        if let Some(needs_fix) = needs_location_fix {
+            let existing = self.world.get_mut(character_ref).unwrap();
+            existing.tags.remove(&crate::world::Tag {
+                category: "system".to_string(),
+                key: "offline".to_string(),
+            });
+            if needs_fix {
+                existing.location_ref = Some(spawn_room.to_string());
+            }
+        } else {
+            // First time — create character
             let player = GameObject::new(character_ref, username, Kind::Player)
                 .with_title(username)
                 .with_description("A traveler.")
@@ -625,6 +651,7 @@ impl Engine {
             "use" => self.cmd_use(&actor_ref, &args),
             "examine" | "ex" => commands::do_examine(&self.world, &actor_ref, &args),
             "who" => self.do_who(session_id),
+            "@password" => self.cmd_password(session_id, &args),
             "emote" | "pose" | ":" => {
                 let msg = if cmd == ":" {
                     input[1..].trim().to_string()
@@ -1385,6 +1412,25 @@ impl Engine {
                 format!("Booted {}.\r\n", username)
             }
             None => format!("'{}' is not online.\r\n", username),
+        }
+    }
+
+    fn cmd_password(&mut self, session_id: &str, args: &str) -> String {
+        // @password <old> <new>
+        let account_id = match self.session_account_id(session_id) {
+            Some(id) => id,
+            None => return "You're not logged in.\r\n".to_string(),
+        };
+        let (old_pw, new_pw) = match args.split_once(' ') {
+            Some((o, n)) => (o.trim(), n.trim()),
+            None => return "Usage: @password <old_password> <new_password>\r\n".to_string(),
+        };
+        if old_pw.is_empty() || new_pw.is_empty() {
+            return "Usage: @password <old_password> <new_password>\r\n".to_string();
+        }
+        match self.accounts.change_password(&account_id, old_pw, new_pw) {
+            Ok(()) => "Password changed.\r\n".to_string(),
+            Err(e) => format!("{}\r\n", e),
         }
     }
 
