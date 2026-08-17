@@ -127,7 +127,7 @@ impl Engine {
             );
             (world, accounts)
         } else {
-            let world = build_starter_world();
+            let world = build_starter_world(&config.spawn_room);
             tracing::info!("No saved world found, using starter world");
             (world, AccountStore::new())
         };
@@ -2585,86 +2585,14 @@ impl Engine {
     }
 }
 
-fn build_starter_world() -> World {
+fn build_starter_world(spawn_room: &str) -> World {
     let mut world = World::new();
 
-    let mut square = GameObject::new(
-        "area/starter/room/town_square",
-        "town_square",
-        Kind::Room,
-    )
-    .with_title("Town Square");
-    square.description =
-        "A cobblestone square at the heart of a small town. A stone fountain burbles in the center. Roads lead north to the market and east to the tavern."
-            .into();
-    world.add_object(square);
-
-    let mut market = GameObject::new(
-        "area/starter/room/market",
-        "market",
-        Kind::Room,
-    )
-    .with_title("The Market");
-    market.description =
-        "Stalls line the narrow street, though most are shuttered at this hour. The square lies to the south."
-            .into();
-    world.add_object(market);
-
-    let mut tavern = GameObject::new(
-        "area/starter/room/tavern",
-        "tavern",
-        Kind::Room,
-    )
-    .with_title("The Rusty Flagon");
-    tavern.description =
-        "A low-ceilinged tavern smelling of pipe smoke and old ale. A bar runs along the far wall. The square is back to the west."
-            .into();
-    world.add_object(tavern);
-
-    world.add_object(
-        GameObject::new("area/starter/exit/square_to_market", "north", Kind::Exit)
-            .with_location("area/starter/room/town_square")
-            .with_target("area/starter/room/market")
-            .with_aliases(vec!["n"]),
-    );
-    world.add_object(
-        GameObject::new("area/starter/exit/market_to_square", "south", Kind::Exit)
-            .with_location("area/starter/room/market")
-            .with_target("area/starter/room/town_square")
-            .with_aliases(vec!["s"]),
-    );
-    world.add_object(
-        GameObject::new("area/starter/exit/square_to_tavern", "east", Kind::Exit)
-            .with_location("area/starter/room/town_square")
-            .with_target("area/starter/room/tavern")
-            .with_aliases(vec!["e"]),
-    );
-    world.add_object(
-        GameObject::new("area/starter/exit/tavern_to_square", "west", Kind::Exit)
-            .with_location("area/starter/room/tavern")
-            .with_target("area/starter/room/town_square")
-            .with_aliases(vec!["w"]),
-    );
-
-    let sword = GameObject::new(
-        "area/starter/item/rusty_sword",
-        "rusty_sword",
-        Kind::Item,
-    )
-    .with_title("a rusty sword")
-    .with_description("A short sword covered in rust. It's seen better days.")
-    .with_location("area/starter/room/town_square");
-    world.add_object(sword);
-
-    let mug = GameObject::new(
-        "area/starter/item/ale_mug",
-        "ale_mug",
-        Kind::Item,
-    )
-    .with_title("a half-empty mug of ale")
-    .with_description("A wooden mug still half-full of flat ale. Someone left it behind.")
-    .with_location("area/starter/room/tavern");
-    world.add_object(mug);
+    let key = spawn_room.rsplit('/').next().unwrap_or("spawn");
+    let room = GameObject::new(spawn_room, key, Kind::Room)
+        .with_title("Spawn")
+        .with_description("An empty room. Build your world from here.");
+    world.add_object(room);
 
     world
 }
@@ -2696,7 +2624,7 @@ mod tests {
         assert!(resp.ok);
         let rooms = resp.data.unwrap();
         let rooms = rooms.as_array().unwrap();
-        assert_eq!(rooms.len(), 3); // starter world has 3 rooms
+        assert_eq!(rooms.len(), 1); // starter world has just the spawn room
         drop(tx);
         let _ = handle.await;
     }
@@ -2762,14 +2690,36 @@ mod tests {
         let _ = handle.await;
     }
 
+    async fn create_test_item(tx: &mpsc::UnboundedSender<EngineMessage>) -> String {
+        let resp = api_call(tx, ApiRequest::CreateObject {
+            area: "test".into(),
+            key: "sword".into(),
+            kind: "item".into(),
+            title: Some("a test sword".into()),
+            description: None,
+            location: Some("area/starter/room/town_square".into()),
+        }).await;
+        assert!(resp.ok);
+        resp.data.unwrap()["ref_id"].as_str().unwrap().to_string()
+    }
+
     #[tokio::test]
     async fn api_create_exit() {
         let (tx, handle) = test_engine().await;
 
+        // Create a second room for the exit to target
+        let resp = api_call(&tx, ApiRequest::CreateRoom {
+            area: "test".into(),
+            key: "cellar".into(),
+            title: "The Cellar".into(),
+            description: None,
+        }).await;
+        assert!(resp.ok);
+
         let resp = api_call(&tx, ApiRequest::CreateExit {
             source: "area/starter/room/town_square".into(),
             direction: "down".into(),
-            target: "area/starter/room/tavern".into(),
+            target: "area/test/room/cellar".into(),
             aliases: Some(vec!["d".into()]),
         }).await;
         assert!(resp.ok);
@@ -2790,16 +2740,17 @@ mod tests {
     #[tokio::test]
     async fn api_set_and_remove_program() {
         let (tx, handle) = test_engine().await;
+        let item_ref = create_test_item(&tx).await;
 
         let resp = api_call(&tx, ApiRequest::SetProgram {
-            ref_id: "area/starter/item/rusty_sword".into(),
+            ref_id: item_ref.clone(),
             hook: "on_get".into(),
             source: "function on_get(this, actor, room) emit(actor, \"Hum!\") end".into(),
         }).await;
         assert!(resp.ok);
 
         let resp = api_call(&tx, ApiRequest::ListPrograms {
-            ref_id: "area/starter/item/rusty_sword".into(),
+            ref_id: item_ref.clone(),
         }).await;
         assert!(resp.ok);
         let programs = resp.data.unwrap().as_array().unwrap().clone();
@@ -2807,13 +2758,13 @@ mod tests {
         assert_eq!(programs[0]["hook"], "on_get");
 
         let resp = api_call(&tx, ApiRequest::RemoveProgram {
-            ref_id: "area/starter/item/rusty_sword".into(),
+            ref_id: item_ref.clone(),
             hook: "on_get".into(),
         }).await;
         assert!(resp.ok);
 
         let resp = api_call(&tx, ApiRequest::ListPrograms {
-            ref_id: "area/starter/item/rusty_sword".into(),
+            ref_id: item_ref.clone(),
         }).await;
         let programs = resp.data.unwrap().as_array().unwrap().clone();
         assert_eq!(programs.len(), 0);
@@ -2825,14 +2776,15 @@ mod tests {
     #[tokio::test]
     async fn api_delete_object() {
         let (tx, handle) = test_engine().await;
+        let item_ref = create_test_item(&tx).await;
 
         let resp = api_call(&tx, ApiRequest::DeleteObject {
-            ref_id: "area/starter/item/rusty_sword".into(),
+            ref_id: item_ref.clone(),
         }).await;
         assert!(resp.ok);
 
         let resp = api_call(&tx, ApiRequest::Examine {
-            ref_id: "area/starter/item/rusty_sword".into(),
+            ref_id: item_ref.clone(),
         }).await;
         assert!(!resp.ok);
 
@@ -2843,9 +2795,10 @@ mod tests {
     #[tokio::test]
     async fn api_syntax_error_rejected() {
         let (tx, handle) = test_engine().await;
+        let item_ref = create_test_item(&tx).await;
 
         let resp = api_call(&tx, ApiRequest::SetProgram {
-            ref_id: "area/starter/item/rusty_sword".into(),
+            ref_id: item_ref,
             hook: "on_get".into(),
             source: "function on_get(this actor room) end".into(),
         }).await;

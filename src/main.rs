@@ -24,7 +24,10 @@ async fn main() {
         )
         .init();
 
-    let config = Config::load(Path::new("hearth.toml"));
+    let config_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "hearth.toml".into());
+    let config = Config::load(Path::new(&config_path));
 
     let db = Database::open(Path::new(&config.db_path)).expect("Failed to open database");
     tracing::info!(db_path = %config.db_path, "Database opened");
