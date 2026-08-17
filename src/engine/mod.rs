@@ -2469,3 +2469,199 @@ fn build_starter_world() -> World {
 
     world
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    async fn test_engine() -> (mpsc::UnboundedSender<EngineMessage>, tokio::task::JoinHandle<()>) {
+        let db = crate::db::Database::open(Path::new(":memory:")).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let engine = Engine::new(rx, db);
+        let handle = tokio::spawn(engine.run());
+        (tx, handle)
+    }
+
+    async fn api_call(tx: &mpsc::UnboundedSender<EngineMessage>, req: ApiRequest) -> ApiResponse {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.send(EngineMessage::ApiRequest { request: req, reply: reply_tx }).unwrap();
+        reply_rx.await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn api_list_rooms() {
+        let (tx, handle) = test_engine().await;
+        let resp = api_call(&tx, ApiRequest::ListRooms).await;
+        assert!(resp.ok);
+        let rooms = resp.data.unwrap();
+        let rooms = rooms.as_array().unwrap();
+        assert_eq!(rooms.len(), 3); // starter world has 3 rooms
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn api_create_and_examine_room() {
+        let (tx, handle) = test_engine().await;
+
+        let resp = api_call(&tx, ApiRequest::CreateRoom {
+            area: "test".into(),
+            key: "cave".into(),
+            title: "A Cave".into(),
+            description: Some("Dark and damp.".into()),
+        }).await;
+        assert!(resp.ok);
+        let ref_id = resp.data.unwrap()["ref_id"].as_str().unwrap().to_string();
+
+        let resp = api_call(&tx, ApiRequest::Examine { ref_id: ref_id.clone() }).await;
+        assert!(resp.ok);
+        let data = resp.data.unwrap();
+        assert_eq!(data["title"], "A Cave");
+        assert_eq!(data["description"], "Dark and damp.");
+        assert_eq!(data["kind"], "room");
+
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn api_create_object_with_attrs_and_tags() {
+        let (tx, handle) = test_engine().await;
+
+        let resp = api_call(&tx, ApiRequest::CreateObject {
+            area: "test".into(),
+            key: "gem".into(),
+            kind: "item".into(),
+            title: Some("a ruby".into()),
+            description: None,
+            location: Some("area/starter/room/town_square".into()),
+        }).await;
+        assert!(resp.ok);
+        let ref_id = resp.data.unwrap()["ref_id"].as_str().unwrap().to_string();
+
+        let resp = api_call(&tx, ApiRequest::SetAttribute {
+            ref_id: ref_id.clone(),
+            key: "value".into(),
+            value: serde_json::json!(500),
+        }).await;
+        assert!(resp.ok);
+
+        let resp = api_call(&tx, ApiRequest::AddTag {
+            ref_id: ref_id.clone(),
+            tag: "loot:treasure".into(),
+        }).await;
+        assert!(resp.ok);
+
+        let resp = api_call(&tx, ApiRequest::Examine { ref_id: ref_id.clone() }).await;
+        let data = resp.data.unwrap();
+        assert_eq!(data["attrs"]["value"], 500);
+        assert!(data["tags"].as_array().unwrap().contains(&serde_json::json!("loot:treasure")));
+
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn api_create_exit() {
+        let (tx, handle) = test_engine().await;
+
+        let resp = api_call(&tx, ApiRequest::CreateExit {
+            source: "area/starter/room/town_square".into(),
+            direction: "down".into(),
+            target: "area/starter/room/tavern".into(),
+            aliases: Some(vec!["d".into()]),
+        }).await;
+        assert!(resp.ok);
+
+        let resp = api_call(&tx, ApiRequest::ListExits {
+            room_ref: "area/starter/room/town_square".into(),
+        }).await;
+        assert!(resp.ok);
+        let exits = resp.data.unwrap();
+        let exits = exits.as_array().unwrap();
+        let down = exits.iter().find(|e| e["direction"] == "down");
+        assert!(down.is_some());
+
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn api_set_and_remove_program() {
+        let (tx, handle) = test_engine().await;
+
+        let resp = api_call(&tx, ApiRequest::SetProgram {
+            ref_id: "area/starter/item/rusty_sword".into(),
+            hook: "on_get".into(),
+            source: "function on_get(this, actor, room) emit(actor, \"Hum!\") end".into(),
+        }).await;
+        assert!(resp.ok);
+
+        let resp = api_call(&tx, ApiRequest::ListPrograms {
+            ref_id: "area/starter/item/rusty_sword".into(),
+        }).await;
+        assert!(resp.ok);
+        let programs = resp.data.unwrap().as_array().unwrap().clone();
+        assert_eq!(programs.len(), 1);
+        assert_eq!(programs[0]["hook"], "on_get");
+
+        let resp = api_call(&tx, ApiRequest::RemoveProgram {
+            ref_id: "area/starter/item/rusty_sword".into(),
+            hook: "on_get".into(),
+        }).await;
+        assert!(resp.ok);
+
+        let resp = api_call(&tx, ApiRequest::ListPrograms {
+            ref_id: "area/starter/item/rusty_sword".into(),
+        }).await;
+        let programs = resp.data.unwrap().as_array().unwrap().clone();
+        assert_eq!(programs.len(), 0);
+
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn api_delete_object() {
+        let (tx, handle) = test_engine().await;
+
+        let resp = api_call(&tx, ApiRequest::DeleteObject {
+            ref_id: "area/starter/item/rusty_sword".into(),
+        }).await;
+        assert!(resp.ok);
+
+        let resp = api_call(&tx, ApiRequest::Examine {
+            ref_id: "area/starter/item/rusty_sword".into(),
+        }).await;
+        assert!(!resp.ok);
+
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn api_syntax_error_rejected() {
+        let (tx, handle) = test_engine().await;
+
+        let resp = api_call(&tx, ApiRequest::SetProgram {
+            ref_id: "area/starter/item/rusty_sword".into(),
+            hook: "on_get".into(),
+            source: "function on_get(this actor room) end".into(),
+        }).await;
+        assert!(!resp.ok);
+        assert!(resp.error.unwrap().contains("Syntax error"));
+
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn api_save_world() {
+        let (tx, handle) = test_engine().await;
+        let resp = api_call(&tx, ApiRequest::SaveWorld).await;
+        assert!(resp.ok);
+        drop(tx);
+        let _ = handle.await;
+    }
+}

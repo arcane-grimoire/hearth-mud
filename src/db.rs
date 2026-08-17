@@ -309,3 +309,150 @@ impl Database {
         count > 0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::accounts::Scope;
+    use crate::softcode::hooks::ProgramRecord;
+    use crate::world::Script;
+    use std::path::Path;
+
+    fn temp_db() -> Database {
+        Database::open(Path::new(":memory:")).unwrap()
+    }
+
+    #[test]
+    fn world_round_trip_objects() {
+        let db = temp_db();
+        let mut world = World::new();
+
+        let mut room = GameObject::new("area/test/room/hall", "hall", Kind::Room)
+            .with_title("Great Hall");
+        room.description = "A grand hall.".into();
+        room.attrs.insert("mood".into(), serde_json::json!("eerie"));
+        room.tags.insert(Tag::parse("zone:castle").unwrap());
+        room.locks.insert("enter".into(), "perm(builder)".into());
+        world.add_object(room);
+
+        let item = GameObject::new("area/test/item/sword", "sword", Kind::Item)
+            .with_title("a sharp sword")
+            .with_location("area/test/room/hall");
+        world.add_object(item);
+
+        db.save_world(&world).unwrap();
+        let loaded = db.load_world().unwrap();
+
+        assert_eq!(loaded.objects.len(), 2);
+
+        let room = loaded.get("area/test/room/hall").unwrap();
+        assert_eq!(room.title.as_deref(), Some("Great Hall"));
+        assert_eq!(room.description, "A grand hall.");
+        assert_eq!(room.attrs.get("mood").unwrap(), "eerie");
+        assert!(room.tags.contains(&Tag::parse("zone:castle").unwrap()));
+        assert_eq!(room.locks.get("enter").unwrap(), "perm(builder)");
+
+        let item = loaded.get("area/test/item/sword").unwrap();
+        assert_eq!(item.location_ref.as_deref(), Some("area/test/room/hall"));
+    }
+
+    #[test]
+    fn world_round_trip_exits() {
+        let db = temp_db();
+        let mut world = World::new();
+
+        let room_a = GameObject::new("area/test/room/a", "a", Kind::Room).with_title("Room A");
+        let room_b = GameObject::new("area/test/room/b", "b", Kind::Room).with_title("Room B");
+        world.add_object(room_a);
+        world.add_object(room_b);
+
+        let exit = GameObject::new("area/test/exit/a_to_b", "north", Kind::Exit)
+            .with_location("area/test/room/a")
+            .with_target("area/test/room/b")
+            .with_aliases(vec!["n"]);
+        world.add_object(exit);
+
+        db.save_world(&world).unwrap();
+        let loaded = db.load_world().unwrap();
+
+        let exits = loaded.exits_from("area/test/room/a");
+        assert_eq!(exits.len(), 1);
+        assert_eq!(exits[0].key, "north");
+        assert_eq!(exits[0].target_ref.as_deref(), Some("area/test/room/b"));
+        assert!(exits[0].aliases.contains("n"));
+    }
+
+    #[test]
+    fn world_round_trip_programs() {
+        let db = temp_db();
+        let mut world = World::new();
+
+        let mut obj = GameObject::new("area/test/item/gem", "gem", Kind::Item);
+        crate::softcode::hooks::set_program(
+            &mut obj,
+            "on_get",
+            "function on_get(this, actor, room) emit(actor, \"Sparkle!\") end".into(),
+        )
+        .unwrap();
+        world.add_object(obj);
+
+        db.save_world(&world).unwrap();
+        let loaded = db.load_world().unwrap();
+
+        let gem = loaded.get("area/test/item/gem").unwrap();
+        assert!(gem.programs.contains_key("on_get"));
+        assert!(gem.programs["on_get"].source.contains("Sparkle!"));
+    }
+
+    #[test]
+    fn world_round_trip_scripts() {
+        let db = temp_db();
+        let mut world = World::new();
+
+        let mut script = Script::new("weather", "function on_tick(state) end");
+        script.interval = 60;
+        script.state.insert("weather".into(), serde_json::json!("clear"));
+        world.scripts.insert("weather".into(), script);
+
+        db.save_world(&world).unwrap();
+        let loaded = db.load_world().unwrap();
+
+        assert!(loaded.scripts.contains_key("weather"));
+        let s = &loaded.scripts["weather"];
+        assert_eq!(s.interval, 60);
+        assert_eq!(s.state.get("weather").unwrap(), "clear");
+    }
+
+    #[test]
+    fn accounts_round_trip() {
+        let db = temp_db();
+        let mut store = AccountStore::new();
+        store.create("admin", "password123").unwrap();
+        store.create("player2", "password456").unwrap();
+
+        db.save_accounts(&store).unwrap();
+        let loaded = db.load_accounts().unwrap();
+
+        let admin = loaded.get_by_username("admin").unwrap();
+        assert!(admin.scopes.contains(&Scope::Admin));
+
+        let player = loaded.get_by_username("player2").unwrap();
+        assert!(player.scopes.contains(&Scope::Player));
+        assert!(!player.scopes.contains(&Scope::Admin));
+    }
+
+    #[test]
+    fn empty_db_has_no_world_data() {
+        let db = temp_db();
+        assert!(!db.has_world_data());
+    }
+
+    #[test]
+    fn save_then_has_world_data() {
+        let db = temp_db();
+        let mut world = World::new();
+        world.add_object(GameObject::new("area/test/room/x", "x", Kind::Room));
+        db.save_world(&world).unwrap();
+        assert!(db.has_world_data());
+    }
+}

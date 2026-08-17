@@ -229,3 +229,104 @@ fn verify_password(password: &str, hash: &str) -> bool {
         .verify_password(password.as_bytes(), &parsed)
         .is_ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_account() {
+        let mut store = AccountStore::new();
+        let account = store.create("TestUser", "password123").unwrap();
+        assert_eq!(account.username, "TestUser");
+        assert!(account.character_ref.as_deref() == Some("player/testuser"));
+    }
+
+    #[test]
+    fn first_account_is_admin() {
+        let mut store = AccountStore::new();
+        let account = store.create("admin", "password123").unwrap();
+        assert!(account.scopes.contains(&Scope::Admin));
+        assert!(account.scopes.contains(&Scope::Builder));
+    }
+
+    #[test]
+    fn second_account_is_player_only() {
+        let mut store = AccountStore::new();
+        store.create("first", "password123").unwrap();
+        let second = store.create("second", "password123").unwrap();
+        assert!(second.scopes.contains(&Scope::Player));
+        assert!(!second.scopes.contains(&Scope::Admin));
+        assert!(!second.scopes.contains(&Scope::Builder));
+    }
+
+    #[test]
+    fn authenticate_success() {
+        let mut store = AccountStore::new();
+        store.create("alice", "hunter42").unwrap();
+        assert!(store.authenticate("alice", "hunter42").is_ok());
+    }
+
+    #[test]
+    fn authenticate_wrong_password() {
+        let mut store = AccountStore::new();
+        store.create("alice", "hunter42").unwrap();
+        assert!(store.authenticate("alice", "wrong").is_err());
+    }
+
+    #[test]
+    fn authenticate_case_insensitive_username() {
+        let mut store = AccountStore::new();
+        store.create("Alice", "hunter42").unwrap();
+        assert!(store.authenticate("ALICE", "hunter42").is_ok());
+        assert!(store.authenticate("alice", "hunter42").is_ok());
+    }
+
+    #[test]
+    fn duplicate_username_rejected() {
+        let mut store = AccountStore::new();
+        store.create("alice", "password123").unwrap();
+        assert!(store.create("alice", "password456").is_err());
+        assert!(store.create("ALICE", "password456").is_err());
+    }
+
+    #[test]
+    fn short_username_rejected() {
+        let mut store = AccountStore::new();
+        assert!(store.create("ab", "password123").is_err());
+    }
+
+    #[test]
+    fn short_password_rejected() {
+        let mut store = AccountStore::new();
+        assert!(store.create("alice", "short").is_err());
+    }
+
+    #[test]
+    fn change_password() {
+        let mut store = AccountStore::new();
+        let id = store.create("alice", "oldpass123").unwrap().id.clone();
+        assert!(store.change_password(&id, "oldpass123", "newpass456").is_ok());
+        assert!(store.authenticate("alice", "newpass456").is_ok());
+        assert!(store.authenticate("alice", "oldpass123").is_err());
+    }
+
+    #[test]
+    fn change_password_wrong_old() {
+        let mut store = AccountStore::new();
+        let id = store.create("alice", "oldpass123").unwrap().id.clone();
+        assert!(store.change_password(&id, "wrong", "newpass456").is_err());
+    }
+
+    #[test]
+    fn grant_and_revoke_scope() {
+        let mut store = AccountStore::new();
+        let id = store.create("first", "password123").unwrap().id.clone();
+        store.create("second", "password123").unwrap();
+        let second_id = store.get_id_by_username("second").unwrap();
+        store.grant_scope(&second_id, Scope::Builder);
+        assert!(store.get(&second_id).unwrap().has_scope(Scope::Builder));
+        store.revoke_scope(&second_id, Scope::Builder);
+        assert!(!store.get(&second_id).unwrap().scopes.contains(&Scope::Builder));
+    }
+}
