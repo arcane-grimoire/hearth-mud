@@ -1,102 +1,144 @@
 # Hearth MUD
 
 Rust MUD framework with Luau softcode. Not a game — a platform that games
-are built on.
+are built on. The game (The Last Stag) lives in `../the-last-stag-mud/`.
 
 ## Quick reference
 
 - Language: Rust (edition 2024), Luau for softcode
 - Entry: `src/main.rs`
-- Default port: Telnet 4000
-- Database: SQLite (`hearth.db`), checkpoint-only — world lives in memory
-- Softcode: Luau via `mlua` (in-process, single-threaded)
+- Config: `hearth.toml` (or pass path as CLI arg)
+- Ports: Telnet 4000, Web/API 8000
+- Database: SQLite (checkpoint-only — world lives in memory)
+- Softcode: Luau via `mlua` (in-process, single-threaded, bytecode cached)
 
 ## Running
 
 ```sh
-cargo run                     # start server
-cargo test                    # run tests
-RUST_LOG=hearth_mud=debug cargo run  # verbose logging
+cargo run                                    # default config (hearth.toml)
+cargo run -- ../the-last-stag-mud/hearth.toml  # game-specific config
+cargo test                                   # 55 tests
 ```
-
-Connect: `telnet localhost 4000`
 
 First account created gets admin/builder/player scopes.
 
 ## Architecture
 
-Single-writer engine owns all world state in one tokio task. Telnet
-connections send `EngineMessage`s to the engine via an unbounded channel.
-The engine processes them sequentially — no locks on world state.
-
-Luau scripts run on the engine's thread with instruction-count budgets.
-They cannot mutate the world directly — they push typed `Intent` enum
-variants into a batch, which the engine validates and applies atomically.
+Single-writer engine owns all world state in one tokio task. Everything
+else sends `EngineMessage`s via channels. No locks on world state.
 
 ```
-telnet ──► net::telnet ──► EngineMessage ──► Engine (owns World, Lua VM)
-                                                │
-                                                ├── world/ (objects, exits, tags)
-                                                ├── accounts (scopes, auth)
-                                                ├── softcode/ (Luau VM, intents, API)
-                                                └── db (SQLite checkpoint)
+telnet ──► net::telnet ──► EngineMessage ──► Engine
+web/ws ──► net::web    ──►                    │
+REST   ──► POST /api   ──►                    ├── World (objects, scripts)
+                                              ├── Accounts (scopes, auth)
+                                              ├── SoftcodeRuntime (Lua VM)
+                                              └── Database (SQLite)
 ```
+
+Luau scripts push typed `Intent` enum variants into a batch. The engine
+validates and applies the batch atomically after the script finishes.
 
 ## Source layout
 
 ```
 src/
-  main.rs              tokio entrypoint, wires engine + telnet
+  main.rs              tokio entrypoint, wires engine + telnet + web
   accounts.rs          Account, Scope (player/builder/admin), AccountStore
+  ansi.rs              ANSI color helpers
+  config.rs            hearth.toml deserialization
   db.rs                SQLite persistence (save/load world + accounts)
+  loader.rs            Game file loader (TOML + .luau from game_dir)
+  locks.rs             Lock DSL parser and evaluator
   engine/
-    mod.rs             Engine loop, session state machine, all commands
+    mod.rs             Engine loop, session state, all commands, API handler
     commands.rs        Gameplay commands (look, go, get, etc.)
   net/
     mod.rs
-    telnet.rs          Async telnet with IAC negotiation handling
+    telnet.rs          Async telnet with IAC/SGA/ECHO negotiation
+    web.rs             Axum HTTP server: web client, WebSocket, REST API
+    web_client.html    Browser-based MUD client
   softcode/
-    mod.rs             Intent enum, IntentBatch, Budget, SoftcodeRuntime
-    api.rs             Luau-facing read/write API
-    hooks.rs           ProgramRecord, hook names, cmd_ dispatch
+    mod.rs             Intent enum, IntentBatch, Budget, SoftcodeRuntime, bytecode cache
+    api.rs             35 Luau-facing functions (read, write, predicates, utility)
+    hooks.rs           25 known hooks, ProgramRecord with persistent state
   world/
-    mod.rs             World struct (object store, exit list, queries)
-    object.rs          GameObject, Exit, Kind enum
+    mod.rs             World struct (objects HashMap, scripts, queries)
+    object.rs          GameObject, Kind enum (Room/Item/Npc/Player/Exit)
+    script.rs          Script (global tick scripts)
     tag.rs             Tag (category:key)
 ```
 
-## Key design decisions
+## Key features
 
-See `docs/adr/` for the full rationale. Summary:
+- **Everything is an object** — rooms, items, NPCs, players, exits all share `GameObject`
+- **25 hooks** — can_get, on_get, can_drop, on_drop, can_use, on_use, can_traverse, can_enter, on_enter, on_leave, can_look, on_look, can_say, on_say, can_see, on_move, on_destroy, on_connect, on_disconnect, on_whisper, on_emote, on_receive, on_damage, on_death, on_tick
+- **35 Luau API functions** — read (14), predicates (8), write (12), utility (1)
+- **Lock DSL** — perm(), has_tag(), has_attr(), in_inventory(), is_kind(), time_between(), AND/OR/NOT
+- **Ticks** — 1s global heartbeat, per-object on_tick with persistent state, global scripts
+- **Visibility** — system:hidden tag + can_see hook
+- **Global commands** — system:global tag on objects makes their cmd_ hooks available everywhere
+- **File loader** — game_dir config, TOML definitions + .luau files, system:managed tag, @reload-world
+- **Bytecode cache** — compiled Luau chunks cached by source hash, invalidated on @reload-world
+- **REST API** — POST /api with 17 actions (list, create, examine, set, delete, etc.)
+- **Web client** — browser-based at /play with WebSocket
+- **Player persistence** — players marked offline on disconnect, restored on reconnect
+- **Autosave** — configurable interval (default 5 min)
+- **Accounts** — argon2 password hashing, scoped roles, optional email
 
-- **ADR 0001** — Luau mutates via typed Intents, not direct access
-- **ADR 0002** — Single tokio task owns all world state
-- **ADR 0003** — Everything in memory, SQLite is a checkpoint store
-- **ADR 0004** — Commands extend via cmd_ hooks on objects, not CmdSets
-- **ADR 0005** — Global tick with per-script intervals (not yet implemented)
-- **ADR 0006** — Lock DSL for permissions (not yet implemented)
+## Config (hearth.toml)
 
-## Domain language
+```toml
+telnet_addr = "0.0.0.0:4000"
+web_addr = "0.0.0.0:8000"
+db_path = "hearth.db"
+autosave_secs = 300
+tick_secs = 1
+spawn_room = "area/town/room/crossroads"
+game_dir = "../the-last-stag-mud/world"
+```
 
-See `CONTEXT.md` for the canonical glossary. Key terms:
+## Design decisions
 
-- **Object** — universal building block (room, item, npc, player)
-- **Kind** — string label on an object (room, item, npc, player)
-- **Program** — Luau script attached to an object via a named Hook
-- **Hook** — named slot: `can_` (permission), `on_` (reaction), `cmd_` (command)
-- **Intent** — typed mutation request from softcode
-- **Checkpoint** — save to SQLite
+See `docs/adr/` (6 ADRs). See `CONTEXT.md` for domain glossary.
+
+## Pending work
+
+See `docs/plans/dbref-migration.md` — next major change is replacing
+string-path refs with auto-incrementing integer dbrefs (#1, #2, #3).
+This is a breaking change that touches every file.
 
 ## Testing
 
+55 tests across: accounts (12), db round-trips (7), engine API (8),
+locks DSL (9), softcode (19).
+
 ```sh
-cargo test                    # all tests
-cargo test softcode           # softcode tests only
+cargo test                    # all
+cargo test softcode           # softcode only
+cargo test engine             # API tests
+cargo test locks              # lock DSL
 ```
 
-## Code conventions
+## The Last Stag (game)
 
-- Commands use `@` prefix for builder/admin (MUSH convention)
-- Object refs follow `area/<area>/<kind>/<key>` pattern
-- Telnet output uses `\r\n` line endings
-- Builder commands are scope-gated in the engine, not the command functions
+Lives in `../the-last-stag-mud/`. Pure Luau + TOML, no Rust.
+
+```
+the-last-stag-mud/
+  hearth.toml                 — game config
+  types/hearth.d.luau         — Luau LSP type definitions
+  world/
+    town/town.toml            — 5 rooms, 3 NPCs
+    forest/forest.toml        — 3 rooms
+    dungeon/dungeon.toml      — 2 rooms, 1 item
+    system/
+      system.toml             — global rules object
+      cmd_hero.luau            — hero create/list (4 classes)
+      cmd_troupe.luau          — troupe add/remove/list (up to 6)
+      cmd_fight.luau           — start combat (goblin/orc/skeleton)
+      cmd_attack.luau          — troupe member attacks
+      cmd_endturn.luau         — monster phase resolution
+      cmd_status.luau          — combat status display
+  docs/                       — game design docs from original prototype
+```
