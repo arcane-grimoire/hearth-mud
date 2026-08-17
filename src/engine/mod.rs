@@ -590,6 +590,13 @@ impl Engine {
                     .unwrap_or_default();
                 // Mark player as offline but keep them in the world.
                 // Attrs, tags, inventory, location all persist.
+                // Fire on_disconnect on the player and room before marking offline
+                let room = self.world.get(actor_ref).and_then(|o| o.location_ref.clone());
+                let _ = self.fire_hook(actor_ref, "on_disconnect", actor_ref, room.as_deref(), None);
+                if let Some(room_ref) = &room {
+                    let _ = self.fire_hook(room_ref, "on_disconnect", actor_ref, Some(room_ref), None);
+                }
+
                 if let Some(obj) = self.world.get_mut(actor_ref) {
                     obj.tags.insert(crate::world::Tag {
                         category: "system".to_string(),
@@ -862,6 +869,13 @@ impl Engine {
             &format!("{} has connected.\r\n", username),
             session_id,
         );
+
+        // Fire on_connect on the player and on the room
+        let room = self.world.get(character_ref).and_then(|o| o.location_ref.clone());
+        let _ = self.fire_hook(character_ref, "on_connect", character_ref, room.as_deref(), None);
+        if let Some(room_ref) = &room {
+            let _ = self.fire_hook(room_ref, "on_connect", character_ref, Some(room_ref), None);
+        }
     }
 
     fn session_account_id(&self, session_id: &str) -> Option<String> {
@@ -923,6 +937,7 @@ impl Engine {
             "examine" | "ex" => commands::do_examine(&self.world, &actor_ref, &args),
             "who" => self.do_who(session_id),
             "@password" => self.cmd_password(session_id, &args),
+            "whisper" => self.cmd_whisper(session_id, &actor_ref, &args),
             "emote" | "pose" | ":" => {
                 let msg = if cmd == ":" {
                     input[1..].trim().to_string()
@@ -1137,6 +1152,7 @@ impl Engine {
                     self.world.objects.remove(&r);
                 }
             }
+            let _ = self.fire_hook(target_ref, "on_destroy", actor_ref, None, None);
             self.world.objects.remove(target_ref);
             format!("Destroyed {} ({}).\r\n", name, target_ref)
         } else {
@@ -1513,6 +1529,9 @@ impl Engine {
             obj.location_ref = Some(actor_ref.to_string());
         }
 
+        let _ = self.fire_hook(&item_ref, "on_move", actor_ref, Some(&room_ref), None);
+        let _ = self.fire_hook(actor_ref, "on_receive", actor_ref, Some(&room_ref), None);
+
         if let Err(e) = self.fire_hook(&item_ref, "on_get", actor_ref, Some(&room_ref), None) {
             tracing::warn!(hook = "on_get", target = %item_ref, error = %e, "softcode error");
         }
@@ -1759,7 +1778,59 @@ impl Engine {
         self.send(session_id, &String::from_utf8_lossy(&[IAC, WONT, ECHO_OPT]).to_string());
     }
 
-    fn do_emote(&self, speaker_session: &str, actor_ref: &str, message: &str) -> String {
+    fn cmd_whisper(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
+        // whisper <player> <message>
+        let (target_name, message) = match args.split_once(' ') {
+            Some((t, m)) => (t.trim(), m.trim()),
+            None => return "Usage: whisper <player> <message>\r\n".to_string(),
+        };
+        if message.is_empty() {
+            return "Usage: whisper <player> <message>\r\n".to_string();
+        }
+
+        let actor = match self.world.get(actor_ref) {
+            Some(a) => a,
+            None => return "You don't exist.\r\n".to_string(),
+        };
+        let room_ref = match &actor.location_ref {
+            Some(r) => r.clone(),
+            None => return "You're nowhere.\r\n".to_string(),
+        };
+        let sender_name = actor.display_name().to_string();
+
+        let lower_target = target_name.to_lowercase();
+        let target_session = self.sessions.iter().find(|(sid, s)| {
+            *sid != session_id
+                && if let SessionState::Playing { actor_ref: ar, .. } = &s.state {
+                    self.world
+                        .get(ar)
+                        .map(|o| {
+                            o.location_ref.as_deref() == Some(&room_ref)
+                                && (o.key.to_lowercase() == lower_target
+                                    || o.display_name().to_lowercase() == lower_target)
+                        })
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+        });
+
+        match target_session {
+            Some((_, session)) => {
+                let _ = session
+                    .tx
+                    .send(format!("{} whispers, \"{}\"\r\n", sender_name, message));
+
+                // Fire on_whisper on the room
+                let _ = self.fire_hook(&room_ref, "on_whisper", actor_ref, Some(&room_ref), None);
+
+                format!("You whisper to {}, \"{}\"\r\n", target_name, message)
+            }
+            None => format!("You don't see '{}' here.\r\n", target_name),
+        }
+    }
+
+    fn do_emote(&mut self, speaker_session: &str, actor_ref: &str, message: &str) -> String {
         if message.is_empty() {
             return "Emote what?\r\n".to_string();
         }
@@ -1781,14 +1852,16 @@ impl Engine {
             if sid == speaker_session {
                 continue;
             }
-            if let SessionState::Playing { actor_ref, .. } = &session.state {
-                if let Some(other_actor) = self.world.get(actor_ref) {
+            if let SessionState::Playing { actor_ref: ar, .. } = &session.state {
+                if let Some(other_actor) = self.world.get(ar) {
                     if other_actor.location_ref.as_deref() == Some(&room_ref) {
                         let _ = session.tx.send(others_msg.clone());
                     }
                 }
             }
         }
+
+        let _ = self.fire_hook(&room_ref, "on_emote", actor_ref, Some(&room_ref), None);
 
         format!("{} {}\r\n", name, message)
     }
@@ -2166,6 +2239,21 @@ impl Engine {
             return "You can't go there.\r\n".to_string();
         }
 
+        // Check can_enter hook on the destination room (Luau)
+        match self.fire_hook(target_ref, "can_enter", actor_ref, Some(&old_room), None) {
+            Ok(run) if run.denied => {
+                return if run.emitted_to_actor {
+                    String::new()
+                } else {
+                    "You can't go there.\r\n".to_string()
+                };
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(hook = "can_enter", error = %e, "softcode error");
+            }
+        }
+
         // Fire on_leave on old room
         let _ = self.fire_hook(&old_room, "on_leave", actor_ref, Some(&old_room), None);
 
@@ -2176,6 +2264,9 @@ impl Engine {
         if let Some(actor) = self.world.get_mut(actor_ref) {
             actor.location_ref = Some(target_ref.to_string());
         }
+
+        // Fire on_move on the actor
+        let _ = self.fire_hook(actor_ref, "on_move", actor_ref, Some(target_ref), None);
 
         // Fire on_enter on new room
         let _ = self.fire_hook(target_ref, "on_enter", actor_ref, Some(target_ref), None);
@@ -2237,6 +2328,8 @@ impl Engine {
         if let Some(obj) = self.world.get_mut(&item_ref) {
             obj.location_ref = Some(room_ref.clone());
         }
+
+        let _ = self.fire_hook(&item_ref, "on_move", actor_ref, Some(&room_ref), None);
 
         // Fire on_drop
         let _ = self.fire_hook(&item_ref, "on_drop", actor_ref, Some(&room_ref), None);
