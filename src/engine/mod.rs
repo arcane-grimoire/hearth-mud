@@ -48,6 +48,7 @@ pub enum ApiRequest {
     Examine { ref_id: String },
     SetAttribute { ref_id: String, key: String, value: serde_json::Value },
     SetDescription { ref_id: String, description: String },
+    SetTitle { ref_id: String, title: String },
     AddTag { ref_id: String, tag: String },
     RemoveTag { ref_id: String, tag: String },
     DeleteObject { ref_id: String },
@@ -468,6 +469,15 @@ impl Engine {
                 match self.world.get_mut(&ref_id) {
                     Some(obj) => {
                         obj.description = description;
+                        ApiResponse::ok()
+                    }
+                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
+            ApiRequest::SetTitle { ref_id, title } => {
+                match self.world.get_mut(&ref_id) {
+                    Some(obj) => {
+                        obj.title = Some(title);
                         ApiResponse::ok()
                     }
                     None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
