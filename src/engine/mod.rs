@@ -56,6 +56,9 @@ struct HookRun {
     emitted_to_actor: bool,
 }
 
+const TICK_INTERVAL_SECS: u64 = 1;
+const AUTOSAVE_INTERVAL_SECS: u64 = 300; // 5 minutes
+
 pub struct Engine {
     world: World,
     accounts: AccountStore,
@@ -63,6 +66,7 @@ pub struct Engine {
     db: Database,
     softcode: SoftcodeRuntime,
     rx: mpsc::UnboundedReceiver<EngineMessage>,
+    tick_count: u64,
 }
 
 impl Engine {
@@ -89,29 +93,194 @@ impl Engine {
             db,
             softcode: SoftcodeRuntime::new(),
             rx,
+            tick_count: 0,
         }
     }
 
     pub async fn run(mut self) {
         tracing::info!("Engine started");
-        while let Some(msg) = self.rx.recv().await {
-            match msg {
-                EngineMessage::PlayerConnected { session_id, tx } => {
-                    self.handle_connect(session_id, tx);
+
+        let mut tick_interval =
+            tokio::time::interval(std::time::Duration::from_secs(TICK_INTERVAL_SECS));
+        let mut autosave_interval =
+            tokio::time::interval(std::time::Duration::from_secs(AUTOSAVE_INTERVAL_SECS));
+
+        // Don't fire immediately on start
+        tick_interval.tick().await;
+        autosave_interval.tick().await;
+
+        loop {
+            tokio::select! {
+                msg = self.rx.recv() => {
+                    match msg {
+                        Some(EngineMessage::PlayerConnected { session_id, tx }) => {
+                            self.handle_connect(session_id, tx);
+                        }
+                        Some(EngineMessage::PlayerDisconnected { session_id }) => {
+                            self.handle_disconnect(&session_id);
+                        }
+                        Some(EngineMessage::PlayerInput { session_id, input }) => {
+                            self.handle_input(&session_id, &input);
+                        }
+                        Some(EngineMessage::Shutdown) | None => {
+                            break;
+                        }
+                    }
                 }
-                EngineMessage::PlayerDisconnected { session_id } => {
-                    self.handle_disconnect(&session_id);
+                _ = tick_interval.tick() => {
+                    self.do_tick();
                 }
-                EngineMessage::PlayerInput { session_id, input } => {
-                    self.handle_input(&session_id, &input);
-                }
-                EngineMessage::Shutdown => {
-                    break;
+                _ = autosave_interval.tick() => {
+                    tracing::info!("Autosave triggered");
+                    self.do_save();
                 }
             }
         }
+
         tracing::info!("Engine shutting down, saving world...");
         self.do_save();
+    }
+
+    fn do_tick(&mut self) {
+        self.tick_count += 1;
+        let tick = self.tick_count;
+        let start = std::time::Instant::now();
+        let tick_budget = std::time::Duration::from_millis(500);
+        let mut ran = 0u32;
+
+        // -- Per-object on_tick hooks --
+        let mut tickable: Vec<(String, u64)> = Vec::new();
+        for obj in self.world.objects.values() {
+            if let Some(program) = hooks::get_program(obj, "on_tick") {
+                if !program.enabled {
+                    continue;
+                }
+                let interval = obj
+                    .attrs
+                    .get("tick_interval")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1);
+                tickable.push((obj.ref_id.clone(), interval));
+            }
+        }
+        tickable.sort_by(|a, b| a.0.cmp(&b.0));
+
+        for (ref_id, interval) in &tickable {
+            if start.elapsed() > tick_budget {
+                tracing::warn!(tick, ran, "Tick budget exceeded");
+                break;
+            }
+            if *interval == 0 || tick % interval != 0 {
+                continue;
+            }
+            match self.fire_tick_hook(ref_id) {
+                Ok(_) => ran += 1,
+                Err(e) => {
+                    tracing::warn!(hook = "on_tick", target = %ref_id, error = %e, "Tick script error");
+                }
+            }
+        }
+
+        // -- Global scripts --
+        let mut script_names: Vec<(String, u64)> = self
+            .world
+            .scripts
+            .values()
+            .filter(|s| s.enabled)
+            .map(|s| (s.name.clone(), s.interval))
+            .collect();
+        script_names.sort_by(|a, b| a.0.cmp(&b.0));
+
+        for (name, interval) in &script_names {
+            if start.elapsed() > tick_budget {
+                tracing::warn!(tick, ran, "Tick budget exceeded (global scripts)");
+                break;
+            }
+            if *interval == 0 || tick % interval != 0 {
+                continue;
+            }
+            match self.fire_global_script(name) {
+                Ok(_) => ran += 1,
+                Err(e) => {
+                    tracing::warn!(script = %name, error = %e, "Global script error");
+                }
+            }
+        }
+
+        if ran > 0 {
+            tracing::debug!(tick, ran, elapsed_ms = start.elapsed().as_millis(), "Tick complete");
+        }
+    }
+
+    fn fire_tick_hook(&mut self, this_ref: &str) -> Result<(), String> {
+        let program = match self
+            .world
+            .get(this_ref)
+            .and_then(|o| hooks::get_program(o, "on_tick"))
+        {
+            Some(p) => p.clone(),
+            None => return Ok(()),
+        };
+
+        let room_ref = self
+            .world
+            .get(this_ref)
+            .and_then(|o| o.location_ref.clone());
+
+        let result = self
+            .softcode
+            .run_hook(
+                &self.world,
+                &program,
+                this_ref,
+                this_ref,
+                room_ref.as_deref(),
+                None,
+                Budget::default(),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let effects = softcode::apply_batch(&mut self.world, &result.batch)?;
+        self.deliver_effects(&effects);
+
+        // Write state back
+        if !result.state.is_empty() {
+            if let Some(obj) = self.world.get_mut(this_ref) {
+                if let Some(prog) = obj.programs.get_mut("on_tick") {
+                    prog.state = result.state;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn fire_global_script(&mut self, name: &str) -> Result<(), String> {
+        let script = match self.world.scripts.get(name) {
+            Some(s) => s.clone(),
+            None => return Ok(()),
+        };
+
+        let result = self
+            .softcode
+            .run_global_script(
+                &self.world,
+                &script.source,
+                &script.entry,
+                &script.state,
+                Budget::default(),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let effects = softcode::apply_batch(&mut self.world, &result.batch)?;
+        self.deliver_effects(&effects);
+
+        // Write state back
+        if let Some(s) = self.world.scripts.get_mut(name) {
+            s.state = result.state;
+        }
+
+        Ok(())
     }
 
     fn do_save(&self) {
@@ -480,6 +649,10 @@ impl Engine {
             "@rmprogram" => self.cmd_rmprogram(session_id, &actor_ref, &args),
             "@tag" => self.cmd_tag(session_id, &actor_ref, &args),
             "@untag" => self.cmd_untag(session_id, &actor_ref, &args),
+            "@script" => self.cmd_script(session_id, &args),
+            "@scripts" => self.cmd_scripts(session_id),
+            "@rmscript" => self.cmd_rmscript(session_id, &args),
+            "@script-interval" => self.cmd_script_interval(session_id, &args),
             "@lock" => self.cmd_lock(session_id, &actor_ref, &args),
             "@unlock" => self.cmd_unlock(session_id, &actor_ref, &args),
             "@locks" => self.cmd_locks(session_id, &actor_ref, &args),
@@ -1260,6 +1433,95 @@ impl Engine {
         }
 
         format!("{} {}\r\n", name, message)
+    }
+
+    // -- Global script commands --
+
+    fn cmd_script(&mut self, session_id: &str, args: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Builder) {
+            return "Permission denied.\r\n".to_string();
+        }
+        // @script <name> = <luau source>
+        let (name, source) = match args.split_once('=') {
+            Some((n, s)) => (n.trim(), s.trim()),
+            None => return "Usage: @script <name> = <luau source>\r\n".to_string(),
+        };
+        if name.is_empty() || source.is_empty() {
+            return "Usage: @script <name> = <luau source>\r\n".to_string();
+        }
+        if let Err(e) = self.softcode.check_syntax(source) {
+            return format!("Syntax error: {}\r\n", e);
+        }
+        let is_new = !self.world.scripts.contains_key(name);
+        let script = world::Script::new(name, source);
+        self.world.scripts.insert(name.to_string(), script);
+        if is_new {
+            format!("Script '{}' created (ticks every 1s).\r\n", name)
+        } else {
+            format!("Script '{}' updated.\r\n", name)
+        }
+    }
+
+    fn cmd_scripts(&self, session_id: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Builder) {
+            return "Permission denied.\r\n".to_string();
+        }
+        if self.world.scripts.is_empty() {
+            return "No global scripts.\r\n".to_string();
+        }
+        let mut out = "\r\nGlobal scripts:\r\n".to_string();
+        let mut names: Vec<&String> = self.world.scripts.keys().collect();
+        names.sort();
+        for name in names {
+            let script = &self.world.scripts[name];
+            let status = if script.enabled { "on" } else { "off" };
+            let state_keys = script.state.len();
+            out.push_str(&format!(
+                "  {} [{}] interval={}  state_keys={}\r\n",
+                name, status, script.interval, state_keys
+            ));
+        }
+        out
+    }
+
+    fn cmd_rmscript(&mut self, session_id: &str, args: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Builder) {
+            return "Permission denied.\r\n".to_string();
+        }
+        let name = args.trim();
+        if name.is_empty() {
+            return "Usage: @rmscript <name>\r\n".to_string();
+        }
+        if self.world.scripts.remove(name).is_some() {
+            format!("Script '{}' removed.\r\n", name)
+        } else {
+            format!("No script named '{}'.\r\n", name)
+        }
+    }
+
+    fn cmd_script_interval(&mut self, session_id: &str, args: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Builder) {
+            return "Permission denied.\r\n".to_string();
+        }
+        // @script-interval <name> = <ticks>
+        let (name, interval_str) = match args.split_once('=') {
+            Some((n, i)) => (n.trim(), i.trim()),
+            None => return "Usage: @script-interval <name> = <ticks>\r\n".to_string(),
+        };
+        let interval: u64 = match interval_str.parse() {
+            Ok(n) => n,
+            Err(_) => return "Interval must be a positive integer.\r\n".to_string(),
+        };
+        if interval == 0 {
+            return "Interval must be at least 1.\r\n".to_string();
+        }
+        match self.world.scripts.get_mut(name) {
+            Some(script) => {
+                script.interval = interval;
+                format!("Script '{}' interval set to {} tick(s).\r\n", name, interval)
+            }
+            None => format!("No script named '{}'.\r\n", name),
+        }
     }
 
     fn cmd_tag(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {

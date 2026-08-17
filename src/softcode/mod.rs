@@ -10,11 +10,12 @@ pub mod api;
 pub mod hooks;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mlua::{Lua, Value as LuaValue, VmState};
+use mlua::{Lua, LuaSerdeExt, Value as LuaValue, VmState};
 
 use crate::world::{GameObject, Kind, Tag, World};
 use hooks::ProgramRecord;
@@ -278,6 +279,9 @@ pub struct ProgramResult {
     /// return value nobody checks) safe to write without a trailing
     /// `return true`, while `can_` hooks still get a real veto.
     pub denied: bool,
+    /// Updated state table from the script run. The engine writes this back
+    /// to the ProgramRecord after applying the batch.
+    pub state: HashMap<String, serde_json::Value>,
 }
 
 /// Owns the Luau VM. One `SoftcodeRuntime` is enough for the whole engine —
@@ -317,14 +321,8 @@ impl SoftcodeRuntime {
     /// Run `program`'s Luau source, calling its `program.hook`-named
     /// function with `(this, actor, room[, args])`.
     ///
-    /// - `this_ref` is the object the Program is attached to.
-    /// - `actor_ref` is the object performing the action.
-    /// - `room_ref` is the room the action is happening in, if any.
-    /// - `args` is the trailing command text, only passed for `cmd_` hooks.
-    ///
-    /// Reads see `world` as it is right now; nothing the script does is
-    /// visible to itself or to further reads until the returned
-    /// [`ProgramResult::batch`] is applied by the caller.
+    /// For `on_tick` hooks, the signature is `(this, state, room)` — state
+    /// is a mutable table persisted between runs.
     #[allow(clippy::too_many_arguments)]
     pub fn run_hook(
         &self,
@@ -343,6 +341,10 @@ impl SoftcodeRuntime {
                 .get(actor_ref)
                 .and_then(|a| a.location_ref.clone())
         });
+        let is_tick = program.hook == "on_tick";
+        let state_capture: Rc<RefCell<HashMap<String, serde_json::Value>>> =
+            Rc::new(RefCell::new(HashMap::new()));
+        let state_writer = Rc::clone(&state_capture);
 
         let run_result: mlua::Result<LuaValue> = self.lua.scope(|scope| {
             let env = self.lua.create_table()?;
@@ -370,16 +372,117 @@ impl SoftcodeRuntime {
             };
 
             let this_val = api::object_to_value(&self.lua, world, this_ref)?;
-            let actor_val = api::object_to_value(&self.lua, world, actor_ref)?;
-            let room_val = match room_ref.or(default_location.as_deref()) {
-                Some(r) => api::object_to_value(&self.lua, world, r)?,
-                None => LuaValue::Nil,
+
+            if is_tick {
+                let state_tbl = self.lua.create_table()?;
+                for (k, v) in &program.state {
+                    state_tbl.set(k.clone(), self.lua.to_value(v)?)?;
+                }
+                let room_val = match room_ref.or(default_location.as_deref()) {
+                    Some(r) => api::object_to_value(&self.lua, world, r)?,
+                    None => LuaValue::Nil,
+                };
+                let ret = func.call::<LuaValue>((this_val, state_tbl.clone(), room_val))?;
+                // Read state back before scope ends
+                let mut map = state_writer.borrow_mut();
+                for pair in state_tbl.pairs::<String, LuaValue>() {
+                    if let Ok((k, v)) = pair {
+                        if let Ok(json_val) = self.lua.from_value::<serde_json::Value>(v) {
+                            map.insert(k, json_val);
+                        }
+                    }
+                }
+                Ok(ret)
+            } else {
+                let actor_val = api::object_to_value(&self.lua, world, actor_ref)?;
+                let room_val = match room_ref.or(default_location.as_deref()) {
+                    Some(r) => api::object_to_value(&self.lua, world, r)?,
+                    None => LuaValue::Nil,
+                };
+                let ret = match args {
+                    Some(a) => func.call::<LuaValue>((this_val, actor_val, room_val, a.to_string()))?,
+                    None => func.call::<LuaValue>((this_val, actor_val, room_val))?,
+                };
+                Ok(ret)
+            }
+        });
+
+        self.lua.remove_interrupt();
+
+        let ret = match run_result {
+            Ok(v) => v,
+            Err(e) => return Err(classify_lua_error(e)),
+        };
+
+        let batch = Rc::try_unwrap(batch)
+            .map(|cell| cell.into_inner())
+            .unwrap_or_else(|rc| rc.borrow().clone());
+
+        let state = Rc::try_unwrap(state_capture)
+            .map(|cell| cell.into_inner())
+            .unwrap_or_default();
+
+        Ok(ProgramResult {
+            batch,
+            denied: matches!(ret, LuaValue::Boolean(false)),
+            state,
+        })
+    }
+
+    /// Run a global script — no `this` object, just `(state)`.
+    pub fn run_global_script(
+        &self,
+        world: &World,
+        source: &str,
+        entry: &str,
+        state: &HashMap<String, serde_json::Value>,
+        budget: Budget,
+    ) -> Result<ProgramResult, SoftcodeError> {
+        self.install_budget(budget);
+        let batch = Rc::new(RefCell::new(IntentBatch::default()));
+        let state_capture: Rc<RefCell<HashMap<String, serde_json::Value>>> =
+            Rc::new(RefCell::new(HashMap::new()));
+        let state_writer = Rc::clone(&state_capture);
+
+        let run_result: mlua::Result<LuaValue> = self.lua.scope(|scope| {
+            let env = self.lua.create_table()?;
+            api::install_stdlib(&self.lua, &env)?;
+            api::install(
+                &self.lua,
+                scope,
+                &env,
+                world,
+                Rc::clone(&batch),
+                None,
+            )?;
+
+            let chunk = self
+                .lua
+                .load(source)
+                .set_name(entry)
+                .set_environment(env.clone());
+            chunk.exec()?;
+
+            let func: Option<mlua::Function> = env.get(entry)?;
+            let func = match func {
+                Some(f) => f,
+                None => return Ok(LuaValue::Nil),
             };
 
-            let ret = match args {
-                Some(a) => func.call::<LuaValue>((this_val, actor_val, room_val, a.to_string()))?,
-                None => func.call::<LuaValue>((this_val, actor_val, room_val))?,
-            };
+            let state_tbl = self.lua.create_table()?;
+            for (k, v) in state {
+                state_tbl.set(k.clone(), self.lua.to_value(v)?)?;
+            }
+            let ret = func.call::<LuaValue>(state_tbl.clone())?;
+            // Read state back before scope ends
+            let mut map = state_writer.borrow_mut();
+            for pair in state_tbl.pairs::<String, LuaValue>() {
+                if let Ok((k, v)) = pair {
+                    if let Ok(json_val) = self.lua.from_value::<serde_json::Value>(v) {
+                        map.insert(k, json_val);
+                    }
+                }
+            }
             Ok(ret)
         });
 
@@ -390,17 +493,18 @@ impl SoftcodeRuntime {
             Err(e) => return Err(classify_lua_error(e)),
         };
 
-        // All API closures (and their Rc clones of `batch`) are dropped when
-        // `scope()` returns above, so this should always be the sole
-        // reference; fall back to cloning out of the RefCell rather than
-        // losing queued intents in the (should-be-impossible) other case.
         let batch = Rc::try_unwrap(batch)
             .map(|cell| cell.into_inner())
             .unwrap_or_else(|rc| rc.borrow().clone());
 
+        let new_state = Rc::try_unwrap(state_capture)
+            .map(|cell| cell.into_inner())
+            .unwrap_or_default();
+
         Ok(ProgramResult {
             batch,
             denied: matches!(ret, LuaValue::Boolean(false)),
+            state: new_state,
         })
     }
 }

@@ -1,7 +1,9 @@
 mod object;
+mod script;
 mod tag;
 
 pub use object::{Exit, GameObject, Kind};
+pub use script::Script;
 pub use tag::Tag;
 
 use std::collections::HashMap;
@@ -10,6 +12,7 @@ use std::collections::HashMap;
 pub struct World {
     pub objects: HashMap<String, GameObject>,
     pub exits: Vec<Exit>,
+    pub scripts: HashMap<String, Script>,
 }
 
 impl World {
@@ -17,6 +20,7 @@ impl World {
         Self {
             objects: HashMap::new(),
             exits: Vec::new(),
+            scripts: HashMap::new(),
         }
     }
 

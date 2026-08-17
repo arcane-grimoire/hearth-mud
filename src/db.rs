@@ -58,6 +58,15 @@ impl Database {
                 aliases_json TEXT NOT NULL DEFAULT '[]',
                 locks_json TEXT NOT NULL DEFAULT '{}',
                 id TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS scripts (
+                name TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                entry TEXT NOT NULL DEFAULT 'on_tick',
+                interval INTEGER NOT NULL DEFAULT 1,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                state_json TEXT NOT NULL DEFAULT '{}'
             );",
         )?;
 
@@ -133,6 +142,7 @@ impl Database {
         tx.execute("DELETE FROM objects", [])?;
         tx.execute("DELETE FROM tags", [])?;
         tx.execute("DELETE FROM exits", [])?;
+        tx.execute("DELETE FROM scripts", [])?;
 
         {
             let mut obj_stmt = tx.prepare(
@@ -182,6 +192,24 @@ impl Database {
                     aliases_json,
                     locks_json,
                     exit.id,
+                ])?;
+            }
+        }
+
+        {
+            let mut script_stmt = tx.prepare(
+                "INSERT INTO scripts (name, source, entry, interval, enabled, state_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for script in world.scripts.values() {
+                let state_json =
+                    serde_json::to_string(&script.state).unwrap_or_else(|_| "{}".into());
+                script_stmt.execute(params![
+                    script.name,
+                    script.source,
+                    script.entry,
+                    script.interval,
+                    script.enabled as i32,
+                    state_json,
                 ])?;
             }
         }
@@ -289,6 +317,35 @@ impl Database {
                 id,
             };
             world.add_exit(exit);
+        }
+
+        // Load global scripts
+        let mut script_stmt = self.conn.prepare(
+            "SELECT name, source, entry, interval, enabled, state_json FROM scripts",
+        )?;
+        let script_rows = script_stmt.query_map([], |row| {
+            let name: String = row.get(0)?;
+            let source: String = row.get(1)?;
+            let entry: String = row.get(2)?;
+            let interval: u64 = row.get(3)?;
+            let enabled: bool = row.get(4)?;
+            let state_json: String = row.get(5)?;
+            Ok((name, source, entry, interval, enabled, state_json))
+        })?;
+        for row in script_rows {
+            let (name, source, entry, interval, enabled, state_json) = row?;
+            let state: HashMap<String, serde_json::Value> =
+                serde_json::from_str(&state_json).unwrap_or_default();
+            use crate::world::Script;
+            let script = Script {
+                name: name.clone(),
+                source,
+                entry,
+                interval,
+                enabled,
+                state,
+            };
+            world.scripts.insert(name, script);
         }
 
         Ok(world)

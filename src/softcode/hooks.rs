@@ -6,6 +6,8 @@
 //! `cmd_` hooks define player-typeable commands that dispatch resolves to
 //! when nothing builtin matches (see ADR 0004).
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::world::GameObject;
@@ -24,6 +26,7 @@ pub const KNOWN_HOOKS: &[&str] = &[
     "on_look",
     "can_say",
     "on_say",
+    "on_tick",
 ];
 
 /// Whether `name` is a hook the engine will accept on `@program`.
@@ -50,6 +53,7 @@ pub fn describe_hook(name: &str) -> &'static str {
         "on_look" => "runs after an actor looks at this object",
         "can_say" => "gates whether an actor may speak in this room",
         "on_say" => "runs after an actor speaks in this room",
+        "on_tick" => "runs every N ticks (set tick_interval attr)",
         _ => "a custom player command (cmd_<name>)",
     }
 }
@@ -60,6 +64,8 @@ pub struct ProgramRecord {
     pub hook: String,
     pub source: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub state: HashMap<String, serde_json::Value>,
 }
 
 impl ProgramRecord {
@@ -68,6 +74,7 @@ impl ProgramRecord {
             hook: hook.into(),
             source: source.into(),
             enabled: true,
+            state: HashMap::new(),
         }
     }
 }
