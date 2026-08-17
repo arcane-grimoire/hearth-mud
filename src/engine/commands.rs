@@ -202,6 +202,7 @@ pub fn do_help_with_roles(is_builder: bool, is_admin: bool) -> String {
         "  say <message>     - Say something\r\n",
         "  get <item>        - Pick up an item\r\n",
         "  drop <item>       - Drop an item\r\n",
+        "  use <target>      - Use an object\r\n",
         "  inventory (i)     - Check what you're carrying\r\n",
         "  examine <target>  - Examine something closely\r\n",
         "  emote <action>    - Emote (or :action)\r\n",

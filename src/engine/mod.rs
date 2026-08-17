@@ -624,6 +624,7 @@ impl Engine {
             "inventory" | "inv" | "i" => commands::do_inventory(&self.world, &actor_ref),
             "get" | "take" => self.cmd_get(&actor_ref, &args),
             "drop" => self.cmd_drop(&actor_ref, &args),
+            "use" => self.cmd_use(&actor_ref, &args),
             "examine" | "ex" => commands::do_examine(&self.world, &actor_ref, &args),
             "who" => self.do_who(session_id),
             "emote" | "pose" | ":" => {
@@ -1834,6 +1835,75 @@ impl Engine {
         let _ = self.fire_hook(&item_ref, "on_drop", actor_ref, Some(&room_ref), None);
 
         format!("You drop {}.\r\n", name)
+    }
+
+    fn cmd_use(&mut self, actor_ref: &str, args: &str) -> String {
+        if args.is_empty() {
+            return "Use what?\r\n".to_string();
+        }
+        let room_ref = match self.world.get(actor_ref).and_then(|a| a.location_ref.clone()) {
+            Some(r) => r,
+            None => return "You're nowhere.\r\n".to_string(),
+        };
+        let target_name = args.to_lowercase();
+        // Search room contents then inventory
+        let target_ref = self
+            .world
+            .objects_in(&room_ref)
+            .into_iter()
+            .chain(self.world.objects_in(actor_ref))
+            .find(|o| {
+                o.key.to_lowercase().contains(&target_name)
+                    || o.display_name().to_lowercase().contains(&target_name)
+            })
+            .map(|o| o.ref_id.clone());
+
+        let target_ref = match target_ref {
+            Some(r) => r,
+            None => return format!("You don't see '{}' here.\r\n", args),
+        };
+
+        // Check use lock (DSL)
+        let target_locks = self
+            .world
+            .get(&target_ref)
+            .map(|o| o.locks.clone())
+            .unwrap_or_default();
+        if let Some(false) = self.check_lock("use", &target_locks, actor_ref) {
+            return "You can't use that.\r\n".to_string();
+        }
+
+        // Check can_use hook (Luau)
+        match self.fire_hook(&target_ref, "can_use", actor_ref, Some(&room_ref), None) {
+            Ok(run) if run.denied => {
+                return if run.emitted_to_actor {
+                    String::new()
+                } else {
+                    "You can't use that.\r\n".to_string()
+                };
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(hook = "can_use", target = %target_ref, error = %e, "softcode error");
+            }
+        }
+
+        // Fire on_use hook — if no hook exists, there's nothing to "use"
+        match self.fire_hook(&target_ref, "on_use", actor_ref, Some(&room_ref), None) {
+            Ok(run) if run.emitted_to_actor => String::new(),
+            Ok(_) => {
+                let name = self
+                    .world
+                    .get(&target_ref)
+                    .map(|o| o.display_name().to_string())
+                    .unwrap_or_default();
+                format!("You use {}. Nothing happens.\r\n", name)
+            }
+            Err(e) => {
+                tracing::warn!(hook = "on_use", target = %target_ref, error = %e, "softcode error");
+                "Something goes wrong.\r\n".to_string()
+            }
+        }
     }
 
     fn cmd_say(&mut self, speaker_session: &str, actor_ref: &str, message: &str) -> String {

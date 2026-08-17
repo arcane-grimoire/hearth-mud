@@ -35,12 +35,20 @@ async fn main() {
         }
     });
 
+    let web_tx = engine_tx.clone();
+    let web_handle = tokio::spawn(async move {
+        if let Err(e) = net::start_web("0.0.0.0:8000", web_tx).await {
+            tracing::error!(error = %e, "Web server failed");
+        }
+    });
+
     let engine_handle = tokio::spawn(engine.run());
 
-    tracing::info!("Hearth MUD running — telnet localhost:4000");
+    tracing::info!("Hearth MUD running — telnet :4000 | web :8000");
 
     tokio::select! {
         _ = engine_handle => tracing::info!("Engine stopped"),
         _ = telnet_handle => tracing::info!("Telnet stopped"),
+        _ = web_handle => tracing::info!("Web server stopped"),
     }
 }

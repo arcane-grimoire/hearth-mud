@@ -57,22 +57,42 @@ room, sees it has `cmd_push`, and runs it. The `args` parameter contains
 everything after the command name (e.g., `push button hard` would have
 `args = "button hard"`).
 
+### `on_tick` — timed behavior
+
+Runs on the global tick (1-second heartbeat). Use `tick_interval` attribute
+to control frequency. Receives a persistent `state` table instead of `actor`.
+
+```lua
+function on_tick(this, state, room)
+  state.count = (state.count or 0) + 1
+  if state.count % 10 == 0 then
+    emit_room(room, "The torch flickers and dims.")
+  end
+end
+```
+
+State survives between runs and persists through server restarts. Use it for
+internal working memory that shouldn't be visible as object attributes.
+
 ## Known hooks
 
-| Hook | Fires when... |
-|------|---------------|
-| `can_get` | Before an actor picks up this object |
-| `on_get` | After an actor picks up this object |
-| `can_drop` | Before an actor drops this object |
-| `on_drop` | After an actor drops this object |
-| `can_traverse` | Before an actor uses this exit |
-| `on_enter` | After an actor enters this room |
-| `on_leave` | After an actor leaves this room |
-| `can_look` | Before an actor looks at this object |
-| `on_look` | After an actor looks at this object |
-| `can_say` | Before an actor speaks in this room |
-| `on_say` | After an actor speaks in this room |
-| `cmd_*` | Any name — becomes a player command |
+| Hook | Fires when... | Signature |
+|------|---------------|-----------|
+| `can_get` | Before an actor picks up this object | `(this, actor, room)` |
+| `on_get` | After an actor picks up this object | `(this, actor, room)` |
+| `can_drop` | Before an actor drops this object | `(this, actor, room)` |
+| `on_drop` | After an actor drops this object | `(this, actor, room)` |
+| `can_use` | Before an actor uses this object | `(this, actor, room)` |
+| `on_use` | After an actor uses this object | `(this, actor, room)` |
+| `can_traverse` | Before an actor enters this room via an exit | `(this, actor, room)` |
+| `on_enter` | After an actor enters this room | `(this, actor, room)` |
+| `on_leave` | After an actor leaves this room | `(this, actor, room)` |
+| `can_look` | Before an actor looks at this object | `(this, actor, room)` |
+| `on_look` | After an actor looks at this object | `(this, actor, room)` |
+| `can_say` | Before an actor speaks in this room | `(this, actor, room)` |
+| `on_say` | After an actor speaks in this room | `(this, actor, room)` |
+| `on_tick` | Every N ticks (set `tick_interval` attr) | `(this, state, room)` |
+| `cmd_*` | Any name — becomes a player command | `(this, actor, room, args)` |
 
 ## Hook parameters
 
@@ -83,12 +103,12 @@ Every hook function receives these parameters:
 | `this` | The object the program is attached to |
 | `actor` | The player performing the action |
 | `room` | The room the action is happening in |
+| `state` | (`on_tick` only) Persistent state table |
 | `args` | (`cmd_` only) The text after the command name |
 
-Each of these is a table with the object's data:
+Each object parameter is a table with the object's data:
 
 ```lua
--- actor is a table like:
 {
   ref_id = "player/sam",
   key = "sam",
@@ -157,40 +177,108 @@ local ref = spawn({
 emit(actor, "A gold coin materializes!")
 ```
 
+## Global scripts
+
+Global scripts are standalone Luau programs not attached to any object. They're
+for game systems — weather, combat, economy, respawns — that don't belong
+on a specific object.
+
+```lua
+function on_tick(state)
+  state.counter = (state.counter or 0) + 1
+  if state.counter % 60 == 0 then
+    local weathers = {"clear", "cloudy", "rainy", "stormy"}
+    state.weather = weathers[math.random(#weathers)]
+  end
+end
+```
+
+Global scripts have their own persistent state table, their own tick interval,
+and full access to the read/write API. They don't receive `this`, `actor`, or
+`room` — just `state`.
+
+### Builder commands for global scripts
+
+```
+@script weather = function on_tick(state) ... end
+@script-interval weather = 60
+@scripts
+@rmscript weather
+```
+
+## Locks
+
+Locks are DSL expressions on objects and exits that gate actions without Luau.
+They're simpler than `can_` hooks for common permission patterns.
+
+### Lock types
+
+| Type | Checked on | When |
+|------|-----------|------|
+| `traverse` | exits | Before movement |
+| `enter` | rooms | Before entering |
+| `get` | items | Before picking up |
+| `drop` | items | Before dropping |
+| `use` | objects | Before using |
+| `look` | objects | Before examining |
+| `teleport` | rooms | Before teleporting |
+
+### Lock functions
+
+| Function | Description |
+|----------|-------------|
+| `perm(scope)` | Actor's account has this scope (admin implies all) |
+| `has_tag(spec)` | Actor has this tag |
+| `has_attr(key)` | Actor has this attribute |
+| `has_attr(key, value)` | Actor has this attribute with this value |
+| `in_inventory(tag_spec)` | Actor is carrying an object with this tag |
+| `is_kind(kind)` | Actor is this kind (player, npc, item) |
+| `time_between(start, end)` | Current UTC hour is in range |
+| `true` / `false` | Always allow / always deny |
+
+Combinators: `AND`, `OR`, `NOT`, parentheses.
+
+### Builder commands for locks
+
+```
+@lock area/starter/exit/square_to_tavern/traverse = has_tag(vip) OR perm(builder)
+@lock area/starter/item/rusty_sword/get = in_inventory(quest:key)
+@lock here/enter = NOT is_kind(npc)
+@unlock area/starter/exit/square_to_tavern/traverse
+@locks                        -- locks on current room
+@locks <ref>                  -- locks on a specific object/exit
+```
+
+### Locks vs hooks
+
+Locks and hooks can coexist. The engine checks DSL locks first, then fires
+the `can_` hook. If either denies, the action is blocked.
+
+- **Use locks** for simple, data-driven rules (has a tag, has a permission,
+  is carrying a key item).
+- **Use `can_` hooks** for complex logic (check multiple conditions, emit
+  custom denial messages, modify state).
+
 ## Builder commands
 
 All `@` commands require the `builder` scope.
 
-### @program — attach a script
+### Programs
 
 ```
-@program <ref>/<hook> = <luau source>
-```
-
-Examples:
-
-```
-@program area/starter/item/rusty_sword/on_get = function on_get(this, actor, room) emit(actor, "The sword hums!") end
-```
-
-```
-@program area/starter/room/town_square/cmd_pray = function cmd_pray(this, actor, room, args) emit(actor, "You kneel and pray. A warm feeling washes over you.") emit_room(room, actor.display_name .. " kneels in prayer.", {actor.ref_id}) end
+@program <ref>/<hook> = <luau source>    -- attach a program
+@programs [<ref>]                        -- list programs (default: room)
+@rmprogram <ref>/<hook>                  -- remove a program
 ```
 
 The source is syntax-checked before being installed. If there's a compile
 error, the program is rejected and the error is shown.
 
-### @programs — list scripts
+### Ticks (per-object)
 
 ```
-@programs                     -- programs on the current room
-@programs <ref>               -- programs on a specific object
-```
-
-### @rmprogram — remove a script
-
-```
-@rmprogram <ref>/<hook>
+@set <ref>/tick_interval = 5             -- run on_tick every 5 seconds
+@program <ref>/on_tick = function on_tick(this, state, room) ... end
 ```
 
 ## Sandboxing
@@ -218,3 +306,7 @@ Programs run in an isolated environment per call:
   Use attributes for values (`hp = 100`).
 - The `this` parameter is the object the program is attached to — use it to
   read and write the object's own state without hardcoding ref strings.
+- Script state (`state` in `on_tick`) is private to the program. It doesn't
+  show up in `examine` or `get_attr`. Use it for internal working memory.
+- Locks and hooks stack: DSL lock is checked first, then the `can_` hook.
+  You can use one or both.

@@ -26,6 +26,8 @@ pub const KNOWN_HOOKS: &[&str] = &[
     "on_look",
     "can_say",
     "on_say",
+    "can_use",
+    "on_use",
     "on_tick",
 ];
 
@@ -53,6 +55,8 @@ pub fn describe_hook(name: &str) -> &'static str {
         "on_look" => "runs after an actor looks at this object",
         "can_say" => "gates whether an actor may speak in this room",
         "on_say" => "runs after an actor speaks in this room",
+        "can_use" => "gates whether an actor may use this object",
+        "on_use" => "runs after an actor uses this object",
         "on_tick" => "runs every N ticks (set tick_interval attr)",
         _ => "a custom player command (cmd_<name>)",
     }
