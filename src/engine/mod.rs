@@ -294,7 +294,7 @@ impl Engine {
             .map_err(|e| e.to_string())?;
 
         let effects = softcode::apply_batch(&mut self.world, &result.batch)?;
-        self.deliver_effects(&effects);
+        self.deliver_effects(&effects, this_ref);
 
         // Write state back
         if !result.state.is_empty() {
@@ -326,7 +326,7 @@ impl Engine {
             .map_err(|e| e.to_string())?;
 
         let effects = softcode::apply_batch(&mut self.world, &result.batch)?;
-        self.deliver_effects(&effects);
+        self.deliver_effects(&effects, name);
 
         // Write state back
         if let Some(s) = self.world.scripts.get_mut(name) {
@@ -1408,7 +1408,7 @@ impl Engine {
         let emitted_to_actor = effects
             .iter()
             .any(|e| matches!(e, Effect::ToActor { target, .. } if target == actor_ref));
-        self.deliver_effects(&effects);
+        self.deliver_effects(&effects, actor_ref);
 
         Ok(HookRun {
             denied,
@@ -1416,7 +1416,8 @@ impl Engine {
         })
     }
 
-    fn deliver_effects(&self, effects: &[Effect]) {
+    fn deliver_effects(&mut self, effects: &[Effect], actor_ref: &str) {
+        let mut triggers = Vec::new();
         for effect in effects {
             match effect {
                 Effect::ToActor { target, message } => self.send_to_actor_ref(target, message),
@@ -1425,6 +1426,18 @@ impl Engine {
                     message,
                     exclude,
                 } => self.send_to_room(room, message, exclude),
+                Effect::TriggerHook { target, hook } => {
+                    triggers.push((target.clone(), hook.clone()));
+                }
+            }
+        }
+        for (target, hook) in triggers {
+            let room_ref = self
+                .world
+                .get(&target)
+                .and_then(|o| o.location_ref.clone());
+            if let Err(e) = self.fire_hook(&target, &hook, actor_ref, room_ref.as_deref(), None) {
+                tracing::warn!(hook = %hook, target = %target, error = %e, "Triggered hook error");
             }
         }
     }

@@ -543,5 +543,15 @@ pub fn install<'scope, 'env>(
         })?,
     )?;
 
+    let b = Rc::clone(&batch);
+    env.set(
+        "trigger",
+        scope.create_function(move |_, (r, hook): (Value, String)| {
+            let target = ref_of(&r)?;
+            b.borrow_mut().push(Intent::Trigger { target, hook });
+            Ok(())
+        })?,
+    )?;
+
     Ok(())
 }

@@ -73,6 +73,10 @@ pub enum Intent {
     Destroy {
         target: String,
     },
+    Trigger {
+        target: String,
+        hook: String,
+    },
 }
 
 /// The intents a Program has queued during a single run. Collected while the
@@ -107,6 +111,10 @@ pub enum Effect {
         room: String,
         message: String,
         exclude: Vec<String>,
+    },
+    TriggerHook {
+        target: String,
+        hook: String,
     },
 }
 
@@ -233,6 +241,15 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 if world.objects.remove(target).is_none() {
                     return Err(format!("destroy: no object '{}'", target));
                 }
+            }
+            Intent::Trigger { target, hook } => {
+                if world.get(target).is_none() {
+                    return Err(format!("trigger: no object '{}'", target));
+                }
+                effects.push(Effect::TriggerHook {
+                    target: target.clone(),
+                    hook: hook.clone(),
+                });
             }
         }
     }
