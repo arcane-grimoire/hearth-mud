@@ -115,6 +115,7 @@ pub struct Engine {
     tick_secs: u64,
     autosave_secs: u64,
     spawn_room: String,
+    game_dir: Option<String>,
 }
 
 impl Engine {
@@ -128,27 +129,31 @@ impl Engine {
             );
             (world, accounts)
         } else {
-            let mut world = if config.game_dir.is_some() {
+            let world = if config.game_dir.is_some() {
                 World::new()
             } else {
                 build_starter_world(&config.spawn_room)
             };
-            if let Some(game_dir) = &config.game_dir {
-                if let Err(e) = crate::loader::load_game_dir(std::path::Path::new(game_dir), &mut world) {
-                    tracing::error!(error = %e, "Failed to load game content");
-                }
-            }
-            // Ensure spawn room exists
-            if world.get(&config.spawn_room).is_none() {
-                let key = config.spawn_room.rsplit('/').next().unwrap_or("spawn");
-                let room = GameObject::new(&config.spawn_room, key, Kind::Room)
-                    .with_title("Spawn")
-                    .with_description("An empty room. Build your world from here.");
-                world.add_object(room);
-            }
             tracing::info!("Fresh world initialized");
             (world, AccountStore::new())
         };
+
+        // Always load/reload game files — new content is created,
+        // managed content is updated, non-managed content is untouched.
+        if let Some(game_dir) = &config.game_dir {
+            if let Err(e) = crate::loader::load_game_dir(std::path::Path::new(game_dir), &mut world) {
+                tracing::error!(error = %e, "Failed to load game content");
+            }
+        }
+
+        // Ensure spawn room exists
+        if world.get(&config.spawn_room).is_none() {
+            let key = config.spawn_room.rsplit('/').next().unwrap_or("spawn");
+            let room = GameObject::new(&config.spawn_room, key, Kind::Room)
+                .with_title("Spawn")
+                .with_description("An empty room. Build your world from here.");
+            world.add_object(room);
+        }
 
         Self {
             world,
@@ -161,6 +166,7 @@ impl Engine {
             tick_secs: config.tick_secs,
             autosave_secs: config.autosave_secs,
             spawn_room: config.spawn_room.clone(),
+            game_dir: config.game_dir.clone(),
         }
     }
 
@@ -1005,6 +1011,7 @@ impl Engine {
             "@boot" => self.cmd_boot(session_id, &args),
             "@save" => self.cmd_save(session_id),
             "@shutdown" => self.cmd_shutdown(session_id),
+            "@reload-world" => self.cmd_reload_world(session_id),
             "@reload" => self.cmd_reload(session_id, &actor_ref, &args),
 
             "help" | "?" => {
@@ -2095,6 +2102,21 @@ impl Engine {
         self.do_save();
         self.rx.close();
         "Shutting down.\r\n".to_string()
+    }
+
+    fn cmd_reload_world(&mut self, session_id: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Admin) {
+            return "Permission denied.\r\n".to_string();
+        }
+        match &self.game_dir {
+            Some(game_dir) => {
+                match crate::loader::load_game_dir(std::path::Path::new(game_dir), &mut self.world) {
+                    Ok(()) => "World reloaded from files.\r\n".to_string(),
+                    Err(e) => format!("Reload error: {}\r\n", e),
+                }
+            }
+            None => "No game_dir configured.\r\n".to_string(),
+        }
     }
 
     fn cmd_reload(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {

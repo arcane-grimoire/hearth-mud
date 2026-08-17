@@ -1,10 +1,21 @@
-use std::collections::HashSet;
 use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::softcode::hooks::{self, ProgramRecord};
+use crate::softcode::hooks;
 use crate::world::{GameObject, Kind, Script, Tag, World};
+
+const MANAGED_TAG: Tag = Tag {
+    category: String::new(),
+    key: String::new(),
+};
+
+fn managed_tag() -> Tag {
+    Tag {
+        category: "system".to_string(),
+        key: "managed".to_string(),
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct AreaFile {
@@ -109,6 +120,12 @@ impl ProgramSource {
     }
 }
 
+/// Load or reload game content from files.
+///
+/// - New objects are created and tagged `system:managed`.
+/// - Existing managed objects get their description, title, programs,
+///   tags, locks, and attrs updated from files.
+/// - Existing non-managed objects (player-created) are never touched.
 pub fn load_game_dir(game_dir: &Path, world: &mut World) -> Result<(), String> {
     if !game_dir.exists() {
         return Err(format!("Game directory not found: {}", game_dir.display()));
@@ -123,10 +140,9 @@ pub fn load_game_dir(game_dir: &Path, world: &mut World) -> Result<(), String> {
         return Ok(());
     }
 
-    let mut total_rooms = 0;
-    let mut total_objects = 0;
-    let mut total_exits = 0;
-    let mut total_scripts = 0;
+    let managed = managed_tag();
+    let mut created = 0u32;
+    let mut updated = 0u32;
 
     for path in &area_files {
         let contents = std::fs::read_to_string(path)
@@ -148,12 +164,21 @@ pub fn load_game_dir(game_dir: &Path, world: &mut World) -> Result<(), String> {
 
         for room in &area_file.rooms {
             let ref_id = format!("area/{}/room/{}", area_name, room.key);
-            if world.get(&ref_id).is_some() {
+            if let Some(existing) = world.get_mut(&ref_id) {
+                if existing.tags.contains(&managed) {
+                    existing.title = Some(room.title.clone());
+                    existing.description = room.description.clone();
+                    existing.locks = room.locks.clone();
+                    sync_managed_tags(existing, &room.tags);
+                    install_programs(existing, &room.programs, base_dir)?;
+                    updated += 1;
+                }
                 continue;
             }
             let mut obj = GameObject::new(&ref_id, &room.key, Kind::Room)
                 .with_title(&room.title);
             obj.description = room.description.clone();
+            obj.tags.insert(managed.clone());
             for tag_spec in &room.tags {
                 if let Ok(tag) = Tag::parse(tag_spec) {
                     obj.tags.insert(tag);
@@ -162,14 +187,28 @@ pub fn load_game_dir(game_dir: &Path, world: &mut World) -> Result<(), String> {
             obj.locks = room.locks.clone();
             install_programs(&mut obj, &room.programs, base_dir)?;
             world.add_object(obj);
-            total_rooms += 1;
+            created += 1;
         }
 
         for object in &area_file.objects {
             let kind = Kind::parse(&object.kind)
                 .ok_or_else(|| format!("Unknown kind '{}' in {}", object.kind, path.display()))?;
             let ref_id = format!("area/{}/{}/{}", area_name, object.kind, object.key);
-            if world.get(&ref_id).is_some() {
+            if let Some(existing) = world.get_mut(&ref_id) {
+                if existing.tags.contains(&managed) {
+                    if let Some(title) = &object.title {
+                        existing.title = Some(title.clone());
+                    }
+                    existing.description = object.description.clone();
+                    if let Some(loc) = &object.location {
+                        existing.location_ref = Some(resolve_ref(&area_name, loc));
+                    }
+                    existing.attrs.extend(object.attrs.clone());
+                    existing.locks = object.locks.clone();
+                    sync_managed_tags(existing, &object.tags);
+                    install_programs(existing, &object.programs, base_dir)?;
+                    updated += 1;
+                }
                 continue;
             }
             let mut obj = GameObject::new(&ref_id, &object.key, kind);
@@ -181,6 +220,7 @@ pub fn load_game_dir(game_dir: &Path, world: &mut World) -> Result<(), String> {
                 let resolved = resolve_ref(&area_name, loc);
                 obj = obj.with_location(resolved);
             }
+            obj.tags.insert(managed.clone());
             for tag_spec in &object.tags {
                 if let Ok(tag) = Tag::parse(tag_spec) {
                     obj.tags.insert(tag);
@@ -190,7 +230,7 @@ pub fn load_game_dir(game_dir: &Path, world: &mut World) -> Result<(), String> {
             obj.locks = object.locks.clone();
             install_programs(&mut obj, &object.programs, base_dir)?;
             world.add_object(obj);
-            total_objects += 1;
+            created += 1;
         }
 
         for exit in &area_file.exits {
@@ -199,7 +239,14 @@ pub fn load_game_dir(game_dir: &Path, world: &mut World) -> Result<(), String> {
             let from_key = from.rsplit('/').next().unwrap_or("x");
             let to_key = to.rsplit('/').next().unwrap_or("y");
             let ref_id = format!("area/{}/exit/{}_to_{}", area_name, from_key, to_key);
-            if world.get(&ref_id).is_some() {
+            if let Some(existing) = world.get_mut(&ref_id) {
+                if existing.tags.contains(&managed) {
+                    existing.location_ref = Some(from.clone());
+                    existing.target_ref = Some(to.clone());
+                    existing.aliases = exit.aliases.iter().cloned().collect();
+                    existing.locks = exit.locks.clone();
+                    updated += 1;
+                }
                 continue;
             }
             let mut obj = GameObject::new(&ref_id, &exit.direction, Kind::Exit)
@@ -207,33 +254,46 @@ pub fn load_game_dir(game_dir: &Path, world: &mut World) -> Result<(), String> {
                 .with_target(&to);
             obj.aliases = exit.aliases.iter().cloned().collect();
             obj.locks = exit.locks.clone();
+            obj.tags.insert(managed.clone());
             world.add_object(obj);
-            total_exits += 1;
+            created += 1;
         }
 
         for script in &area_file.scripts {
-            if world.scripts.contains_key(&script.name) {
+            let source = script.source.resolve(base_dir)?;
+            if let Some(existing) = world.scripts.get_mut(&script.name) {
+                existing.source = source;
+                existing.entry = script.entry.clone();
+                existing.interval = script.interval;
+                updated += 1;
                 continue;
             }
-            let source = script.source.resolve(base_dir)?;
             let mut s = Script::new(&script.name, &source);
             s.entry = script.entry.clone();
             s.interval = script.interval;
             world.scripts.insert(script.name.clone(), s);
-            total_scripts += 1;
+            created += 1;
         }
     }
 
     tracing::info!(
         ?game_dir,
-        rooms = total_rooms,
-        objects = total_objects,
-        exits = total_exits,
-        scripts = total_scripts,
+        created,
+        updated,
         "Game content loaded from files"
     );
 
     Ok(())
+}
+
+fn sync_managed_tags(obj: &mut GameObject, file_tags: &[String]) {
+    let managed = managed_tag();
+    for tag_spec in file_tags {
+        if let Ok(tag) = Tag::parse(tag_spec) {
+            obj.tags.insert(tag);
+        }
+    }
+    obj.tags.insert(managed);
 }
 
 fn install_programs(
