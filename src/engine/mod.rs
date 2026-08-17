@@ -2110,8 +2110,9 @@ impl Engine {
         }
         match &self.game_dir {
             Some(game_dir) => {
+                self.softcode.invalidate_cache();
                 match crate::loader::load_game_dir(std::path::Path::new(game_dir), &mut self.world) {
-                    Ok(()) => "World reloaded from files.\r\n".to_string(),
+                    Ok(()) => "World reloaded from files. Script cache cleared.\r\n".to_string(),
                     Err(e) => format!("Reload error: {}\r\n", e),
                 }
             }

@@ -335,13 +335,47 @@ pub struct ProgramResult {
 /// Owns the Luau VM. One `SoftcodeRuntime` is enough for the whole engine —
 /// each [`SoftcodeRuntime::run_hook`] call isolates a Program in its own
 /// environment table so unrelated Programs never see each other's globals.
+///
+/// Compiled chunks are cached by source hash — same source skips
+/// recompilation on subsequent calls.
 pub struct SoftcodeRuntime {
     lua: Lua,
+    chunk_cache: std::cell::RefCell<HashMap<u64, mlua::RegistryKey>>,
 }
 
 impl SoftcodeRuntime {
     pub fn new() -> Self {
-        Self { lua: Lua::new() }
+        Self {
+            lua: Lua::new(),
+            chunk_cache: std::cell::RefCell::new(HashMap::new()),
+        }
+    }
+
+    fn source_hash(source: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        source.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn get_or_compile(&self, source: &str, name: &str) -> mlua::Result<mlua::Function> {
+        let hash = Self::source_hash(source);
+        let cache = self.chunk_cache.borrow();
+        if let Some(key) = cache.get(&hash) {
+            if let Ok(func) = self.lua.registry_value::<mlua::Function>(key) {
+                return Ok(func);
+            }
+        }
+        drop(cache);
+
+        let func = self.lua.load(source).set_name(name).into_function()?;
+        let key = self.lua.create_registry_value(func.clone())?;
+        self.chunk_cache.borrow_mut().insert(hash, key);
+        Ok(func)
+    }
+
+    pub fn invalidate_cache(&self) {
+        self.chunk_cache.borrow_mut().clear();
     }
 
     /// Compile `source` without running it. Used by `@program` to reject
@@ -406,12 +440,10 @@ impl SoftcodeRuntime {
                 default_location.clone(),
             )?;
 
-            let chunk = self
-                .lua
-                .load(&program.source)
-                .set_name(&program.hook)
-                .set_environment(env.clone());
-            chunk.exec()?;
+            let compiled = self.get_or_compile(&program.source, &program.hook)
+                .map_err(|e| e.clone())?;
+            compiled.set_environment(env.clone())?;
+            compiled.call::<()>(())?;
 
             let func: Option<mlua::Function> = env.get(program.hook.as_str())?;
             let func = match func {
@@ -504,12 +536,10 @@ impl SoftcodeRuntime {
                 None,
             )?;
 
-            let chunk = self
-                .lua
-                .load(source)
-                .set_name(entry)
-                .set_environment(env.clone());
-            chunk.exec()?;
+            let compiled = self.get_or_compile(source, entry)
+                .map_err(|e| e.clone())?;
+            compiled.set_environment(env.clone())?;
+            compiled.call::<()>(())?;
 
             let func: Option<mlua::Function> = env.get(entry)?;
             let func = match func {
