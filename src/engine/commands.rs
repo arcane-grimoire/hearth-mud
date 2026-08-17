@@ -1,3 +1,4 @@
+use crate::ansi;
 use crate::world::{Kind, Tag, World};
 
 pub fn do_look(world: &World, actor_ref: &str) -> String {
@@ -21,13 +22,13 @@ pub fn format_look(world: &World, room_ref: &str, viewer_ref: &str) -> String {
     };
 
     let mut out = String::new();
-    out.push_str(&format!("\r\n{}\r\n", room.display_name()));
+    out.push_str(&format!("\r\n{}\r\n", ansi::room_title(room.display_name())));
     out.push_str(&format!("{}\r\n", room.description));
 
     let exits = world.exits_from(room_ref);
     if !exits.is_empty() {
         let exit_names: Vec<&str> = exits.iter().map(|e| e.key.as_str()).collect();
-        out.push_str(&format!("[Exits: {}]\r\n", exit_names.join(", ")));
+        out.push_str(&format!("{}\r\n", ansi::exit_list(&exit_names.join(", "))));
     }
 
     let offline_tag = Tag { category: "system".into(), key: "offline".into() };
@@ -40,9 +41,9 @@ pub fn format_look(world: &World, room_ref: &str, viewer_ref: &str) -> String {
     if !contents.is_empty() {
         for obj in &contents {
             let label = match obj.kind {
-                Kind::Player => format!("{} is here.", obj.display_name()),
+                Kind::Player => format!("{} is here.", ansi::player_name(obj.display_name())),
                 Kind::Npc => format!("{} is here.", obj.display_name()),
-                Kind::Item => format!("{} is here.", obj.display_name()),
+                Kind::Item => format!("{}{}{} is here.", ansi::DIM, obj.display_name(), ansi::RESET),
                 Kind::Room | Kind::Exit => continue,
             };
             out.push_str(&label);
@@ -230,6 +231,7 @@ pub fn do_help_with_roles(is_builder: bool, is_admin: bool) -> String {
             "  @program <ref>/<hook> = <luau>   - Attach a Luau program to a hook\r\n",
             "  @programs [<ref>]                - List programs (default: room)\r\n",
             "  @rmprogram <ref>/<hook>          - Remove a program\r\n",
+            "  @reload <ref>/<hook>             - Re-validate and re-enable a program\r\n",
             "  @tag <ref> = <tag_spec>          - Add a tag\r\n",
             "  @untag <ref> = <tag_spec>        - Remove a tag\r\n",
             "  @script <name> = <luau>          - Create/update a global script\r\n",

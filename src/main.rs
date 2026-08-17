@@ -1,4 +1,6 @@
 mod accounts;
+mod ansi;
+mod config;
 mod db;
 mod engine;
 mod locks;
@@ -10,6 +12,7 @@ use std::path::Path;
 
 use tokio::sync::mpsc;
 
+use config::Config;
 use db::Database;
 
 #[tokio::main]
@@ -21,30 +24,37 @@ async fn main() {
         )
         .init();
 
-    let db_path = Path::new("hearth.db");
-    let db = Database::open(db_path).expect("Failed to open database");
-    tracing::info!(?db_path, "Database opened");
+    let config = Config::load(Path::new("hearth.toml"));
+
+    let db = Database::open(Path::new(&config.db_path)).expect("Failed to open database");
+    tracing::info!(db_path = %config.db_path, "Database opened");
 
     let (engine_tx, engine_rx) = mpsc::unbounded_channel();
-    let engine = engine::Engine::new(engine_rx, db);
+    let engine = engine::Engine::new(engine_rx, db, &config);
 
+    let telnet_addr = config.telnet_addr.clone();
     let telnet_tx = engine_tx.clone();
     let telnet_handle = tokio::spawn(async move {
-        if let Err(e) = net::start_telnet("0.0.0.0:4000", telnet_tx).await {
+        if let Err(e) = net::start_telnet(&telnet_addr, telnet_tx).await {
             tracing::error!(error = %e, "Telnet server failed");
         }
     });
 
+    let web_addr = config.web_addr.clone();
     let web_tx = engine_tx.clone();
     let web_handle = tokio::spawn(async move {
-        if let Err(e) = net::start_web("0.0.0.0:8000", web_tx).await {
+        if let Err(e) = net::start_web(&web_addr, web_tx).await {
             tracing::error!(error = %e, "Web server failed");
         }
     });
 
     let engine_handle = tokio::spawn(engine.run());
 
-    tracing::info!("Hearth MUD running — telnet :4000 | web :8000");
+    tracing::info!(
+        telnet = %config.telnet_addr,
+        web = %config.web_addr,
+        "Hearth MUD running"
+    );
 
     tokio::select! {
         _ = engine_handle => tracing::info!("Engine stopped"),

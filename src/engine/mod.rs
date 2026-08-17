@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 use crate::accounts::{AccountStore, Scope};
+use crate::config::Config;
 use crate::db::Database;
 use crate::locks::{self, AccessContext};
 use crate::softcode::hooks::{self, ProgramRecord};
@@ -102,9 +103,6 @@ struct HookRun {
     emitted_to_actor: bool,
 }
 
-const TICK_INTERVAL_SECS: u64 = 1;
-const AUTOSAVE_INTERVAL_SECS: u64 = 300; // 5 minutes
-
 pub struct Engine {
     world: World,
     accounts: AccountStore,
@@ -113,10 +111,13 @@ pub struct Engine {
     softcode: SoftcodeRuntime,
     rx: mpsc::UnboundedReceiver<EngineMessage>,
     tick_count: u64,
+    tick_secs: u64,
+    autosave_secs: u64,
+    spawn_room: String,
 }
 
 impl Engine {
-    pub fn new(rx: mpsc::UnboundedReceiver<EngineMessage>, db: Database) -> Self {
+    pub fn new(rx: mpsc::UnboundedReceiver<EngineMessage>, db: Database, config: &Config) -> Self {
         let (world, accounts) = if db.has_world_data() {
             let world = db.load_world().expect("Failed to load world from DB");
             let accounts = db.load_accounts().expect("Failed to load accounts from DB");
@@ -139,6 +140,9 @@ impl Engine {
             softcode: SoftcodeRuntime::new(),
             rx,
             tick_count: 0,
+            tick_secs: config.tick_secs,
+            autosave_secs: config.autosave_secs,
+            spawn_room: config.spawn_room.clone(),
         }
     }
 
@@ -146,9 +150,9 @@ impl Engine {
         tracing::info!("Engine started");
 
         let mut tick_interval =
-            tokio::time::interval(std::time::Duration::from_secs(TICK_INTERVAL_SECS));
+            tokio::time::interval(std::time::Duration::from_secs(self.tick_secs));
         let mut autosave_interval =
-            tokio::time::interval(std::time::Duration::from_secs(AUTOSAVE_INTERVAL_SECS));
+            tokio::time::interval(std::time::Duration::from_secs(self.autosave_secs));
 
         // Don't fire immediately on start
         tick_interval.tick().await;
@@ -799,7 +803,7 @@ impl Engine {
         character_ref: &str,
         account_id: &str,
     ) {
-        let spawn_room = "area/starter/room/town_square";
+        let spawn_room = &self.spawn_room;
 
         let needs_location_fix = self
             .world
@@ -958,6 +962,7 @@ impl Engine {
             "@boot" => self.cmd_boot(session_id, &args),
             "@save" => self.cmd_save(session_id),
             "@shutdown" => self.cmd_shutdown(session_id),
+            "@reload" => self.cmd_reload(session_id, &actor_ref, &args),
 
             "help" | "?" => {
                 let is_builder = self.session_has_scope(session_id, Scope::Builder);
@@ -1940,6 +1945,30 @@ impl Engine {
         "Shutting down.\r\n".to_string()
     }
 
+    fn cmd_reload(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Builder) {
+            return "Permission denied.\r\n".to_string();
+        }
+        // @reload <ref>/<hook>  — re-validate and re-enable a program
+        let (target_ref, hook) = match self.resolve_ref_hook_path(actor_ref, args.trim()) {
+            Ok(v) => v,
+            Err(e) => return format!("{}\r\n", e),
+        };
+        let obj = match self.world.get_mut(&target_ref) {
+            Some(o) => o,
+            None => return format!("No object with ref '{}'.\r\n", target_ref),
+        };
+        let program = match obj.programs.get_mut(&hook) {
+            Some(p) => p,
+            None => return format!("{} has no '{}' program.\r\n", target_ref, hook),
+        };
+        if let Err(e) = self.softcode.check_syntax(&program.source) {
+            return format!("Syntax error: {}\r\n", e);
+        }
+        program.enabled = true;
+        format!("Program {}/{} reloaded and enabled.\r\n", target_ref, hook)
+    }
+
     // -- Hook-aware gameplay commands --
 
     fn account_scopes_for_actor(&self, actor_ref: &str) -> Vec<String> {
@@ -2477,8 +2506,9 @@ mod tests {
 
     async fn test_engine() -> (mpsc::UnboundedSender<EngineMessage>, tokio::task::JoinHandle<()>) {
         let db = crate::db::Database::open(Path::new(":memory:")).unwrap();
+        let config = Config::default();
         let (tx, rx) = mpsc::unbounded_channel();
-        let engine = Engine::new(rx, db);
+        let engine = Engine::new(rx, db, &config);
         let handle = tokio::spawn(engine.run());
         (tx, handle)
     }
