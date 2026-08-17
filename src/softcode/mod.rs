@@ -557,15 +557,43 @@ mod tests {
         room.description = "A plain room.".into();
         world.add_object(room);
 
-        let actor = GameObject::new("player/alice", "alice", Kind::Player)
+        let mut room2 = GameObject::new("room/2", "room2", Kind::Room).with_title("Another Room");
+        room2.description = "Another room.".into();
+        world.add_object(room2);
+
+        let mut actor = GameObject::new("player/alice", "alice", Kind::Player)
             .with_title("Alice")
             .with_location("room/1");
+        actor.tags.insert(Tag { category: "quest".into(), key: "hero".into() });
         world.add_object(actor);
 
-        let sword = GameObject::new("item/sword", "sword", Kind::Item)
+        let bob = GameObject::new("player/bob", "bob", Kind::Player)
+            .with_title("Bob")
+            .with_location("room/1");
+        world.add_object(bob);
+
+        let mut sword = GameObject::new("item/sword", "sword", Kind::Item)
             .with_title("a rusty sword")
             .with_location("room/1");
+        sword.tags.insert(Tag { category: "loot".into(), key: "weapon".into() });
+        sword.attrs.insert("damage".into(), serde_json::json!(10));
         world.add_object(sword);
+
+        let shield = GameObject::new("item/shield", "shield", Kind::Item)
+            .with_title("a wooden shield")
+            .with_location("player/alice");
+        world.add_object(shield);
+
+        let npc = GameObject::new("npc/guard", "guard", Kind::Npc)
+            .with_title("A Town Guard")
+            .with_location("room/1");
+        world.add_object(npc);
+
+        let exit = GameObject::new("exit/1_to_2", "north", Kind::Exit)
+            .with_location("room/1")
+            .with_target("room/2")
+            .with_aliases(vec!["n"]);
+        world.add_object(exit);
 
         world
     }
@@ -803,5 +831,203 @@ mod tests {
             imp.attrs.get("summoned_by").unwrap(),
             "player/alice"
         );
+    }
+
+    fn run_script(world: &World, source: &str) -> ProgramResult {
+        let runtime = SoftcodeRuntime::new();
+        let program = ProgramRecord::new("on_get", source);
+        runtime
+            .run_hook(world, &program, "item/sword", "player/alice", Some("room/1"), None, Budget::default())
+            .expect("script should run")
+    }
+
+    #[test]
+    fn find_by_tag() {
+        let world = test_world();
+        let result = run_script(&world, r#"
+            function on_get(this, actor, room)
+                local found = find_by_tag("loot:weapon")
+                set_attr(this, "count", #found)
+                set_attr(this, "first", found[1].key)
+            end
+        "#);
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        assert_eq!(w.get("item/sword").unwrap().attrs["count"], 1);
+        assert_eq!(w.get("item/sword").unwrap().attrs["first"], "sword");
+    }
+
+    #[test]
+    fn find_in_room() {
+        let world = test_world();
+        let result = run_script(&world, r#"
+            function on_get(this, actor, room)
+                local obj = find_in_room(room, "guard")
+                if obj then
+                    set_attr(this, "found", obj.ref_id)
+                end
+                local missing = find_in_room(room, "dragon")
+                set_attr(this, "missing", missing == nil)
+            end
+        "#);
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        assert_eq!(w.get("item/sword").unwrap().attrs["found"], "npc/guard");
+        assert_eq!(w.get("item/sword").unwrap().attrs["missing"], true);
+    }
+
+    #[test]
+    fn get_inventory() {
+        let world = test_world();
+        let result = run_script(&world, r#"
+            function on_get(this, actor, room)
+                local inv = get_inventory(actor)
+                set_attr(this, "inv_count", #inv)
+                if #inv > 0 then
+                    set_attr(this, "first_item", inv[1].key)
+                end
+            end
+        "#);
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        assert_eq!(w.get("item/sword").unwrap().attrs["inv_count"], 1);
+        assert_eq!(w.get("item/sword").unwrap().attrs["first_item"], "shield");
+    }
+
+    #[test]
+    fn get_players_in_room() {
+        let world = test_world();
+        let result = run_script(&world, r#"
+            function on_get(this, actor, room)
+                local players = get_players_in_room(room)
+                set_attr(this, "player_count", #players)
+            end
+        "#);
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        assert_eq!(w.get("item/sword").unwrap().attrs["player_count"], 2);
+    }
+
+    #[test]
+    fn get_all_by_kind() {
+        let world = test_world();
+        let result = run_script(&world, r#"
+            function on_get(this, actor, room)
+                local rooms = get_all_by_kind("room")
+                set_attr(this, "room_count", #rooms)
+            end
+        "#);
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        assert_eq!(w.get("item/sword").unwrap().attrs["room_count"], 2);
+    }
+
+    #[test]
+    fn predicates() {
+        let world = test_world();
+        let result = run_script(&world, r#"
+            function on_get(this, actor, room)
+                set_attr(this, "actor_is_player", is_player(actor))
+                set_attr(this, "actor_is_npc", is_npc(actor))
+                set_attr(this, "guard_is_npc", is_npc("npc/guard"))
+                set_attr(this, "sword_is_item", is_item(this))
+                set_attr(this, "room_is_room", is_room(room))
+                set_attr(this, "exit_is_exit", is_exit("exit/1_to_2"))
+                set_attr(this, "exists_yes", exists(actor))
+                set_attr(this, "exists_no", exists("fake/ref"))
+            end
+        "#);
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        let s = &w.get("item/sword").unwrap().attrs;
+        assert_eq!(s["actor_is_player"], true);
+        assert_eq!(s["actor_is_npc"], false);
+        assert_eq!(s["guard_is_npc"], true);
+        assert_eq!(s["sword_is_item"], true);
+        assert_eq!(s["room_is_room"], true);
+        assert_eq!(s["exit_is_exit"], true);
+        assert_eq!(s["exists_yes"], true);
+        assert_eq!(s["exists_no"], false);
+    }
+
+    #[test]
+    fn is_carrying_predicate() {
+        let world = test_world();
+        let result = run_script(&world, r#"
+            function on_get(this, actor, room)
+                set_attr(this, "has_weapon", is_carrying(actor, "loot:weapon"))
+                set_attr(this, "has_potion", is_carrying(actor, "loot:potion"))
+            end
+        "#);
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        // alice doesn't carry the sword (it's in the room), but she has the shield (no loot tag)
+        assert_eq!(w.get("item/sword").unwrap().attrs["has_weapon"], false);
+        assert_eq!(w.get("item/sword").unwrap().attrs["has_potion"], false);
+    }
+
+    #[test]
+    fn same_room_predicate() {
+        let world = test_world();
+        let result = run_script(&world, r#"
+            function on_get(this, actor, room)
+                set_attr(this, "alice_bob", same_room(actor, "player/bob"))
+                set_attr(this, "alice_guard", same_room(actor, "npc/guard"))
+            end
+        "#);
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        assert_eq!(w.get("item/sword").unwrap().attrs["alice_bob"], true);
+        assert_eq!(w.get("item/sword").unwrap().attrs["alice_guard"], true);
+    }
+
+    #[test]
+    fn set_title_and_description() {
+        let world = test_world();
+        let result = run_script(&world, r#"
+            function on_get(this, actor, room)
+                set_title(this, "a gleaming sword")
+                set_description(this, "It shines with inner light.")
+            end
+        "#);
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        assert_eq!(w.get("item/sword").unwrap().title.as_deref(), Some("a gleaming sword"));
+        assert_eq!(w.get("item/sword").unwrap().description, "It shines with inner light.");
+    }
+
+    #[test]
+    fn destroy_object() {
+        let world = test_world();
+        let result = run_script(&world, r#"
+            function on_get(this, actor, room)
+                destroy("npc/guard")
+            end
+        "#);
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        assert!(w.get("npc/guard").is_none());
+    }
+
+    #[test]
+    fn destroy_player_rejected() {
+        let world = test_world();
+        let result = run_script(&world, r#"
+            function on_get(this, actor, room)
+                destroy("player/bob")
+            end
+        "#);
+        let mut w = world.clone();
+        assert!(apply_batch(&mut w, &result.batch).is_err());
+    }
+
+    #[test]
+    fn log_does_not_error() {
+        let world = test_world();
+        run_script(&world, r#"
+            function on_get(this, actor, room)
+                log("debug: sword picked up by " .. actor.display_name)
+            end
+        "#);
     }
 }
