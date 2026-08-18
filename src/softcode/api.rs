@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use mlua::{Lua, LuaSerdeExt, Scope, Table, Value};
 
+use crate::map_template::MapTemplateFile;
 use crate::theme::Theme;
 use crate::world::{GameObject, Kind, Tag, World};
 use crate::softcode::{Intent, IntentBatch};
@@ -116,6 +117,7 @@ pub fn install<'scope, 'env>(
     default_location: Option<String>,
     dbref_counter: Rc<Cell<u64>>,
     themes: &'env std::collections::HashMap<String, Theme>,
+    map_templates: &'env std::collections::HashMap<String, MapTemplateFile>,
 ) -> mlua::Result<()> {
     // -- Read API --
 
@@ -738,6 +740,51 @@ pub fn install<'scope, 'env>(
                 b.borrow_mut().push(Intent::Destroy { target });
             }
             Ok(())
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    let dbref = Rc::clone(&dbref_counter);
+    let default_loc = default_location.clone();
+    env.set(
+        "instantiate_map",
+        scope.create_function(move |lua, name: String| {
+            let anchor_ref = default_loc.clone().ok_or_else(|| {
+                mlua::Error::RuntimeError(
+                    "instantiate_map: no room context to anchor the map (call it from a hook with an actor in a room)".into(),
+                )
+            })?;
+
+            let template = map_templates.get(&name).ok_or_else(|| {
+                mlua::Error::RuntimeError(format!("instantiate_map: unknown map '{}'", name))
+            })?;
+
+            let db_start = dbref.get() + 1;
+            let result = crate::map_template::instantiate(template, themes, world, db_start, &anchor_ref)
+                .map_err(mlua::Error::RuntimeError)?;
+
+            // Advance the dbref counter past all generated refs.
+            let max_ref = result
+                .intents
+                .iter()
+                .filter_map(|i| match i {
+                    Intent::Spawn { ref_id, .. } | Intent::CreateExit { ref_id, .. } => {
+                        ref_id.trim_start_matches('#').parse::<u64>().ok()
+                    }
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(dbref.get());
+            dbref.set(max_ref.max(dbref.get()));
+
+            for intent in result.intents {
+                b.borrow_mut().push(intent);
+            }
+
+            let out = lua.create_table()?;
+            out.set("entrance_ref", result.entrance_ref)?;
+            out.set("room_count", result.room_count)?;
+            Ok(out)
         })?,
     )?;
 

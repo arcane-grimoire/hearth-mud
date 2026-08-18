@@ -126,6 +126,9 @@ pub struct Engine {
     /// `crate::theme` and `docs/dungeon-generation-design.md` in the game
     /// repo.
     themes: HashMap<String, crate::theme::Theme>,
+    /// Hand-designed map templates loaded from `<game_dir>/maps/*.toml`. See
+    /// `crate::map_template`.
+    map_templates: HashMap<String, crate::map_template::MapTemplateFile>,
 }
 
 impl Engine {
@@ -177,6 +180,12 @@ impl Engine {
             .map(|dir| crate::theme::load_themes(std::path::Path::new(dir)))
             .unwrap_or_default();
 
+        let map_templates = config
+            .game_dir
+            .as_deref()
+            .map(|dir| crate::map_template::load_map_templates(std::path::Path::new(dir)))
+            .unwrap_or_default();
+
         Self {
             world,
             accounts,
@@ -191,6 +200,7 @@ impl Engine {
             spawn_room_ref,
             game_dir: config.game_dir.clone(),
             themes,
+            map_templates,
         }
     }
 
@@ -337,6 +347,7 @@ impl Engine {
                 Budget::default(),
                 Rc::clone(&dbref_counter),
                 &self.themes,
+                &self.map_templates,
             )
             .map_err(|e| e.to_string())?;
 
@@ -416,6 +427,7 @@ impl Engine {
                 Budget::default(),
                 Rc::clone(&dbref_counter),
                 &self.themes,
+                &self.map_templates,
             )
             .map_err(|e| e.to_string())?;
 
@@ -1557,6 +1569,7 @@ impl Engine {
                 Budget::default(),
                 Rc::clone(&dbref_counter),
                 &self.themes,
+                &self.map_templates,
             )
             .map_err(|e| e.to_string())?;
 

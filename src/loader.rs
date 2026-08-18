@@ -386,6 +386,23 @@ fn install_programs(
     Ok(())
 }
 
+/// Resolve a `"<area>/<key>"` file identity to the dbref the managed object
+/// carrying it currently occupies, by scanning for the `_file_key` attr the
+/// loader stamps onto every managed object (see [`FILE_KEY_ATTR`]).
+///
+/// Used by `map_template`'s `fixed_room` cell override, which links a map
+/// grid cell to an existing statically-defined room rather than spawning a
+/// new one. Unlike `resolve_key`, this always takes a fully-qualified
+/// `"<area>/<key>"` string — there's no "current area" to resolve a bare key
+/// against outside of area-file loading.
+pub fn resolve_file_key(world: &World, file_key: &str) -> Option<String> {
+    world
+        .objects
+        .values()
+        .find(|o| o.attrs.get(FILE_KEY_ATTR).and_then(|v| v.as_str()) == Some(file_key))
+        .map(|o| o.ref_id.clone())
+}
+
 /// Resolve a file-level reference (a bare key like `"crossroads"`, or a
 /// cross-area key like `"forest/edge"`) to the dbref it was assigned in
 /// pass 1/2.

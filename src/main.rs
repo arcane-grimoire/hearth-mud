@@ -7,6 +7,7 @@ mod grid;
 mod loader;
 mod engine;
 mod locks;
+mod map_template;
 mod net;
 mod softcode;
 mod theme;

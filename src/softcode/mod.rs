@@ -90,6 +90,14 @@ pub enum Intent {
         target: String,
         hook: String,
     },
+    /// Attach a Lock DSL expression to one of `target`'s hooks (e.g.
+    /// `"can_enter"`). Used by `map_template`'s `lock` cell override — see
+    /// `crate::locks`.
+    SetLock {
+        target: String,
+        hook: String,
+        expr: String,
+    },
 }
 
 /// The intents a Program has queued during a single run. Collected while the
@@ -293,6 +301,13 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                     target: target.clone(),
                     hook: hook.clone(),
                 });
+            }
+            Intent::SetLock { target, hook, expr } => {
+                crate::locks::parse(expr).map_err(|e| format!("set_lock: {}", e))?;
+                let obj = world
+                    .get_mut(target)
+                    .ok_or_else(|| format!("set_lock: no object '{}'", target))?;
+                obj.locks.insert(hook.clone(), expr.clone());
             }
         }
     }
@@ -538,6 +553,7 @@ impl SoftcodeRuntime {
         budget: Budget,
         dbref_counter: Rc<Cell<u64>>,
         themes: &HashMap<String, Theme>,
+        map_templates: &HashMap<String, crate::map_template::MapTemplateFile>,
     ) -> Result<ProgramResult, SoftcodeError> {
         self.install_budget(budget);
         let batch = Rc::new(RefCell::new(IntentBatch::default()));
@@ -563,6 +579,7 @@ impl SoftcodeRuntime {
                 default_location.clone(),
                 Rc::clone(&dbref_counter),
                 themes,
+                map_templates,
             )?;
 
             let compiled = self.get_or_compile(&program.source, &program.hook)
@@ -645,6 +662,7 @@ impl SoftcodeRuntime {
         budget: Budget,
         dbref_counter: Rc<Cell<u64>>,
         themes: &HashMap<String, Theme>,
+        map_templates: &HashMap<String, crate::map_template::MapTemplateFile>,
     ) -> Result<ProgramResult, SoftcodeError> {
         self.install_budget(budget);
         let batch = Rc::new(RefCell::new(IntentBatch::default()));
@@ -664,6 +682,7 @@ impl SoftcodeRuntime {
                 None,
                 Rc::clone(&dbref_counter),
                 themes,
+                map_templates,
             )?;
 
             let compiled = self.get_or_compile(source, entry)
@@ -751,6 +770,12 @@ mod tests {
         HashMap::new()
     }
 
+    /// Empty map template map — plenty for tests that don't touch
+    /// `instantiate_map`.
+    fn test_map_templates() -> HashMap<String, crate::map_template::MapTemplateFile> {
+        HashMap::new()
+    }
+
     // test_world() creates objects in this fixed order, so dbrefs are
     // predictable: room "#1", room2 "#2", alice "#3", bob "#4", sword "#5",
     // shield "#6", guard "#7", exit "#8".
@@ -834,7 +859,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(),
+                &test_themes(), &test_map_templates(),
             )
             .expect("hook should run");
 
@@ -877,7 +902,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(),
+                &test_themes(), &test_map_templates(),
             )
             .expect("hook should run");
 
@@ -909,7 +934,7 @@ mod tests {
                 Some("the button"),
                 Budget::default(),
                 counter(&world),
-                &test_themes(),
+                &test_themes(), &test_map_templates(),
             )
             .expect("hook should run");
 
@@ -948,7 +973,7 @@ mod tests {
                 None,
                 Budget::new(1000),
                 counter(&world),
-                &test_themes(),
+                &test_themes(), &test_map_templates(),
             )
             .expect_err("infinite loop should hit budget");
 
@@ -982,7 +1007,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(),
+                &test_themes(), &test_map_templates(),
             )
             .unwrap();
         let result_b = runtime
@@ -995,7 +1020,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(),
+                &test_themes(), &test_map_templates(),
             )
             .unwrap();
 
@@ -1041,7 +1066,7 @@ mod tests {
                 Some(""),
                 Budget::default(),
                 counter(&world),
-                &test_themes(),
+                &test_themes(), &test_map_templates(),
             )
             .unwrap();
 
@@ -1062,7 +1087,7 @@ mod tests {
         let runtime = SoftcodeRuntime::new();
         let program = ProgramRecord::new("on_get", source);
         runtime
-            .run_hook(world, &program, "#5", "#3", Some("#1"), None, Budget::default(), counter(world), &test_themes())
+            .run_hook(world, &program, "#5", "#3", Some("#1"), None, Budget::default(), counter(world), &test_themes(), &test_map_templates())
             .expect("script should run")
     }
 
@@ -1377,6 +1402,7 @@ mod tests {
                 Budget::default(),
                 counter(&world),
                 &themes,
+                &test_map_templates(),
             )
             .expect("cmd_delve should run");
 
@@ -1418,6 +1444,7 @@ mod tests {
                 Budget::default(),
                 counter(&w),
                 &themes,
+                &test_map_templates(),
             )
             .expect("cmd_leave should run");
         apply_batch(&mut w, &destroy_result.batch).expect("destroy batch should apply");
@@ -1425,6 +1452,78 @@ mod tests {
         for room_ref in &dungeon_rooms {
             assert!(w.get(room_ref).is_none(), "dungeon room {} should be destroyed", room_ref);
         }
+    }
+
+    #[test]
+    fn instantiate_map_luau_binding_end_to_end() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+
+        // Exercises the full TOML -> instantiate() -> Luau table round trip,
+        // including a quoted "." terrain key.
+        let toml_src = r#"
+            [map]
+            name = "iron_hills"
+            grid = """
+            f.
+            f.
+            """
+
+            [terrain.f]
+            theme = "forest"
+            title_prefix = "Forest"
+
+            [terrain."."]
+            theme = "plains"
+            title_prefix = "Plains"
+        "#;
+        let template: crate::map_template::MapTemplateFile =
+            toml::from_str(toml_src).expect("map template should parse");
+        let mut map_templates = HashMap::new();
+        map_templates.insert("iron_hills".to_string(), template);
+
+        let program = ProgramRecord::new(
+            "cmd_explore",
+            r#"
+                function cmd_explore(this, actor, room, args)
+                    local result = instantiate_map("iron_hills")
+                    set_attr(actor, "map_entrance", result.entrance_ref)
+                    set_attr(actor, "map_room_count", result.room_count)
+                end
+            "#,
+        );
+
+        let result = runtime
+            .run_hook(
+                &world,
+                &program,
+                "#5",
+                "#3",
+                Some("#1"),
+                Some(""),
+                Budget::default(),
+                counter(&world),
+                &test_themes(),
+                &map_templates,
+            )
+            .expect("cmd_explore should run");
+
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).expect("map batch should apply");
+
+        let entrance_ref = w.get("#3").unwrap().attrs["map_entrance"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(w.get(&entrance_ref).is_some());
+        assert_eq!(w.get("#3").unwrap().attrs["map_room_count"], 4);
+
+        let map_rooms: Vec<&GameObject> = w
+            .objects
+            .values()
+            .filter(|o| o.attrs.get("map_name").and_then(|v| v.as_str()) == Some("iron_hills"))
+            .collect();
+        assert_eq!(map_rooms.len(), 4);
     }
 
     #[test]
@@ -1463,7 +1562,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(),
+                &test_themes(), &test_map_templates(),
             )
             .expect("hook should run");
 
@@ -1499,7 +1598,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(),
+                &test_themes(), &test_map_templates(),
             )
             .expect_err("should fail on missing module");
 
@@ -1535,7 +1634,7 @@ mod tests {
                 &HashMap::new(),
                 Budget::default(),
                 counter(&world),
-                &test_themes(),
+                &test_themes(), &test_map_templates(),
             )
             .expect("global script should run");
 
@@ -1593,7 +1692,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(),
+                &test_themes(), &test_map_templates(),
             )
             .expect("hook should run");
 
@@ -1632,7 +1731,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(),
+                &test_themes(), &test_map_templates(),
             )
             .unwrap();
 
@@ -1655,7 +1754,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(),
+                &test_themes(), &test_map_templates(),
             )
             .unwrap();
 
@@ -1687,7 +1786,7 @@ mod tests {
         let result = runtime
             .run_hook(
                 &world, &program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&world), &test_themes(),
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(),
             )
             .unwrap();
 
@@ -1719,7 +1818,7 @@ mod tests {
         let result = runtime
             .run_hook(
                 &world, &program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&world), &test_themes(),
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(),
             )
             .unwrap();
 
@@ -1741,7 +1840,7 @@ mod tests {
         let result2 = runtime
             .run_hook(
                 &w, &restore_program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&w), &test_themes(),
+                Budget::default(), counter(&w), &test_themes(), &test_map_templates(),
             )
             .unwrap();
 
@@ -1778,7 +1877,7 @@ mod tests {
         let result = runtime
             .run_hook(
                 &world, &program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&world), &test_themes(),
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(),
             )
             .unwrap();
 
@@ -1815,7 +1914,7 @@ mod tests {
         let result = runtime
             .run_hook(
                 &world, &program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&world), &test_themes(),
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(),
             )
             .unwrap();
 

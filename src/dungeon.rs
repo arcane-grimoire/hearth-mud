@@ -692,9 +692,8 @@ mod tests {
 
         // BFS from the entrance through the generated Exit objects — every
         // dungeon room must be reachable (the BSP tree is a spanning tree,
-        // and zones are chained), but the anchor room (never wired with an
-        // exit — it's only a Spawn-location bookkeeping target) must not
-        // be.
+        // and zones are chained). The anchor room IS reachable via the
+        // "out" exit on the entrance.
         let mut seen = std::collections::HashSet::new();
         let mut queue = vec![result.entrance_ref.clone()];
         seen.insert(result.entrance_ref.clone());
@@ -708,11 +707,11 @@ mod tests {
             }
         }
 
-        assert!(!seen.contains(&anchor_ref));
+        assert!(seen.contains(&anchor_ref), "anchor should be reachable via the out exit");
         assert_eq!(
             seen.len(),
-            dungeon_room_count,
-            "every generated room should be reachable from the entrance"
+            dungeon_room_count + 1, // +1 for the anchor room reached via "out"
+            "every generated room + anchor should be reachable from the entrance"
         );
 
         // The boss tag lands on exactly one room: the last room of the
