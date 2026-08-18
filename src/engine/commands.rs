@@ -49,8 +49,24 @@ pub fn format_look(
 
     if !contents.is_empty() {
         for obj in &contents {
+            if obj.kind == Kind::Npc && obj.tags.iter().any(|t| t.category == "troupe") {
+                continue;
+            }
             let label = match obj.kind {
-                Kind::Player => format!("{} is here.", ansi::player_name(obj.display_name())),
+                Kind::Player => {
+                    let troupe_count = world.objects.values()
+                        .filter(|o| o.tags.contains(&Tag {
+                            category: "troupe".into(),
+                            key: obj.ref_id.clone(),
+                        }))
+                        .count();
+                    if troupe_count > 0 {
+                        format!("{} is here, leading a troupe of {}.",
+                            ansi::player_name(obj.display_name()), troupe_count)
+                    } else {
+                        format!("{} is here.", ansi::player_name(obj.display_name()))
+                    }
+                }
                 Kind::Npc => format!("{} is here.", obj.display_name()),
                 Kind::Item => format!("{}{}{} is here.", ansi::DIM, obj.display_name(), ansi::RESET),
                 Kind::Room | Kind::Exit => continue,
@@ -175,17 +191,21 @@ pub fn do_examine(world: &World, actor_ref: &str, args: &str) -> String {
 
     let target_name = args.to_lowercase();
 
-    let target = world
-        .objects_in(&room_ref)
-        .into_iter()
-        .chain(world.exits_from(&room_ref))
-        .chain(world.objects_in(actor_ref))
-        .find(|o| {
-            o.key.to_lowercase().contains(&target_name)
-                || o.display_name().to_lowercase().contains(&target_name)
-        });
+    let obj = if target_name == "me" || target_name == "self" {
+        world.get(actor_ref)
+    } else {
+        world
+            .objects_in(&room_ref)
+            .into_iter()
+            .chain(world.exits_from(&room_ref))
+            .chain(world.objects_in(actor_ref))
+            .find(|o| {
+                o.key.to_lowercase().contains(&target_name)
+                    || o.display_name().to_lowercase().contains(&target_name)
+            })
+    };
 
-    match target {
+    match obj {
         Some(obj) => {
             let mut out = format!("{} ({})\r\n", obj.display_name(), obj.kind);
             if !obj.description.is_empty() {
@@ -204,6 +224,30 @@ pub fn do_examine(world: &World, actor_ref: &str, args: &str) -> String {
                     out.push_str(&format!("Aliases: {}\r\n", aliases.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(", ")));
                 }
             }
+            if obj.kind == Kind::Player {
+                let troupe: Vec<_> = world.objects.values()
+                    .filter(|o| o.tags.contains(&Tag {
+                        category: "troupe".into(),
+                        key: obj.ref_id.clone(),
+                    }))
+                    .collect();
+                if !troupe.is_empty() {
+                    out.push_str("Troupe:\r\n");
+                    for h in &troupe {
+                        let class = h.attrs.get("class")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        let hp = h.attrs.get("hp")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let max_hp = h.attrs.get("max_hp")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        out.push_str(&format!("  {} [{}] {}/{} HP\r\n",
+                            h.display_name(), class, hp, max_hp));
+                    }
+                }
+            }
             if !obj.attrs.is_empty() {
                 out.push_str("Attributes:\r\n");
                 for (k, v) in &obj.attrs {
@@ -213,7 +257,7 @@ pub fn do_examine(world: &World, actor_ref: &str, args: &str) -> String {
             if !obj.tags.is_empty() {
                 let tags: Vec<String> = obj.tags.iter().map(|t| t.as_spec()).collect();
                 out.push_str(&format!("Tags: {}\r\n", tags.join(", ")));
-                }
+            }
             out
         }
         None => format!("You don't see '{}' here.\r\n", args),
