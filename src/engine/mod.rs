@@ -12,7 +12,7 @@ use crate::db::Database;
 use crate::locks::{self, AccessContext};
 use crate::softcode::hooks::{self, ProgramRecord};
 use crate::softcode::{self, Budget, Effect, SoftcodeRuntime};
-use crate::world::{GameObject, Kind, Script, World};
+use crate::world::{GameObject, Kind, Script, Tag, World};
 
 const IAC: u8 = 255;
 const WILL: u8 = 251;
@@ -129,7 +129,11 @@ pub struct Engine {
     /// Hand-designed map templates loaded from `<game_dir>/maps/*.toml`. See
     /// `crate::map_template`.
     map_templates: HashMap<String, crate::map_template::MapTemplateFile>,
+    /// Hooks scheduled to fire in the future via `after(ticks, target, hook)`.
+    scheduled_hooks: Vec<ScheduledHook>,
 }
+
+use crate::softcode::ScheduledHook;
 
 impl Engine {
     pub fn new(rx: mpsc::UnboundedReceiver<EngineMessage>, db: Database, config: &Config) -> Self {
@@ -186,6 +190,11 @@ impl Engine {
             .map(|dir| crate::map_template::load_map_templates(std::path::Path::new(dir)))
             .unwrap_or_default();
 
+        let scheduled_hooks = db.load_scheduled_hooks().unwrap_or_else(|e| {
+            tracing::error!(error = %e, "Failed to load scheduled hooks");
+            Vec::new()
+        });
+
         Self {
             world,
             accounts,
@@ -201,6 +210,7 @@ impl Engine {
             game_dir: config.game_dir.clone(),
             themes,
             map_templates,
+            scheduled_hooks,
         }
     }
 
@@ -321,6 +331,36 @@ impl Engine {
             }
         }
 
+        // -- Scheduled hooks (from `after()`) --
+        let (due, remaining): (Vec<_>, Vec<_>) = std::mem::take(&mut self.scheduled_hooks)
+            .into_iter()
+            .partition(|s| s.fire_at_tick <= tick);
+        self.scheduled_hooks = remaining;
+        for scheduled in due {
+            if start.elapsed() > tick_budget {
+                self.scheduled_hooks.push(scheduled);
+                tracing::warn!(tick, ran, "Tick budget exceeded (scheduled hooks)");
+                break;
+            }
+            let args_json = scheduled
+                .data
+                .as_ref()
+                .and_then(|d| serde_json::to_string(d).ok());
+            match self.fire_tick_hook_with_args(
+                &scheduled.target,
+                &scheduled.hook,
+                args_json.as_deref(),
+            ) {
+                Ok(()) => ran += 1,
+                Err(e) => {
+                    tracing::warn!(
+                        hook = %scheduled.hook, target = %scheduled.target,
+                        error = %e, "Scheduled hook error"
+                    );
+                }
+            }
+        }
+
         if ran > 0 {
             tracing::debug!(tick, ran, elapsed_ms = start.elapsed().as_millis(), "Tick complete");
         }
@@ -348,6 +388,7 @@ impl Engine {
                 Rc::clone(&dbref_counter),
                 &self.themes,
                 &self.map_templates,
+                &self.scheduled_hooks,
             )
             .map_err(|e| e.to_string())?;
 
@@ -399,6 +440,59 @@ impl Engine {
         }
     }
 
+    fn fire_tick_hook_with_args(
+        &mut self,
+        this_ref: &str,
+        hook_name: &str,
+        args: Option<&str>,
+    ) -> Result<(), String> {
+        let program = match self
+            .world
+            .get(this_ref)
+            .and_then(|o| hooks::get_program(o, hook_name))
+        {
+            Some(p) => p.clone(),
+            None => return Ok(()),
+        };
+
+        let room_ref = self
+            .world
+            .get(this_ref)
+            .and_then(|o| o.location_ref.clone());
+
+        let dbref_counter = Rc::new(Cell::new(self.world.next_id));
+        let result = self
+            .softcode
+            .run_hook(
+                &self.world,
+                &program,
+                this_ref,
+                this_ref,
+                room_ref.as_deref(),
+                args,
+                Budget::default(),
+                Rc::clone(&dbref_counter),
+                &self.themes,
+                &self.map_templates,
+                &self.scheduled_hooks,
+            )
+            .map_err(|e| e.to_string())?;
+
+        let effects = softcode::apply_batch(&mut self.world, &result.batch)?;
+        self.world.next_id = dbref_counter.get();
+        self.deliver_effects(&effects, this_ref);
+
+        if !result.state.is_empty() {
+            if let Some(obj) = self.world.get_mut(this_ref) {
+                if let Some(prog) = obj.programs.get_mut(hook_name) {
+                    prog.state = result.state;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn fire_tick_hook_named(&mut self, this_ref: &str, hook_name: &str) -> Result<(), String> {
         let program = match self
             .world
@@ -428,6 +522,7 @@ impl Engine {
                 Rc::clone(&dbref_counter),
                 &self.themes,
                 &self.map_templates,
+                &self.scheduled_hooks,
             )
             .map_err(|e| e.to_string())?;
 
@@ -458,6 +553,13 @@ impl Engine {
         match self.db.save_accounts(&self.accounts) {
             Ok(()) => tracing::info!("Accounts saved"),
             Err(e) => tracing::error!(error = %e, "Failed to save accounts"),
+        }
+        match self.db.save_scheduled_hooks(&self.scheduled_hooks) {
+            Ok(()) => tracing::debug!(
+                count = self.scheduled_hooks.len(),
+                "Scheduled hooks saved"
+            ),
+            Err(e) => tracing::error!(error = %e, "Failed to save scheduled hooks"),
         }
     }
 
@@ -1086,6 +1188,7 @@ impl Engine {
             }
             "inventory" | "inv" | "i" => commands::do_inventory(&self.world, &actor_ref),
             "get" | "take" => self.cmd_get(&actor_ref, &args),
+            "put" | "place" => self.cmd_put(&actor_ref, &args),
             "drop" => self.cmd_drop(&actor_ref, &args),
             "use" => self.cmd_use(&actor_ref, &args),
             "examine" | "ex" => commands::do_examine(&self.world, &actor_ref, &args),
@@ -1103,8 +1206,8 @@ impl Engine {
             }
 
             // Builder commands (@ prefix)
-            "@dig" => self.cmd_dig(session_id, &args),
-            "@open" => self.cmd_open(session_id, &args),
+            "@dig" => self.cmd_dig(session_id, &actor_ref, &args),
+            "@open" => self.cmd_open(session_id, &actor_ref, &args),
             "@describe" | "@desc" => self.cmd_describe(session_id, &actor_ref, &args),
             "@create" => self.cmd_create(session_id, &actor_ref, &args),
             "@destroy" => self.cmd_destroy(session_id, &actor_ref, &args),
@@ -1123,6 +1226,8 @@ impl Engine {
             "@lock" => self.cmd_lock(session_id, &actor_ref, &args),
             "@unlock" => self.cmd_unlock(session_id, &actor_ref, &args),
             "@locks" => self.cmd_locks(session_id, &actor_ref, &args),
+
+            "@chown" => self.cmd_chown(session_id, &args),
 
             // Admin commands
             "@grant" => self.cmd_grant(session_id, &args),
@@ -1150,7 +1255,7 @@ impl Engine {
 
     // -- Builder commands --
 
-    fn cmd_dig(&mut self, session_id: &str, args: &str) -> String {
+    fn cmd_dig(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
         if !self.session_has_scope(session_id, Scope::Builder) {
             return "Permission denied.\r\n".to_string();
         }
@@ -1161,25 +1266,20 @@ impl Engine {
         }
         let key = title.to_lowercase().replace(' ', "_");
         let ref_id = self.world.next_dbref();
-        let room = GameObject::new(&ref_id, &key, Kind::Room).with_title(title);
+        let room = GameObject::new(&ref_id, &key, Kind::Room)
+            .with_title(title)
+            .with_owner(actor_ref);
         self.world.add_object(room);
         self.fire_on_create(&ref_id);
         format!("Room created: {} ({})\r\n", title, ref_id)
     }
 
-    fn cmd_open(&mut self, session_id: &str, args: &str) -> String {
+    fn cmd_open(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
         if !self.session_has_scope(session_id, Scope::Builder) {
             return "Permission denied.\r\n".to_string();
         }
         // @open <direction> = <target_ref>  (from current room)
-        let actor_ref = match self.sessions.get(session_id) {
-            Some(Session {
-                state: SessionState::Playing { actor_ref, .. },
-                ..
-            }) => actor_ref.clone(),
-            _ => return "You're not in the game.\r\n".to_string(),
-        };
-        let room_ref = match self.world.get(&actor_ref).and_then(|a| a.location_ref.clone()) {
+        let room_ref = match self.world.get(actor_ref).and_then(|a| a.location_ref.clone()) {
             Some(r) => r,
             None => return "You're nowhere.\r\n".to_string(),
         };
@@ -1196,7 +1296,8 @@ impl Engine {
         let exit_ref = self.world.next_dbref();
         let exit = GameObject::new(&exit_ref, &direction, Kind::Exit)
             .with_location(&room_ref)
-            .with_target(&target);
+            .with_target(&target)
+            .with_owner(actor_ref);
         self.world.add_object(exit);
         self.fire_on_create(&exit_ref);
         format!("Exit '{}' created from {} to {}.\r\n", direction, room_ref, target)
@@ -1260,7 +1361,8 @@ impl Engine {
         let ref_id = self.world.next_dbref();
         let item = GameObject::new(&ref_id, &key, Kind::Item)
             .with_title(title)
-            .with_location(&room_ref);
+            .with_location(&room_ref)
+            .with_owner(actor_ref);
         self.world.add_object(item);
         self.fire_on_create(&ref_id);
         format!("Created {} ({}).\r\n", title, ref_id)
@@ -1274,6 +1376,9 @@ impl Engine {
             return "Usage: @destroy <ref>\r\n".to_string();
         }
         let target_ref = args.trim();
+        if !self.can_modify_object(session_id, actor_ref, target_ref) {
+            return "Permission denied (not owner).\r\n".to_string();
+        }
         if self.world.get(target_ref).map(|o| o.kind == Kind::Player).unwrap_or(false) {
             return "Cannot destroy player objects.\r\n".to_string();
         }
@@ -1332,6 +1437,10 @@ impl Engine {
         } else {
             target_ref.to_string()
         };
+
+        if !self.can_modify_object(session_id, actor_ref, &resolved_ref) {
+            return "Permission denied (not owner).\r\n".to_string();
+        }
 
         let json_val: serde_json::Value = match serde_json::from_str(value) {
             Ok(v) => v,
@@ -1441,6 +1550,9 @@ impl Engine {
         };
         if self.world.get(&target_ref).is_none() {
             return format!("No object with ref '{}'.\r\n", target_ref);
+        }
+        if !self.can_modify_object(session_id, actor_ref, &target_ref) {
+            return "Permission denied (not owner).\r\n".to_string();
         }
         if !hooks::is_valid_hook_name(&hook) {
             return format!(
@@ -1570,6 +1682,7 @@ impl Engine {
                 Rc::clone(&dbref_counter),
                 &self.themes,
                 &self.map_templates,
+                &self.scheduled_hooks,
             )
             .map_err(|e| e.to_string())?;
 
@@ -1597,6 +1710,18 @@ impl Engine {
                     message,
                     exclude,
                 } => self.send_to_room(room, message, exclude),
+                Effect::ScheduleHook { target, hook, ticks, data } => {
+                    self.scheduled_hooks.push(ScheduledHook {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        fire_at_tick: self.tick_count + ticks,
+                        target: target.clone(),
+                        hook: hook.clone(),
+                        data: data.clone(),
+                    });
+                }
+                Effect::CancelScheduledHook { target, hook } => {
+                    self.scheduled_hooks.retain(|s| !(s.target == *target && s.hook == *hook));
+                }
                 Effect::TriggerHook { target, hook } => {
                     triggers.push((target.clone(), hook.clone()));
                 }
@@ -1644,6 +1769,11 @@ impl Engine {
         if args.is_empty() {
             return "Get what?\r\n".to_string();
         }
+
+        if let Some((item_name, container_name)) = commands::split_on_preposition(args, "from") {
+            return self.cmd_get_from_container(actor_ref, item_name, container_name);
+        }
+
         let room_ref = match self.world.get(actor_ref).and_then(|a| a.location_ref.clone()) {
             Some(r) => r,
             None => return "You're nowhere.\r\n".to_string(),
@@ -1659,7 +1789,7 @@ impl Engine {
             .get(&item_ref)
             .map(|o| o.locks.clone())
             .unwrap_or_default();
-        if let Some(false) = self.check_lock("get", &item_locks, actor_ref) {
+        if let Some(false) = self.check_lock("get", &item_locks, actor_ref, Some(&item_ref)) {
             return "You can't pick that up.\r\n".to_string();
         }
 
@@ -1692,6 +1822,172 @@ impl Engine {
         }
 
         format!("You pick up {}.\r\n", name)
+    }
+
+    fn cmd_get_from_container(
+        &mut self,
+        actor_ref: &str,
+        item_name: &str,
+        container_name: &str,
+    ) -> String {
+        let room_ref = match self.world.get(actor_ref).and_then(|a| a.location_ref.clone()) {
+            Some(r) => r,
+            None => return "You're nowhere.\r\n".to_string(),
+        };
+
+        let container_ref =
+            match commands::find_item_in_inventory_or_room(&self.world, actor_ref, &room_ref, container_name) {
+                Some(r) => r,
+                None => return format!("You don't see '{}' here.\r\n", container_name),
+            };
+
+        let item_ref = match commands::find_item_ref(&self.world, &container_ref, item_name) {
+            Some(r) => r,
+            None => return format!("You don't see '{}' in that.\r\n", item_name),
+        };
+
+        let item_locks = self
+            .world
+            .get(&item_ref)
+            .map(|o| o.locks.clone())
+            .unwrap_or_default();
+        if let Some(false) = self.check_lock("get", &item_locks, actor_ref, Some(&item_ref)) {
+            return "You can't take that.\r\n".to_string();
+        }
+
+        match self.fire_hook(&item_ref, "can_get", actor_ref, Some(&room_ref), None) {
+            Ok(run) if run.denied => {
+                return if run.emitted_to_actor {
+                    String::new()
+                } else {
+                    "You can't get that.\r\n".to_string()
+                };
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(hook = "can_get", target = %item_ref, error = %e, "softcode error");
+                return "Something in the world resists.\r\n".to_string();
+            }
+        }
+
+        let item_display = self.world.get(&item_ref).unwrap().display_name().to_string();
+        let container_display = self.world.get(&container_ref).unwrap().display_name().to_string();
+        if let Some(obj) = self.world.get_mut(&item_ref) {
+            obj.location_ref = Some(actor_ref.to_string());
+        }
+
+        let _ = self.fire_hook(&item_ref, "on_move", actor_ref, Some(&room_ref), None);
+        let _ = self.fire_hook(actor_ref, "on_receive", actor_ref, Some(&room_ref), None);
+        let _ = self.fire_hook(&item_ref, "on_get", actor_ref, Some(&room_ref), None);
+
+        format!("You get {} from {}.\r\n", item_display, container_display)
+    }
+
+    fn cmd_put(&mut self, actor_ref: &str, args: &str) -> String {
+        if args.is_empty() {
+            return "Usage: put <item> in <container>\r\n".to_string();
+        }
+
+        let (item_name, container_name) = match commands::split_on_preposition(args, "in") {
+            Some(pair) => pair,
+            None => return "Usage: put <item> in <container>\r\n".to_string(),
+        };
+
+        let room_ref = match self.world.get(actor_ref).and_then(|a| a.location_ref.clone()) {
+            Some(r) => r,
+            None => return "You're nowhere.\r\n".to_string(),
+        };
+
+        let item_ref =
+            match commands::find_item_in_inventory_or_room(&self.world, actor_ref, &room_ref, item_name) {
+                Some(r) => r,
+                None => return format!("You don't see '{}' here.\r\n", item_name),
+            };
+
+        let container_ref =
+            match commands::find_item_in_inventory_or_room(&self.world, actor_ref, &room_ref, container_name) {
+                Some(r) => r,
+                None => return format!("You don't see '{}' here.\r\n", container_name),
+            };
+
+        let container_tag = Tag {
+            category: "item".into(),
+            key: "container".into(),
+        };
+        match self.world.get(&container_ref) {
+            Some(c) if !c.tags.contains(&container_tag) => {
+                return format!("{} is not a container.\r\n", c.display_name());
+            }
+            None => return "Container not found.\r\n".to_string(),
+            _ => {}
+        }
+
+        if item_ref == container_ref {
+            return "You can't put something inside itself.\r\n".to_string();
+        }
+
+        // Check capacity
+        if let Some(capacity) = self
+            .world
+            .get(&container_ref)
+            .and_then(|c| c.attrs.get("container_capacity"))
+            .and_then(|v| v.as_u64())
+        {
+            let current = self
+                .world
+                .objects_in(&container_ref)
+                .into_iter()
+                .filter(|o| o.kind == Kind::Item)
+                .count() as u64;
+            if current >= capacity {
+                return "That container is full.\r\n".to_string();
+            }
+        }
+
+        // Check put lock on the container
+        let container_locks = self
+            .world
+            .get(&container_ref)
+            .map(|o| o.locks.clone())
+            .unwrap_or_default();
+        if let Some(false) =
+            self.check_lock("put", &container_locks, actor_ref, Some(&container_ref))
+        {
+            return "You can't put things in there.\r\n".to_string();
+        }
+
+        // Check can_put hook on the container
+        match self.fire_hook(&container_ref, "can_put", actor_ref, Some(&room_ref), None) {
+            Ok(run) if run.denied => {
+                return if run.emitted_to_actor {
+                    String::new()
+                } else {
+                    "You can't put things in there.\r\n".to_string()
+                };
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(hook = "can_put", target = %container_ref, error = %e, "softcode error");
+                return "Something in the world resists.\r\n".to_string();
+            }
+        }
+
+        let item_display = self.world.get(&item_ref).unwrap().display_name().to_string();
+        let container_display = self
+            .world
+            .get(&container_ref)
+            .unwrap()
+            .display_name()
+            .to_string();
+        if let Some(obj) = self.world.get_mut(&item_ref) {
+            obj.location_ref = Some(container_ref.clone());
+        }
+
+        let _ = self.fire_hook(&item_ref, "on_move", actor_ref, Some(&room_ref), None);
+        let _ = self.fire_hook(&container_ref, "on_receive", actor_ref, Some(&room_ref), None);
+        let _ = self.fire_hook(&container_ref, "on_put", actor_ref, Some(&room_ref), None);
+
+        format!("You put {} in {}.\r\n", item_display, container_display)
     }
 
     /// When no builtin command matched, look for a `cmd_<name>` Program on
@@ -2333,6 +2629,7 @@ impl Engine {
         lock_type: &str,
         locks: &HashMap<String, String>,
         actor_ref: &str,
+        target_ref: Option<&str>,
     ) -> Option<bool> {
         let expr_str = locks.get(lock_type)?;
         let actor = self.world.get(actor_ref)?;
@@ -2341,6 +2638,7 @@ impl Engine {
             actor,
             world: &self.world,
             account_scopes: &scopes,
+            target: target_ref.and_then(|r| self.world.get(r)),
         };
         match locks::evaluate_lock_string(expr_str, &ctx) {
             Ok(result) => Some(result),
@@ -2413,7 +2711,7 @@ impl Engine {
                     .get(target_ref)
                     .map(|o| o.locks.clone())
                     .unwrap_or_default();
-                if let Some(false) = self.check_lock("look", &locks, actor_ref) {
+                if let Some(false) = self.check_lock("look", &locks, actor_ref, Some(target_ref)) {
                     return "You can't see that.\r\n".to_string();
                 }
                 if let Ok(run) = self.fire_hook(target_ref, "can_look", actor_ref, Some(&room_ref), None) {
@@ -2471,7 +2769,7 @@ impl Engine {
             .get(exit_ref)
             .map(|o| o.locks.clone())
             .unwrap_or_default();
-        if let Some(false) = self.check_lock("traverse", &exit_locks, actor_ref) {
+        if let Some(false) = self.check_lock("traverse", &exit_locks, actor_ref, Some(exit_ref)) {
             return "You can't go that way.\r\n".to_string();
         }
 
@@ -2496,7 +2794,7 @@ impl Engine {
             .get(target_ref)
             .map(|o| o.locks.clone())
             .unwrap_or_default();
-        if let Some(false) = self.check_lock("enter", &room_locks, actor_ref) {
+        if let Some(false) = self.check_lock("enter", &room_locks, actor_ref, Some(target_ref)) {
             return "You can't go there.\r\n".to_string();
         }
 
@@ -2581,7 +2879,7 @@ impl Engine {
             .get(&item_ref)
             .map(|o| o.locks.clone())
             .unwrap_or_default();
-        if let Some(false) = self.check_lock("drop", &item_locks, actor_ref) {
+        if let Some(false) = self.check_lock("drop", &item_locks, actor_ref, Some(&item_ref)) {
             return "You can't drop that.\r\n".to_string();
         }
 
@@ -2645,7 +2943,7 @@ impl Engine {
             .get(&target_ref)
             .map(|o| o.locks.clone())
             .unwrap_or_default();
-        if let Some(false) = self.check_lock("use", &target_locks, actor_ref) {
+        if let Some(false) = self.check_lock("use", &target_locks, actor_ref, Some(&target_ref)) {
             return "You can't use that.\r\n".to_string();
         }
 
@@ -2746,7 +3044,7 @@ impl Engine {
         // @lock <ref>/<type> = <expression>
         let (path, expr_str) = match args.split_once('=') {
             Some((p, e)) => (p.trim(), e.trim()),
-            None => return "Usage: @lock <ref>/<type> = <expression>\r\nTypes: traverse, get, drop, enter, use, look, teleport\r\n".to_string(),
+            None => return "Usage: @lock <ref>/<type> = <expression>\r\nTypes: traverse, get, drop, enter, use, look, teleport, put\r\nPredicates: perm(), has_tag(), has_attr(), in_inventory(), is_kind(), is_owner(), time_between()\r\n".to_string(),
         };
         let (target_ref, lock_type) = match path.rsplit_once('/') {
             Some((r, t)) => (r.trim(), t.trim()),
@@ -2760,6 +3058,10 @@ impl Engine {
         } else {
             target_ref.to_string()
         };
+
+        if !self.can_modify_object(session_id, actor_ref, &resolved) {
+            return "Permission denied (not owner).\r\n".to_string();
+        }
 
         // Validate the expression parses
         if let Err(e) = locks::parse(expr_str) {
@@ -2829,6 +3131,39 @@ impl Engine {
                 }
             }
             None => format!("No object with ref '{}'.\r\n", target_ref),
+        }
+    }
+
+    fn can_modify_object(&self, session_id: &str, actor_ref: &str, target_ref: &str) -> bool {
+        if self.session_has_scope(session_id, Scope::Admin) {
+            return true;
+        }
+        self.world
+            .get(target_ref)
+            .and_then(|o| o.owner_ref.as_ref())
+            .is_some_and(|owner| owner == actor_ref)
+    }
+
+    fn cmd_chown(&mut self, session_id: &str, args: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Admin) {
+            return "Permission denied (admin only).\r\n".to_string();
+        }
+        // @chown <ref> = <player_ref>
+        let (target_ref, new_owner) = match args.split_once('=') {
+            Some((r, o)) => (r.trim(), o.trim()),
+            None => return "Usage: @chown <ref> = <player_ref>\r\n".to_string(),
+        };
+        if target_ref.is_empty() || new_owner.is_empty() {
+            return "Usage: @chown <ref> = <player_ref>\r\n".to_string();
+        }
+        if self.world.get(new_owner).is_none() {
+            return format!("No object with ref '{}'.\r\n", new_owner);
+        }
+        if let Some(obj) = self.world.get_mut(target_ref) {
+            obj.owner_ref = Some(new_owner.to_string());
+            format!("Owner of {} set to {}.\r\n", target_ref, new_owner)
+        } else {
+            format!("No object with ref '{}'.\r\n", target_ref)
         }
     }
 }

@@ -50,6 +50,8 @@ pub struct GameObject {
     pub description: String,
     pub location_ref: Option<String>,
     #[serde(default)]
+    pub owner_ref: Option<String>,
+    #[serde(default)]
     pub target_ref: Option<String>,
     pub attrs: HashMap<String, serde_json::Value>,
     pub tags: HashSet<Tag>,
@@ -71,6 +73,7 @@ impl GameObject {
             title: None,
             description: String::new(),
             location_ref: None,
+            owner_ref: None,
             target_ref: None,
             attrs: HashMap::new(),
             tags: HashSet::new(),
@@ -93,6 +96,11 @@ impl GameObject {
 
     pub fn with_location(mut self, loc: impl Into<String>) -> Self {
         self.location_ref = Some(loc.into());
+        self
+    }
+
+    pub fn with_owner(mut self, owner: impl Into<String>) -> Self {
+        self.owner_ref = Some(owner.into());
         self
     }
 

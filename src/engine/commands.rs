@@ -122,12 +122,62 @@ pub fn do_inventory(world: &World, actor_ref: &str) -> String {
     if carrying.is_empty() {
         "You aren't carrying anything.\r\n".to_string()
     } else {
+        let container_tag = Tag {
+            category: "item".into(),
+            key: "container".into(),
+        };
         let mut out = "You are carrying:\r\n".to_string();
         for obj in carrying {
             out.push_str(&format!("  {}\r\n", obj.display_name()));
+            if obj.tags.contains(&container_tag) {
+                format_container_contents(world, &obj.ref_id, &mut out, 2);
+            }
         }
         out
     }
+}
+
+fn format_container_contents(world: &World, container_ref: &str, out: &mut String, depth: usize) {
+    let contents: Vec<_> = world
+        .objects_in(container_ref)
+        .into_iter()
+        .filter(|o| o.kind == Kind::Item)
+        .collect();
+    if contents.is_empty() {
+        return;
+    }
+    let indent = "  ".repeat(depth);
+    let container_tag = Tag {
+        category: "item".into(),
+        key: "container".into(),
+    };
+    for obj in contents {
+        out.push_str(&format!("{}  {}\r\n", indent, obj.display_name()));
+        if obj.tags.contains(&container_tag) && depth < 4 {
+            format_container_contents(world, &obj.ref_id, out, depth + 1);
+        }
+    }
+}
+
+pub fn find_item_in_inventory_or_room(
+    world: &World,
+    actor_ref: &str,
+    room_ref: &str,
+    name: &str,
+) -> Option<String> {
+    find_item_ref(world, actor_ref, name).or_else(|| find_item_ref(world, room_ref, name))
+}
+
+pub fn split_on_preposition<'a>(args: &'a str, prep: &str) -> Option<(&'a str, &'a str)> {
+    let pattern = format!(" {} ", prep);
+    let lower = args.to_lowercase();
+    let idx = lower.find(&pattern)?;
+    let item = args[..idx].trim();
+    let container = args[idx + pattern.len()..].trim();
+    if item.is_empty() || container.is_empty() {
+        return None;
+    }
+    Some((item, container))
 }
 
 /// Find an Item located at `room_ref` whose key or display name matches
@@ -212,6 +262,12 @@ pub fn do_examine(world: &World, actor_ref: &str, args: &str) -> String {
                 out.push_str(&format!("{}\r\n", obj.description));
             }
             out.push_str(&format!("Ref: {}\r\n", obj.ref_id));
+            if let Some(owner) = &obj.owner_ref {
+                let owner_name = world.get(owner)
+                    .map(|o| o.display_name().to_string())
+                    .unwrap_or_else(|| owner.clone());
+                out.push_str(&format!("Owner: {} ({})\r\n", owner_name, owner));
+            }
             if obj.kind == Kind::Exit {
                 if let Some(target_ref) = &obj.target_ref {
                     let dest_name = world.get(target_ref)
@@ -258,6 +314,25 @@ pub fn do_examine(world: &World, actor_ref: &str, args: &str) -> String {
                 let tags: Vec<String> = obj.tags.iter().map(|t| t.as_spec()).collect();
                 out.push_str(&format!("Tags: {}\r\n", tags.join(", ")));
             }
+            let container_tag = Tag {
+                category: "item".into(),
+                key: "container".into(),
+            };
+            if obj.tags.contains(&container_tag) {
+                let contents: Vec<_> = world
+                    .objects_in(&obj.ref_id)
+                    .into_iter()
+                    .filter(|o| o.kind == Kind::Item)
+                    .collect();
+                if contents.is_empty() {
+                    out.push_str("It is empty.\r\n");
+                } else {
+                    out.push_str("Contents:\r\n");
+                    for item in contents {
+                        out.push_str(&format!("  {}\r\n", item.display_name()));
+                    }
+                }
+            }
             out
         }
         None => format!("You don't see '{}' here.\r\n", args),
@@ -272,6 +347,8 @@ pub fn do_help_with_roles(is_builder: bool, is_admin: bool) -> String {
         "  go <direction>    - Move (or just type the direction)\r\n",
         "  say <message>     - Say something\r\n",
         "  get <item>        - Pick up an item\r\n",
+        "  get <item> from <container> - Get from a container\r\n",
+        "  put <item> in <container>   - Put into a container\r\n",
         "  drop <item>       - Drop an item\r\n",
         "  use <target>      - Use an object\r\n",
         "  inventory (i)     - Check what you're carrying\r\n",
@@ -315,6 +392,7 @@ pub fn do_help_with_roles(is_builder: bool, is_admin: bool) -> String {
     if is_admin {
         out.push_str(concat!(
             "\r\nAdmin commands:\r\n",
+            "  @chown <ref> = <player_ref>      - Change object owner\r\n",
             "  @grant <user> <scope>            - Grant a scope (player/builder/admin)\r\n",
             "  @revoke <user> <scope>           - Revoke a scope\r\n",
             "  @scopes [<user>]                 - View scopes\r\n",

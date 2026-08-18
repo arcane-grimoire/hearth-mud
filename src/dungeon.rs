@@ -402,6 +402,7 @@ pub fn generate(
                 title: Some(title),
                 description: Some(text),
                 location,
+                owner: None,
             });
 
             for (key, value) in [

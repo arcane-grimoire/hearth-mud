@@ -9,6 +9,7 @@ pub enum LockExpr {
     HasAttr(String, Option<serde_json::Value>),
     InInventory(Tag),
     IsKind(Kind),
+    IsOwner,
     TimeBetween(u32, u32),
     And(Box<LockExpr>, Box<LockExpr>),
     Or(Box<LockExpr>, Box<LockExpr>),
@@ -19,6 +20,7 @@ pub struct AccessContext<'a> {
     pub actor: &'a GameObject,
     pub world: &'a World,
     pub account_scopes: &'a [String],
+    pub target: Option<&'a GameObject>,
 }
 
 pub fn evaluate(expr: &LockExpr, ctx: &AccessContext) -> bool {
@@ -40,6 +42,10 @@ pub fn evaluate(expr: &LockExpr, ctx: &AccessContext) -> bool {
             .iter()
             .any(|o| o.tags.contains(tag)),
         LockExpr::IsKind(kind) => ctx.actor.kind == *kind,
+        LockExpr::IsOwner => ctx
+            .target
+            .and_then(|t| t.owner_ref.as_ref())
+            .is_some_and(|owner| owner == &ctx.actor.ref_id),
         LockExpr::TimeBetween(start, end) => {
             let hour = chrono_hour_utc();
             if start <= end {
@@ -213,6 +219,12 @@ fn parse_atom(tokens: &[String], pos: &mut usize) -> Result<LockExpr, String> {
                     .ok_or_else(|| format!("Unknown kind: '{}'", args[0]))?;
                 Ok(LockExpr::IsKind(kind))
             }
+            "is_owner" => {
+                if !args.is_empty() {
+                    return Err("is_owner() takes no arguments".into());
+                }
+                Ok(LockExpr::IsOwner)
+            }
             "time_between" => {
                 if args.len() != 2 {
                     return Err("time_between() takes 2 arguments".into());
@@ -319,6 +331,7 @@ mod tests {
             actor,
             world,
             account_scopes: scopes,
+            target: None,
         }
     }
 

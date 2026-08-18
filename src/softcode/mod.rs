@@ -21,6 +21,17 @@ use crate::theme::Theme;
 use crate::world::{GameObject, Kind, Tag, World};
 use hooks::ProgramRecord;
 
+pub const MAX_CONTAINER_DEPTH: u32 = 3;
+
+#[derive(Debug, Clone)]
+pub struct ScheduledHook {
+    pub id: String,
+    pub fire_at_tick: u64,
+    pub target: String,
+    pub hook: String,
+    pub data: Option<HashMap<String, serde_json::Value>>,
+}
+
 /// A typed mutation a Program has requested. This is the exhaustive list of
 /// everything softcode can do to the world — see ADR 0001.
 #[derive(Debug, Clone)]
@@ -62,6 +73,7 @@ pub enum Intent {
         title: Option<String>,
         description: Option<String>,
         location: String,
+        owner: Option<String>,
     },
     SetTitle {
         target: String,
@@ -98,6 +110,21 @@ pub enum Intent {
         hook: String,
         expr: String,
     },
+    SetOwner {
+        target: String,
+        owner: String,
+    },
+    /// Schedule a hook to fire on `target` after `ticks` engine ticks.
+    After {
+        target: String,
+        hook: String,
+        ticks: u64,
+        data: Option<HashMap<String, serde_json::Value>>,
+    },
+    CancelAfter {
+        target: String,
+        hook: String,
+    },
 }
 
 /// The intents a Program has queued during a single run. Collected while the
@@ -132,6 +159,16 @@ pub enum Effect {
         room: String,
         message: String,
         exclude: Vec<String>,
+    },
+    ScheduleHook {
+        target: String,
+        hook: String,
+        ticks: u64,
+        data: Option<HashMap<String, serde_json::Value>>,
+    },
+    CancelScheduledHook {
+        target: String,
+        hook: String,
     },
     TriggerHook {
         target: String,
@@ -202,6 +239,24 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 if world.get(destination).is_none() {
                     return Err(format!("move_object: no destination '{}'", destination));
                 }
+                if target == destination {
+                    return Err("move_object: cannot move object into itself".into());
+                }
+                let mut cursor = destination.clone();
+                let mut depth = 0u32;
+                while let Some(parent) = world.get(&cursor).and_then(|o| o.location_ref.clone()) {
+                    depth += 1;
+                    if parent == *target {
+                        return Err("move_object: circular containment detected".into());
+                    }
+                    if depth > MAX_CONTAINER_DEPTH {
+                        return Err(format!(
+                            "move_object: nesting depth exceeds {}",
+                            MAX_CONTAINER_DEPTH
+                        ));
+                    }
+                    cursor = parent;
+                }
                 let obj = world
                     .get_mut(target)
                     .ok_or_else(|| format!("move_object: no object '{}'", target))?;
@@ -226,6 +281,7 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 title,
                 description,
                 location,
+                owner,
             } => {
                 if world.get(ref_id).is_some() {
                     return Err(format!("spawn: ref '{}' already exists", ref_id));
@@ -240,6 +296,9 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 }
                 if let Some(d) = description {
                     obj = obj.with_description(d.clone());
+                }
+                if let Some(o) = owner {
+                    obj = obj.with_owner(o.clone());
                 }
                 world.add_object(obj);
             }
@@ -308,6 +367,38 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                     .get_mut(target)
                     .ok_or_else(|| format!("set_lock: no object '{}'", target))?;
                 obj.locks.insert(hook.clone(), expr.clone());
+            }
+            Intent::SetOwner { target, owner } => {
+                if world.get(owner).is_none() {
+                    return Err(format!("set_owner: no object '{}'", owner));
+                }
+                let obj = world
+                    .get_mut(target)
+                    .ok_or_else(|| format!("set_owner: no object '{}'", target))?;
+                obj.owner_ref = Some(owner.clone());
+            }
+            Intent::After { target, hook, ticks, data } => {
+                if *ticks == 0 {
+                    return Err("after: ticks must be > 0".into());
+                }
+                if world.get(target).is_none() {
+                    return Err(format!("after: no object '{}'", target));
+                }
+                effects.push(Effect::ScheduleHook {
+                    target: target.clone(),
+                    hook: hook.clone(),
+                    ticks: *ticks,
+                    data: data.clone(),
+                });
+            }
+            Intent::CancelAfter { target, hook } => {
+                if world.get(target).is_none() {
+                    return Err(format!("cancel_after: no object '{}'", target));
+                }
+                effects.push(Effect::CancelScheduledHook {
+                    target: target.clone(),
+                    hook: hook.clone(),
+                });
             }
         }
     }
@@ -416,6 +507,7 @@ impl SoftcodeRuntime {
 
         Self::install_require(&lua);
         crate::grid::Grid2D::install_globals(&lua);
+        crate::noise::install_globals(&lua);
 
         Self {
             lua,
@@ -554,6 +646,7 @@ impl SoftcodeRuntime {
         dbref_counter: Rc<Cell<u64>>,
         themes: &HashMap<String, Theme>,
         map_templates: &HashMap<String, crate::map_template::MapTemplateFile>,
+        scheduled_hooks: &[ScheduledHook],
     ) -> Result<ProgramResult, SoftcodeError> {
         self.install_budget(budget);
         let batch = Rc::new(RefCell::new(IntentBatch::default()));
@@ -580,6 +673,7 @@ impl SoftcodeRuntime {
                 Rc::clone(&dbref_counter),
                 themes,
                 map_templates,
+                scheduled_hooks,
             )?;
 
             let compiled = self.get_or_compile(&program.source, &program.hook)
@@ -663,6 +757,7 @@ impl SoftcodeRuntime {
         dbref_counter: Rc<Cell<u64>>,
         themes: &HashMap<String, Theme>,
         map_templates: &HashMap<String, crate::map_template::MapTemplateFile>,
+        scheduled_hooks: &[ScheduledHook],
     ) -> Result<ProgramResult, SoftcodeError> {
         self.install_budget(budget);
         let batch = Rc::new(RefCell::new(IntentBatch::default()));
@@ -683,6 +778,7 @@ impl SoftcodeRuntime {
                 Rc::clone(&dbref_counter),
                 themes,
                 map_templates,
+                scheduled_hooks,
             )?;
 
             let compiled = self.get_or_compile(source, entry)
@@ -859,7 +955,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(),
+                &test_themes(), &test_map_templates(), &[],
             )
             .expect("hook should run");
 
@@ -902,7 +998,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(),
+                &test_themes(), &test_map_templates(), &[],
             )
             .expect("hook should run");
 
@@ -934,7 +1030,7 @@ mod tests {
                 Some("the button"),
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(),
+                &test_themes(), &test_map_templates(), &[],
             )
             .expect("hook should run");
 
@@ -973,7 +1069,7 @@ mod tests {
                 None,
                 Budget::new(1000),
                 counter(&world),
-                &test_themes(), &test_map_templates(),
+                &test_themes(), &test_map_templates(), &[],
             )
             .expect_err("infinite loop should hit budget");
 
@@ -1007,7 +1103,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(),
+                &test_themes(), &test_map_templates(), &[],
             )
             .unwrap();
         let result_b = runtime
@@ -1020,7 +1116,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(),
+                &test_themes(), &test_map_templates(), &[],
             )
             .unwrap();
 
@@ -1066,7 +1162,7 @@ mod tests {
                 Some(""),
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(),
+                &test_themes(), &test_map_templates(), &[],
             )
             .unwrap();
 
@@ -1087,7 +1183,7 @@ mod tests {
         let runtime = SoftcodeRuntime::new();
         let program = ProgramRecord::new("on_get", source);
         runtime
-            .run_hook(world, &program, "#5", "#3", Some("#1"), None, Budget::default(), counter(world), &test_themes(), &test_map_templates())
+            .run_hook(world, &program, "#5", "#3", Some("#1"), None, Budget::default(), counter(world), &test_themes(), &test_map_templates(), &[])
             .expect("script should run")
     }
 
@@ -1403,6 +1499,7 @@ mod tests {
                 counter(&world),
                 &themes,
                 &test_map_templates(),
+                &[],
             )
             .expect("cmd_delve should run");
 
@@ -1445,6 +1542,7 @@ mod tests {
                 counter(&w),
                 &themes,
                 &test_map_templates(),
+                &[],
             )
             .expect("cmd_leave should run");
         apply_batch(&mut w, &destroy_result.batch).expect("destroy batch should apply");
@@ -1505,6 +1603,7 @@ mod tests {
                 counter(&world),
                 &test_themes(),
                 &map_templates,
+                &[],
             )
             .expect("cmd_explore should run");
 
@@ -1562,7 +1661,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(),
+                &test_themes(), &test_map_templates(), &[],
             )
             .expect("hook should run");
 
@@ -1598,7 +1697,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(),
+                &test_themes(), &test_map_templates(), &[],
             )
             .expect_err("should fail on missing module");
 
@@ -1634,7 +1733,7 @@ mod tests {
                 &HashMap::new(),
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(),
+                &test_themes(), &test_map_templates(), &[],
             )
             .expect("global script should run");
 
@@ -1692,7 +1791,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(),
+                &test_themes(), &test_map_templates(), &[],
             )
             .expect("hook should run");
 
@@ -1731,7 +1830,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(),
+                &test_themes(), &test_map_templates(), &[],
             )
             .unwrap();
 
@@ -1754,7 +1853,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(),
+                &test_themes(), &test_map_templates(), &[],
             )
             .unwrap();
 
@@ -1786,7 +1885,7 @@ mod tests {
         let result = runtime
             .run_hook(
                 &world, &program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&world), &test_themes(), &test_map_templates(),
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[],
             )
             .unwrap();
 
@@ -1818,7 +1917,7 @@ mod tests {
         let result = runtime
             .run_hook(
                 &world, &program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&world), &test_themes(), &test_map_templates(),
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[],
             )
             .unwrap();
 
@@ -1840,7 +1939,7 @@ mod tests {
         let result2 = runtime
             .run_hook(
                 &w, &restore_program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&w), &test_themes(), &test_map_templates(),
+                Budget::default(), counter(&w), &test_themes(), &test_map_templates(), &[],
             )
             .unwrap();
 
@@ -1877,7 +1976,7 @@ mod tests {
         let result = runtime
             .run_hook(
                 &world, &program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&world), &test_themes(), &test_map_templates(),
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[],
             )
             .unwrap();
 
@@ -1914,7 +2013,7 @@ mod tests {
         let result = runtime
             .run_hook(
                 &world, &program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&world), &test_themes(), &test_map_templates(),
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[],
             )
             .unwrap();
 
@@ -1925,5 +2024,200 @@ mod tests {
         assert_eq!(obj.attrs.get("fy").unwrap(), 2);
         assert_eq!(obj.attrs.get("count").unwrap(), 4);
         assert_eq!(obj.attrs.get("neighbor_count").unwrap(), 4);
+    }
+
+    #[test]
+    fn noise_functions_return_deterministic_values() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let program = ProgramRecord::new(
+            "on_get",
+            r#"
+                function on_get(this, actor, room)
+                    local s = simplex2d(42, 1.5, 2.5)
+                    local p = perlin2d(42, 1.5, 2.5)
+                    local f = fbm2d(42, 1.5, 2.5)
+                    set_attr(this, "simplex", s)
+                    set_attr(this, "perlin", p)
+                    set_attr(this, "fbm", f)
+
+                    -- Same inputs must produce same outputs
+                    local s2 = simplex2d(42, 1.5, 2.5)
+                    set_attr(this, "deterministic", s == s2)
+
+                    -- Different seed produces different output
+                    local s3 = simplex2d(99, 1.5, 2.5)
+                    set_attr(this, "different_seed", s ~= s3)
+
+                    -- 3D variants
+                    local s3d = simplex3d(42, 1.0, 2.0, 3.0)
+                    local p3d = perlin3d(42, 1.0, 2.0, 3.0)
+                    set_attr(this, "has_3d", s3d ~= 0 or p3d ~= 0 or true)
+                end
+            "#,
+        );
+
+        let result = runtime
+            .run_hook(
+                &world, &program, "#5", "#3", Some("#1"), None,
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[],
+            )
+            .unwrap();
+
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        let obj = w.get("#5").unwrap();
+        let simplex = obj.attrs.get("simplex").unwrap().as_f64().unwrap();
+        let perlin = obj.attrs.get("perlin").unwrap().as_f64().unwrap();
+        assert!((-1.0..=1.0).contains(&simplex));
+        assert!((-1.0..=1.0).contains(&perlin));
+        assert_eq!(obj.attrs.get("deterministic").unwrap(), true);
+        assert_eq!(obj.attrs.get("different_seed").unwrap(), true);
+        assert_eq!(obj.attrs.get("has_3d").unwrap(), true);
+    }
+
+    #[test]
+    fn seeded_rng_is_deterministic() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let program = ProgramRecord::new(
+            "on_get",
+            r#"
+                function on_get(this, actor, room)
+                    local h1 = hash_seed("world", 10, 20)
+                    local h2 = hash_seed("world", 10, 20)
+                    set_attr(this, "hash_deterministic", h1 == h2)
+
+                    local h3 = hash_seed("world", 10, 21)
+                    set_attr(this, "hash_varies", h1 ~= h3)
+
+                    local r = seed_random(h1, 1, 6)
+                    set_attr(this, "roll", r)
+
+                    local f = seed_float(h1)
+                    set_attr(this, "float", f)
+
+                    local items = {"sword", "shield", "potion"}
+                    local pick = seed_choice(h1, items)
+                    set_attr(this, "choice", pick)
+                end
+            "#,
+        );
+
+        let result = runtime
+            .run_hook(
+                &world, &program, "#5", "#3", Some("#1"), None,
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[],
+            )
+            .unwrap();
+
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        let obj = w.get("#5").unwrap();
+        assert_eq!(obj.attrs.get("hash_deterministic").unwrap(), true);
+        assert_eq!(obj.attrs.get("hash_varies").unwrap(), true);
+        let roll = obj.attrs.get("roll").unwrap().as_i64().unwrap();
+        assert!((1..=6).contains(&roll));
+        let float = obj.attrs.get("float").unwrap().as_f64().unwrap();
+        assert!((0.0..1.0).contains(&float));
+        assert!(obj.attrs.get("choice").unwrap().as_str().is_some());
+    }
+
+    #[test]
+    fn distance_and_coordinate_math() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let program = ProgramRecord::new(
+            "on_get",
+            r#"
+                function on_get(this, actor, room)
+                    set_attr(this, "dist", distance(0, 0, 3, 4))
+                    set_attr(this, "man", manhattan(0, 0, 3, 4))
+                    set_attr(this, "dir_e", direction_to(0, 0, 5, 0))
+                    set_attr(this, "dir_n", direction_to(0, 0, 0, -5))
+                    set_attr(this, "dir_here", direction_to(3, 3, 3, 3))
+                    set_attr(this, "lerped", lerp(0, 10, 0.5))
+                    set_attr(this, "clamped", clamp(15, 0, 10))
+                    set_attr(this, "remapped", remap(5, 0, 10, 0, 100))
+                end
+            "#,
+        );
+
+        let result = runtime
+            .run_hook(
+                &world, &program, "#5", "#3", Some("#1"), None,
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[],
+            )
+            .unwrap();
+
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        let obj = w.get("#5").unwrap();
+        assert_eq!(obj.attrs.get("dist").unwrap().as_f64().unwrap(), 5.0);
+        assert_eq!(obj.attrs.get("man").unwrap().as_f64().unwrap(), 7.0);
+        assert_eq!(obj.attrs.get("dir_e").unwrap().as_str().unwrap(), "e");
+        assert_eq!(obj.attrs.get("dir_n").unwrap().as_str().unwrap(), "n");
+        assert_eq!(obj.attrs.get("dir_here").unwrap().as_str().unwrap(), "here");
+        assert_eq!(obj.attrs.get("lerped").unwrap().as_f64().unwrap(), 5.0);
+        assert_eq!(obj.attrs.get("clamped").unwrap().as_f64().unwrap(), 10.0);
+        assert_eq!(obj.attrs.get("remapped").unwrap().as_f64().unwrap(), 50.0);
+    }
+
+    #[test]
+    fn after_schedules_a_hook() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let program = ProgramRecord::new(
+            "on_get",
+            r#"
+                function on_get(this, actor, room)
+                    after(5, this, "on_expire")
+                end
+            "#,
+        );
+
+        let result = runtime
+            .run_hook(
+                &world, &program, "#5", "#3", Some("#1"), None,
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[],
+            )
+            .unwrap();
+
+        let mut w = world.clone();
+        let effects = apply_batch(&mut w, &result.batch).unwrap();
+        assert_eq!(effects.len(), 1);
+        match &effects[0] {
+            Effect::ScheduleHook { target, hook, ticks, .. } => {
+                assert_eq!(target, "#5");
+                assert_eq!(hook, "on_expire");
+                assert_eq!(*ticks, 5);
+            }
+            _ => panic!("expected ScheduleHook effect"),
+        }
+    }
+
+    #[test]
+    fn after_rejects_zero_ticks() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let program = ProgramRecord::new(
+            "on_get",
+            r#"
+                function on_get(this, actor, room)
+                    after(0, this, "on_expire")
+                end
+            "#,
+        );
+
+        let result = runtime
+            .run_hook(
+                &world, &program, "#5", "#3", Some("#1"), None,
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[],
+            )
+            .unwrap();
+
+        let mut w = world.clone();
+        let err = apply_batch(&mut w, &result.batch).unwrap_err();
+        assert!(err.contains("ticks must be > 0"));
     }
 }

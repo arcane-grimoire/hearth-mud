@@ -61,7 +61,7 @@ src/
     web_client.html    Browser-based MUD client
   softcode/
     mod.rs             Intent enum, IntentBatch, Budget, SoftcodeRuntime, bytecode cache
-    api.rs             38 Luau-facing functions (read, write, predicates, utility, grids)
+    api.rs             54 Luau-facing functions (read, write, predicates, utility, noise, rng, math, scheduling)
     hooks.rs           30 known hooks, ProgramRecord with persistent state
   world/
     mod.rs             World struct (objects HashMap, scripts, queries)
@@ -73,11 +73,14 @@ src/
 ## Key features
 
 - **Everything is an object** — rooms, items, NPCs, players, exits all share `GameObject`
-- **30 hooks** — can_get, on_get, can_drop, on_drop, can_use, on_use, can_traverse, can_enter, on_enter, on_leave, can_look, on_look, can_say, on_say, can_see, on_move, on_destroy, on_connect, on_disconnect, on_whisper, on_emote, on_receive, on_damage, on_death, on_tick, on_startup, on_shutdown, on_reload, on_save, on_create
-- **38 Luau API functions** — read (14), predicates (8), write (14), utility (1), grid (1)
+- **32 hooks** — can_get, on_get, can_drop, on_drop, can_put, on_put, can_use, on_use, can_traverse, can_enter, on_enter, on_leave, can_look, on_look, can_say, on_say, can_see, on_move, on_destroy, on_connect, on_disconnect, on_whisper, on_emote, on_receive, on_damage, on_death, on_tick, on_startup, on_shutdown, on_reload, on_save, on_create
+- **63 Luau API functions** — read (18), predicates (9), write (18), utility (3), noise (5), seeded RNG (4), coordinate math (6), grid (1)
 - **Luau modules** — `require()` loads shared .luau files from `<game_dir>/lib/`
 - **Grid2D userdata** — Rust-backed spatial grid: get/set, A* pathfinding, LOS, FOV, Dijkstra, flood fill
-- **Lock DSL** — perm(), has_tag(), has_attr(), in_inventory(), is_kind(), time_between(), AND/OR/NOT
+- **Ownership** — `owner_ref` on every object, auto-set on creation, `@chown` admin command, builder permission enforcement
+- **Containers** — items can hold other items via `item:container` tag, `put X in Y` / `get X from Y`, capacity limits, nested inventory display, circular containment prevention
+- **Lock DSL** — perm(), has_tag(), has_attr(), in_inventory(), is_kind(), is_owner(), time_between(), AND/OR/NOT
+- **Timers** — `after(ticks, ref, hook, data?)` with DB persistence, `cancel_after()`, `get_timers()`, data payloads
 - **Ticks** — 1s global heartbeat, per-object on_tick with persistent state, global scripts
 - **Visibility** — system:hidden tag + can_see hook
 - **Global commands** — system:global tag on objects makes their cmd_ hooks available everywhere
@@ -106,16 +109,10 @@ game_dir = "../the-last-stag-mud/world"
 
 See `docs/adr/` (6 ADRs). See `CONTEXT.md` for domain glossary.
 
-## Pending work
-
-See `docs/plans/dbref-migration.md` — next major change is replacing
-string-path refs with auto-incrementing integer dbrefs (#1, #2, #3).
-This is a breaking change that touches every file.
-
 ## Testing
 
-96 tests across: accounts (12), db round-trips (7), engine API (8),
-locks DSL (9), softcode (28), grid (14), loader (6), dungeon (4),
+111 tests across: accounts (12), db round-trips (7), engine API (8),
+locks DSL (9), softcode (33), grid (14), loader (6), dungeon (4),
 theme (1), lock validator (7).
 
 ```sh

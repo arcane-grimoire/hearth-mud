@@ -3,6 +3,7 @@
 //! batch — see ADR 0001. Nothing here ever gets a `&mut World`.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use mlua::{Lua, LuaSerdeExt, Scope, Table, Value};
@@ -71,6 +72,7 @@ fn object_to_table(lua: &Lua, obj: &GameObject) -> mlua::Result<Table> {
     t.set("display_name", obj.display_name().to_string())?;
     t.set("description", obj.description.clone())?;
     t.set("location_ref", obj.location_ref.clone())?;
+    t.set("owner_ref", obj.owner_ref.clone())?;
 
     let attrs = lua.create_table()?;
     for (k, v) in &obj.attrs {
@@ -118,6 +120,7 @@ pub fn install<'scope, 'env>(
     dbref_counter: Rc<Cell<u64>>,
     themes: &'env std::collections::HashMap<String, Theme>,
     map_templates: &'env std::collections::HashMap<String, MapTemplateFile>,
+    scheduled_hooks: &'env [crate::softcode::ScheduledHook],
 ) -> mlua::Result<()> {
     // -- Read API --
 
@@ -369,6 +372,88 @@ pub fn install<'scope, 'env>(
     )?;
 
     env.set(
+        "is_container",
+        scope.create_function(move |_, r: Value| {
+            let r = ref_of(&r)?;
+            let container_tag = Tag {
+                category: "item".into(),
+                key: "container".into(),
+            };
+            Ok(world
+                .get(&r)
+                .map(|o| o.tags.contains(&container_tag))
+                .unwrap_or(false))
+        })?,
+    )?;
+
+    env.set(
+        "get_contents",
+        scope.create_function(move |lua, r: Value| {
+            let r = ref_of(&r)?;
+            let out = lua.create_table()?;
+            let mut i = 1;
+            for obj in world.objects_in(&r) {
+                if obj.kind == Kind::Item {
+                    out.set(i, object_to_table(lua, obj)?)?;
+                    i += 1;
+                }
+            }
+            Ok(out)
+        })?,
+    )?;
+
+    env.set(
+        "get_owner",
+        scope.create_function(move |_, r: Value| {
+            let r = ref_of(&r)?;
+            Ok(world
+                .get(&r)
+                .and_then(|o| o.owner_ref.clone()))
+        })?,
+    )?;
+
+    env.set(
+        "get_timers",
+        scope.create_function(move |lua, r: Value| {
+            let target_ref = ref_of(&r)?;
+            let out = lua.create_table()?;
+            let mut i = 1;
+            for sh in scheduled_hooks {
+                if sh.target == target_ref {
+                    let entry = lua.create_table()?;
+                    entry.set("hook", sh.hook.clone())?;
+                    entry.set("fire_at_tick", sh.fire_at_tick)?;
+                    if let Some(data) = &sh.data {
+                        entry.set("data", lua.to_value(data)?)?;
+                    }
+                    out.set(i, entry)?;
+                    i += 1;
+                }
+            }
+            Ok(out)
+        })?,
+    )?;
+
+    env.set(
+        "json_decode",
+        scope.create_function(move |lua, s: String| {
+            let val: serde_json::Value = serde_json::from_str(&s)
+                .map_err(|e| mlua::Error::RuntimeError(format!("json_decode: {}", e)))?;
+            lua.to_value(&val)
+        })?,
+    )?;
+
+    env.set(
+        "json_encode",
+        scope.create_function(move |lua, v: Value| {
+            let val: serde_json::Value = lua.from_value(v)?;
+            let s = serde_json::to_string(&val)
+                .map_err(|e| mlua::Error::RuntimeError(format!("json_encode: {}", e)))?;
+            Ok(s)
+        })?,
+    )?;
+
+    env.set(
         "log",
         scope.create_function(move |_, msg: String| {
             tracing::info!(softcode = true, "{}", msg);
@@ -505,6 +590,12 @@ pub fn install<'scope, 'env>(
                 format!("#{}", id)
             });
 
+            let owner: Option<Value> = opts.get("owner").ok();
+            let owner = match owner {
+                Some(Value::Nil) | None => None,
+                Some(v) => Some(ref_of(&v)?),
+            };
+
             b.borrow_mut().push(Intent::Spawn {
                 ref_id: ref_id.clone(),
                 key,
@@ -512,6 +603,7 @@ pub fn install<'scope, 'env>(
                 title,
                 description,
                 location,
+                owner,
             });
             Ok(ref_id)
         })?,
@@ -544,6 +636,18 @@ pub fn install<'scope, 'env>(
         scope.create_function(move |_, r: Value| {
             let target = ref_of(&r)?;
             b.borrow_mut().push(Intent::Destroy { target });
+            Ok(())
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
+        "set_owner",
+        scope.create_function(move |_, (r, owner): (Value, Value)| {
+            let target = ref_of(&r)?;
+            let owner = ref_of(&owner)?;
+            b.borrow_mut()
+                .push(Intent::SetOwner { target, owner });
             Ok(())
         })?,
     )?;
@@ -603,6 +707,42 @@ pub fn install<'scope, 'env>(
         scope.create_function(move |_, (r, hook): (Value, String)| {
             let target = ref_of(&r)?;
             b.borrow_mut().push(Intent::Trigger { target, hook });
+            Ok(())
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
+        "after",
+        scope.create_function(
+            move |lua, (ticks, r, hook, data): (u64, Value, String, Option<Table>)| {
+                let target = ref_of(&r)?;
+                let data_map = match data {
+                    Some(tbl) => {
+                        let mut map = HashMap::new();
+                        for pair in tbl.pairs::<String, Value>() {
+                            let (k, v) = pair?;
+                            let json_val: serde_json::Value = lua.from_value(v)?;
+                            map.insert(k, json_val);
+                        }
+                        Some(map)
+                    }
+                    None => None,
+                };
+                b.borrow_mut()
+                    .push(Intent::After { target, hook, ticks, data: data_map });
+                Ok(())
+            },
+        )?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
+        "cancel_after",
+        scope.create_function(move |_, (r, hook): (Value, String)| {
+            let target = ref_of(&r)?;
+            b.borrow_mut()
+                .push(Intent::CancelAfter { target, hook });
             Ok(())
         })?,
     )?;

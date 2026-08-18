@@ -107,6 +107,24 @@ Only an explicit `return false` vetoes. Returning `true`, `nil`, or nothing allo
 
 Hooks: `can_get`, `can_drop`, `can_traverse`, `can_enter`, `can_look`, `can_say`, `can_use`, `can_see`
 
+### Lifecycle hooks — engine events
+
+```lua
+function on_startup(this, state, room)
+  log("World is ready, initializing " .. this.display_name)
+end
+```
+
+Same signature as `on_tick` (`this`, `state`, `room`). State is persistent.
+
+| Hook | Fires when |
+|------|------------|
+| `on_startup` | Engine starts, after world + game files load |
+| `on_shutdown` | Engine stopping, before final save |
+| `on_reload` | After `@reload-world` completes |
+| `on_save` | Before each world save (autosave or `@save`) |
+| `on_create` | Object first created at runtime (not from DB/files) |
+
 ### `on_` hooks — reactive behavior
 
 ```lua
@@ -119,7 +137,7 @@ end
 
 Return value is ignored. Runs after the action has already happened.
 
-Hooks: `on_get`, `on_drop`, `on_enter`, `on_leave`, `on_look`, `on_say`, `on_use`, `on_move`, `on_destroy`, `on_connect`, `on_disconnect`, `on_whisper`, `on_emote`, `on_receive`, `on_damage`, `on_death`, `on_tick`
+Hooks: `on_get`, `on_drop`, `on_enter`, `on_leave`, `on_look`, `on_say`, `on_use`, `on_move`, `on_destroy`, `on_connect`, `on_disconnect`, `on_whisper`, `on_emote`, `on_receive`, `on_damage`, `on_death`, `on_tick`, `on_startup`, `on_shutdown`, `on_reload`, `on_save`, `on_create`
 
 ### `cmd_` hooks — custom commands
 
@@ -233,7 +251,7 @@ All accept either an object table or a ref string (`"#5"`).
 | `is_carrying(actor, "cat:key")` | Actor has item with tag |
 | `same_room(a, b)` | Both in same location |
 
-## Write API (14 functions)
+## Write API (15 functions)
 
 All queue Intents — nothing happens until the script returns and the batch applies.
 
@@ -253,6 +271,39 @@ All queue Intents — nothing happens until the script returns and the batch app
 | `trigger(ref, hook)` | Fire a hook on another object |
 | `set_program(ref, hook, source)` | Attach a Luau program to an object |
 | `prompt(actor, obj, hook)` | Set up interactive prompt |
+| `after(ticks, ref, hook)` | Schedule a hook to fire after N engine ticks |
+
+## Noise (procedural generation)
+
+Rust-backed, deterministic noise functions. Same seed + coordinates = same value.
+
+| Function | Returns | Description |
+|---|---|---|
+| `simplex2d(seed, x, y)` | [-1, 1] | 2D simplex noise |
+| `simplex3d(seed, x, y, z)` | [-1, 1] | 3D simplex noise |
+| `perlin2d(seed, x, y)` | [-1, 1] | 2D Perlin noise |
+| `perlin3d(seed, x, y, z)` | [-1, 1] | 3D Perlin noise |
+| `fbm2d(seed, x, y, octaves?, freq?, lac?, persist?)` | ~[-1, 1] | Fractal Brownian Motion |
+
+## Seeded RNG (deterministic randomness)
+
+| Function | Description |
+|---|---|
+| `hash_seed(...)` | Deterministic hash from strings/numbers/booleans |
+| `seed_random(seed, min, max)` | Deterministic integer in [min, max] |
+| `seed_float(seed)` | Deterministic float in [0, 1) |
+| `seed_choice(seed, list)` | Deterministic pick from a table |
+
+## Coordinate math
+
+| Function | Description |
+|---|---|
+| `distance(x1, y1, x2, y2)` | Euclidean distance |
+| `manhattan(x1, y1, x2, y2)` | Manhattan distance |
+| `direction_to(x1, y1, x2, y2)` | Compass string (n/s/e/w/ne/nw/se/sw/here) |
+| `lerp(a, b, t)` | Linear interpolation |
+| `clamp(value, min, max)` | Clamp to range |
+| `remap(v, inMin, inMax, outMin, outMax)` | Remap between ranges |
 
 ## Utility
 

@@ -9,6 +9,7 @@ mod engine;
 mod locks;
 mod map_template;
 mod net;
+mod noise;
 mod softcode;
 mod theme;
 mod world;

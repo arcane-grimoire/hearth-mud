@@ -74,6 +74,17 @@ impl Database {
         let _ = self.conn.execute("ALTER TABLE objects ADD COLUMN target_ref TEXT", []);
         let _ = self.conn.execute("ALTER TABLE objects ADD COLUMN aliases_json TEXT NOT NULL DEFAULT '[]'", []);
         let _ = self.conn.execute("ALTER TABLE accounts ADD COLUMN email TEXT", []);
+        let _ = self.conn.execute("ALTER TABLE objects ADD COLUMN owner_ref TEXT", []);
+
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS scheduled_hooks (
+                id TEXT PRIMARY KEY,
+                fire_at_tick INTEGER NOT NULL,
+                target TEXT NOT NULL,
+                hook TEXT NOT NULL,
+                data_json TEXT
+            );"
+        )?;
 
         Ok(())
     }
@@ -147,7 +158,7 @@ impl Database {
 
         {
             let mut obj_stmt = tx.prepare(
-                "INSERT INTO objects (ref_id, key, kind, title, description, location_ref, target_ref, attrs_json, aliases_json, programs_json, locks_json, id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                "INSERT INTO objects (ref_id, key, kind, title, description, location_ref, target_ref, attrs_json, aliases_json, programs_json, locks_json, id, owner_ref) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             )?;
             let mut tag_stmt = tx.prepare(
                 "INSERT INTO tags (object_ref, category, key) VALUES (?1, ?2, ?3)",
@@ -175,6 +186,7 @@ impl Database {
                     programs_json,
                     locks_json,
                     obj.id,
+                    obj.owner_ref,
                 ])?;
                 for tag in &obj.tags {
                     tag_stmt.execute(params![obj.ref_id, tag.category, tag.key])?;
@@ -207,7 +219,7 @@ impl Database {
         let mut world = World::new();
 
         let mut obj_stmt = self.conn.prepare(
-            "SELECT ref_id, key, kind, title, description, location_ref, target_ref, attrs_json, aliases_json, programs_json, locks_json, id FROM objects",
+            "SELECT ref_id, key, kind, title, description, location_ref, target_ref, attrs_json, aliases_json, programs_json, locks_json, id, owner_ref FROM objects",
         )?;
         let obj_rows = obj_stmt.query_map([], |row| {
             let ref_id: String = row.get(0)?;
@@ -222,15 +234,18 @@ impl Database {
             let programs_json: String = row.get(9)?;
             let locks_json: String = row.get(10)?;
             let id: String = row.get(11)?;
+            let owner_ref: Option<String> = row.get(12)?;
             Ok((
                 ref_id, key, kind_str, title, description, location_ref,
                 target_ref, attrs_json, aliases_json, programs_json, locks_json, id,
+                owner_ref,
             ))
         })?;
 
         for row in obj_rows {
             let (ref_id, key, kind_str, title, description, location_ref,
-                target_ref, attrs_json, aliases_json, programs_json, locks_json, id) = row?;
+                target_ref, attrs_json, aliases_json, programs_json, locks_json, id,
+                owner_ref) = row?;
             let kind = match kind_str.as_str() {
                 "room" => Kind::Room,
                 "item" => Kind::Item,
@@ -255,6 +270,7 @@ impl Database {
                 title,
                 description,
                 location_ref,
+                owner_ref,
                 target_ref,
                 attrs,
                 tags: HashSet::new(),
@@ -331,6 +347,55 @@ impl Database {
             .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
             .unwrap_or(0);
         count > 0
+    }
+
+    pub fn save_scheduled_hooks(
+        &self,
+        hooks: &[crate::softcode::ScheduledHook],
+    ) -> rusqlite::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM scheduled_hooks", [])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO scheduled_hooks (id, fire_at_tick, target, hook, data_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for h in hooks {
+                let data_json = h
+                    .data
+                    .as_ref()
+                    .map(|d| serde_json::to_string(d).unwrap_or_default());
+                stmt.execute(params![h.id, h.fire_at_tick, h.target, h.hook, data_json])?;
+            }
+        }
+        tx.commit()
+    }
+
+    pub fn load_scheduled_hooks(&self) -> rusqlite::Result<Vec<crate::softcode::ScheduledHook>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, fire_at_tick, target, hook, data_json FROM scheduled_hooks",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let fire_at_tick: u64 = row.get(1)?;
+            let target: String = row.get(2)?;
+            let hook: String = row.get(3)?;
+            let data_json: Option<String> = row.get(4)?;
+            Ok((id, fire_at_tick, target, hook, data_json))
+        })?;
+
+        let mut hooks = Vec::new();
+        for row in rows {
+            let (id, fire_at_tick, target, hook, data_json) = row?;
+            let data = data_json.and_then(|s| serde_json::from_str(&s).ok());
+            hooks.push(crate::softcode::ScheduledHook {
+                id,
+                fire_at_tick,
+                target,
+                hook,
+                data,
+            });
+        }
+        Ok(hooks)
     }
 }
 

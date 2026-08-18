@@ -92,6 +92,11 @@ internal working memory that shouldn't be visible as object attributes.
 | `can_say` | Before an actor speaks in this room | `(this, actor, room)` |
 | `on_say` | After an actor speaks in this room | `(this, actor, room)` |
 | `on_tick` | Every N ticks (set `tick_interval` attr) | `(this, state, room)` |
+| `on_startup` | Engine starts, after world loads | `(this, state, room)` |
+| `on_shutdown` | Engine is shutting down, before final save | `(this, state, room)` |
+| `on_reload` | After `@reload-world` completes | `(this, state, room)` |
+| `on_save` | Before each world save (autosave or `@save`) | `(this, state, room)` |
+| `on_create` | When this object is first created at runtime | `(this, state, room)` |
 | `cmd_*` | Any name — becomes a player command | `(this, actor, room, args)` |
 
 ## Hook parameters
@@ -199,6 +204,7 @@ invalid, the entire batch is rolled back.
 | `destroy(ref)` | Remove an object from the world (not players) |
 | `trigger(ref, hook)` | Fire a hook on another object (see below) |
 | `spawn(opts)` | Create a new object (see below) |
+| `after(ticks, ref, hook)` | Schedule a hook to fire after N ticks (see below) |
 
 ### spawn
 
@@ -245,6 +251,85 @@ end
 
 Triggers don't recurse — if the triggered hook also calls `trigger`, the
 second trigger fires after the first finishes. This prevents infinite loops.
+
+### after
+
+Schedules a hook to fire on an object after a delay (in engine ticks, default
+1 tick = 1 second). The hook fires once, not repeatedly.
+
+```lua
+-- A poison that wears off after 30 seconds
+function cmd_poison(this, actor, room, args)
+  set_attr(actor, "poisoned", true)
+  emit(actor, "You feel a burning sensation...")
+  after(30, actor, "on_cure")
+end
+```
+
+The target object needs a program on the specified hook for anything to happen.
+Scheduled hooks are not persisted — they're lost on server restart. Use
+`on_tick` with state for timers that must survive restarts.
+
+## Noise (procedural generation)
+
+Rust-backed noise functions for terrain generation, biomes, weather, etc.
+All are deterministic — same seed and coordinates always produce the same value.
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `simplex2d(seed, x, y)` | [-1, 1] | 2D simplex noise |
+| `simplex3d(seed, x, y, z)` | [-1, 1] | 3D simplex noise |
+| `perlin2d(seed, x, y)` | [-1, 1] | 2D Perlin noise |
+| `perlin3d(seed, x, y, z)` | [-1, 1] | 3D Perlin noise |
+| `fbm2d(seed, x, y, ...)` | ~[-1, 1] | Fractal Brownian Motion (layered Perlin) |
+
+`fbm2d` accepts optional parameters after y: `octaves` (default 6), `frequency`
+(default 1.0), `lacunarity` (default 2.0), `persistence` (default 0.5).
+
+```lua
+-- Generate terrain type from coordinates
+function get_terrain(seed, x, y)
+  local elevation = fbm2d(seed, x * 0.01, y * 0.01, 4, 1.0, 2.0, 0.5)
+  local moisture = simplex2d(seed + 1000, x * 0.02, y * 0.02)
+  if elevation > 0.5 then return "mountain"
+  elseif elevation > 0.0 and moisture > 0.3 then return "forest"
+  elseif elevation > 0.0 then return "plains"
+  else return "water" end
+end
+```
+
+## Seeded RNG (deterministic randomness)
+
+For procedural content that must be reproducible from a seed — same inputs
+always produce the same outputs, no stored state.
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `hash_seed(...)` | integer | Hash any mix of strings, numbers, booleans |
+| `seed_random(seed, min, max)` | integer | Random integer in [min, max] |
+| `seed_float(seed)` | float | Random float in [0, 1) |
+| `seed_choice(seed, list)` | element | Pick from a list |
+
+```lua
+-- Deterministic room description from coordinates
+local h = hash_seed("room_desc", x, y)
+local adj = seed_choice(h, {"dusty", "mossy", "damp", "dim"})
+local noun = seed_choice(hash_seed("noun", x, y), {"chamber", "tunnel", "cavern"})
+set_description(room, "A " .. adj .. " " .. noun .. ".")
+```
+
+## Coordinate math
+
+Utility functions for spatial calculations — distance, direction, interpolation.
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `distance(x1, y1, x2, y2)` | number | Euclidean distance |
+| `manhattan(x1, y1, x2, y2)` | number | Manhattan distance |
+| `direction_to(x1, y1, x2, y2)` | string | Compass direction (n/s/e/w/ne/nw/se/sw/here) |
+| `lerp(a, b, t)` | number | Linear interpolation (t=0→a, t=1→b) |
+| `clamp(value, min, max)` | number | Clamp to range |
+| `remap(v, inMin, inMax, outMin, outMax)` | number | Remap between ranges |
 
 ## Utility
 
