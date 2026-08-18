@@ -1,6 +1,8 @@
 mod commands;
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use tokio::sync::mpsc;
 
@@ -114,7 +116,11 @@ pub struct Engine {
     tick_count: u64,
     tick_secs: u64,
     autosave_secs: u64,
+    /// The configured spawn room *key* (e.g. `"town/crossroads"`), used to
+    /// re-resolve `spawn_room_ref` after `@reload-world`.
     spawn_room: String,
+    /// The dbref the spawn room key currently resolves to.
+    spawn_room_ref: String,
     game_dir: Option<String>,
 }
 
@@ -129,31 +135,34 @@ impl Engine {
             );
             (world, accounts)
         } else {
-            let world = if config.game_dir.is_some() {
-                World::new()
-            } else {
-                build_starter_world(&config.spawn_room)
-            };
             tracing::info!("Fresh world initialized");
-            (world, AccountStore::new())
+            (World::new(), AccountStore::new())
         };
 
         // Always load/reload game files — new content is created,
         // managed content is updated, non-managed content is untouched.
+        let mut key_map: HashMap<String, String> = HashMap::new();
         if let Some(game_dir) = &config.game_dir {
-            if let Err(e) = crate::loader::load_game_dir(std::path::Path::new(game_dir), &mut world) {
-                tracing::error!(error = %e, "Failed to load game content");
+            match crate::loader::load_game_dir(std::path::Path::new(game_dir), &mut world) {
+                Ok(map) => key_map = map,
+                Err(e) => tracing::error!(error = %e, "Failed to load game content"),
             }
         }
 
-        // Ensure spawn room exists
-        if world.get(&config.spawn_room).is_none() {
-            let key = config.spawn_room.rsplit('/').next().unwrap_or("spawn");
-            let room = GameObject::new(&config.spawn_room, key, Kind::Room)
-                .with_title("Spawn")
-                .with_description("An empty room. Build your world from here.");
-            world.add_object(room);
-        }
+        // Resolve the spawn room to a dbref, creating a fallback room if
+        // the configured key wasn't found anywhere.
+        let spawn_room_ref = match key_map.get(&config.spawn_room) {
+            Some(ref_id) => ref_id.clone(),
+            None => {
+                let ref_id = world.next_dbref();
+                let key = config.spawn_room.rsplit('/').next().unwrap_or("spawn");
+                let room = GameObject::new(&ref_id, key, Kind::Room)
+                    .with_title("Spawn")
+                    .with_description("An empty room. Build your world from here.");
+                world.add_object(room);
+                ref_id
+            }
+        };
 
         Self {
             world,
@@ -166,6 +175,7 @@ impl Engine {
             tick_secs: config.tick_secs,
             autosave_secs: config.autosave_secs,
             spawn_room: config.spawn_room.clone(),
+            spawn_room_ref,
             game_dir: config.game_dir.clone(),
         }
     }
@@ -304,6 +314,7 @@ impl Engine {
             .get(this_ref)
             .and_then(|o| o.location_ref.clone());
 
+        let dbref_counter = Rc::new(Cell::new(self.world.next_id));
         let result = self
             .softcode
             .run_hook(
@@ -314,10 +325,12 @@ impl Engine {
                 room_ref.as_deref(),
                 None,
                 Budget::default(),
+                Rc::clone(&dbref_counter),
             )
             .map_err(|e| e.to_string())?;
 
         let effects = softcode::apply_batch(&mut self.world, &result.batch)?;
+        self.world.next_id = dbref_counter.get();
         self.deliver_effects(&effects, this_ref);
 
         // Write state back
@@ -338,6 +351,7 @@ impl Engine {
             None => return Ok(()),
         };
 
+        let dbref_counter = Rc::new(Cell::new(self.world.next_id));
         let result = self
             .softcode
             .run_global_script(
@@ -346,10 +360,12 @@ impl Engine {
                 &script.entry,
                 &script.state,
                 Budget::default(),
+                Rc::clone(&dbref_counter),
             )
             .map_err(|e| e.to_string())?;
 
         let effects = softcode::apply_batch(&mut self.world, &result.batch)?;
+        self.world.next_id = dbref_counter.get();
         self.deliver_effects(&effects, name);
 
         // Write state back
@@ -411,11 +427,8 @@ impl Engine {
                     .collect();
                 ApiResponse::success(serde_json::json!(objs))
             }
-            ApiRequest::CreateRoom { area, key, title, description } => {
-                let ref_id = format!("area/{}/room/{}", area, key.to_lowercase().replace(' ', "_"));
-                if self.world.get(&ref_id).is_some() {
-                    return ApiResponse::error(format!("Room '{}' already exists", ref_id));
-                }
+            ApiRequest::CreateRoom { area: _area, key, title, description } => {
+                let ref_id = self.world.next_dbref();
                 let mut room = GameObject::new(&ref_id, &key, Kind::Room).with_title(&title);
                 if let Some(desc) = description {
                     room.description = desc;
@@ -423,12 +436,12 @@ impl Engine {
                 self.world.add_object(room);
                 ApiResponse::success(serde_json::json!({ "ref_id": ref_id }))
             }
-            ApiRequest::CreateObject { area, key, kind, title, description, location } => {
+            ApiRequest::CreateObject { area: _area, key, kind, title, description, location } => {
                 let kind_enum = match Kind::parse(&kind) {
                     Some(k) => k,
                     None => return ApiResponse::error(format!("Unknown kind: '{}'", kind)),
                 };
-                let ref_id = format!("area/{}/{}/{}", area, kind, key.to_lowercase().replace(' ', "_"));
+                let ref_id = self.world.next_dbref();
                 let mut obj = GameObject::new(&ref_id, &key, kind_enum);
                 if let Some(t) = title { obj = obj.with_title(t); }
                 if let Some(d) = description { obj.description = d; }
@@ -443,9 +456,7 @@ impl Engine {
                 if self.world.get(&target).is_none() {
                     return ApiResponse::error(format!("Target room '{}' not found", target));
                 }
-                let src_key = source.rsplit('/').next().unwrap_or("unknown");
-                let tgt_key = target.rsplit('/').next().unwrap_or("unknown");
-                let ref_id = format!("area/built/exit/{}_to_{}", src_key, tgt_key);
+                let ref_id = self.world.next_dbref();
                 let mut exit = GameObject::new(&ref_id, &direction, Kind::Exit)
                     .with_location(&source)
                     .with_target(&target);
@@ -533,7 +544,7 @@ impl Engine {
                 }
             }
             ApiRequest::DeleteObject { ref_id } => {
-                if ref_id.starts_with("player/") {
+                if self.world.get(&ref_id).map(|o| o.kind == Kind::Player).unwrap_or(false) {
                     return ApiResponse::error("Cannot delete player objects");
                 }
                 if self.world.objects.remove(&ref_id).is_some() {
@@ -705,10 +716,7 @@ impl Engine {
         match self.accounts.authenticate(&username, input) {
             Ok(account) => {
                 let account_id = account.id.clone();
-                let character_ref = account
-                    .character_ref
-                    .clone()
-                    .unwrap_or_else(|| format!("player/{}", username.to_lowercase()));
+                let character_ref = account.character_ref.clone().unwrap_or_default();
 
                 // Check if already logged in
                 for (other_sid, other_session) in &self.sessions {
@@ -823,7 +831,7 @@ impl Engine {
         match self.accounts.create(&username, &password) {
             Ok(account) => {
                 let account_id = account.id.clone();
-                let character_ref = account.character_ref.clone().unwrap();
+                let character_ref = account.character_ref.clone().unwrap_or_default();
                 self.send(session_id, &format!("\r\nAccount created! Welcome, {}.\r\n", username));
                 self.enter_world(session_id, &username, &character_ref, &account_id);
             }
@@ -843,39 +851,52 @@ impl Engine {
         character_ref: &str,
         account_id: &str,
     ) {
-        let spawn_room = &self.spawn_room;
+        let spawn_room_ref = self.spawn_room_ref.clone();
 
-        let needs_location_fix = self
-            .world
-            .get(character_ref)
-            .map(|obj| {
+        // A character_ref is only usable if it's non-empty *and* still
+        // resolves to a live object — accounts created before this login,
+        // or whose player object was somehow lost, get a fresh one below.
+        let existing_needs_fix: Option<bool> = if character_ref.is_empty() {
+            None
+        } else {
+            self.world.get(character_ref).map(|obj| {
                 obj.location_ref
                     .as_ref()
                     .map(|r| !self.world.objects.contains_key(r.as_str()))
                     .unwrap_or(true)
-            });
+            })
+        };
 
-        if let Some(needs_fix) = needs_location_fix {
+        let player_ref = if let Some(needs_fix) = existing_needs_fix {
+            // Returning player.
             let existing = self.world.get_mut(character_ref).unwrap();
             existing.tags.remove(&crate::world::Tag {
                 category: "system".to_string(),
                 key: "offline".to_string(),
             });
             if needs_fix {
-                existing.location_ref = Some(spawn_room.to_string());
+                existing.location_ref = Some(spawn_room_ref.clone());
             }
+            character_ref.to_string()
         } else {
-            // First time — create character
-            let player = GameObject::new(character_ref, username, Kind::Player)
+            // First login, or the account's stored dbref no longer resolves
+            // to an object — create the character and assign it a dbref.
+            let ref_id = self.world.next_dbref();
+            let player = GameObject::new(&ref_id, username, Kind::Player)
                 .with_title(username)
                 .with_description("A traveler.")
-                .with_location(spawn_room);
+                .with_location(&spawn_room_ref);
             self.world.add_object(player);
-        }
+            if let Some(account) = self.accounts.get_mut(account_id) {
+                account.character_ref = Some(ref_id.clone());
+            }
+            self.db.save_accounts(&self.accounts).ok();
+            ref_id
+        };
 
         if let Some(session) = self.sessions.get_mut(session_id) {
             session.state = SessionState::Playing {
-                actor_ref: character_ref.to_string(),
+                actor_ref: player_ref.clone(),
                 account_id: account_id.to_string(),
             };
         }
@@ -895,7 +916,7 @@ impl Engine {
             session_id,
             &format!("\r\nWelcome back, {}.{}\r\n\r\n", username, scope_msg),
         );
-        let look_output = self.look_with_visibility(character_ref);
+        let look_output = self.look_with_visibility(&player_ref);
         self.send(session_id, &look_output);
 
         self.broadcast_to_all(
@@ -904,10 +925,10 @@ impl Engine {
         );
 
         // Fire on_connect on the player and on the room
-        let room = self.world.get(character_ref).and_then(|o| o.location_ref.clone());
-        let _ = self.fire_hook(character_ref, "on_connect", character_ref, room.as_deref(), None);
+        let room = self.world.get(&player_ref).and_then(|o| o.location_ref.clone());
+        let _ = self.fire_hook(&player_ref, "on_connect", &player_ref, room.as_deref(), None);
         if let Some(room_ref) = &room {
-            let _ = self.fire_hook(room_ref, "on_connect", character_ref, Some(room_ref), None);
+            let _ = self.fire_hook(room_ref, "on_connect", &player_ref, Some(room_ref), None);
         }
     }
 
@@ -1031,19 +1052,14 @@ impl Engine {
         if !self.session_has_scope(session_id, Scope::Builder) {
             return "Permission denied.\r\n".to_string();
         }
-        // @dig <key> = <title>
-        let (key, title) = match args.split_once('=') {
-            Some((k, t)) => (k.trim(), t.trim()),
-            None => return "Usage: @dig <key> = <title>\r\n".to_string(),
-        };
-        if key.is_empty() || title.is_empty() {
-            return "Usage: @dig <key> = <title>\r\n".to_string();
+        // @dig <title>
+        let title = args.trim();
+        if title.is_empty() {
+            return "Usage: @dig <title>\r\n".to_string();
         }
-        let ref_id = format!("area/built/room/{}", key.to_lowercase().replace(' ', "_"));
-        if self.world.get(&ref_id).is_some() {
-            return format!("A room with ref '{}' already exists.\r\n", ref_id);
-        }
-        let room = GameObject::new(&ref_id, key, Kind::Room).with_title(title);
+        let key = title.to_lowercase().replace(' ', "_");
+        let ref_id = self.world.next_dbref();
+        let room = GameObject::new(&ref_id, &key, Kind::Room).with_title(title);
         self.world.add_object(room);
         format!("Room created: {} ({})\r\n", title, ref_id)
     }
@@ -1074,11 +1090,7 @@ impl Engine {
         if self.world.get(&target).is_none() {
             return format!("No room found with ref '{}'.\r\n", target);
         }
-        let exit_ref = format!(
-            "area/built/exit/{}_to_{}",
-            room_ref.rsplit('/').next().unwrap_or("unknown"),
-            target.rsplit('/').next().unwrap_or("unknown")
-        );
+        let exit_ref = self.world.next_dbref();
         let exit = GameObject::new(&exit_ref, &direction, Kind::Exit)
             .with_location(&room_ref)
             .with_target(&target);
@@ -1131,20 +1143,18 @@ impl Engine {
         if !self.session_has_scope(session_id, Scope::Builder) {
             return "Permission denied.\r\n".to_string();
         }
-        // @create <key> = <title>  — creates an item in the room
-        let (key, title) = match args.split_once('=') {
-            Some((k, t)) => (k.trim(), t.trim()),
-            None => return "Usage: @create <key> = <title>\r\n".to_string(),
-        };
-        if key.is_empty() || title.is_empty() {
-            return "Usage: @create <key> = <title>\r\n".to_string();
+        // @create <title>
+        let title = args.trim();
+        if title.is_empty() {
+            return "Usage: @create <title>\r\n".to_string();
         }
         let room_ref = match self.world.get(actor_ref).and_then(|a| a.location_ref.clone()) {
             Some(r) => r,
             None => return "You're nowhere.\r\n".to_string(),
         };
-        let ref_id = format!("area/built/item/{}", key.to_lowercase().replace(' ', "_"));
-        let item = GameObject::new(&ref_id, key, Kind::Item)
+        let key = title.to_lowercase().replace(' ', "_");
+        let ref_id = self.world.next_dbref();
+        let item = GameObject::new(&ref_id, &key, Kind::Item)
             .with_title(title)
             .with_location(&room_ref);
         self.world.add_object(item);
@@ -1159,7 +1169,7 @@ impl Engine {
             return "Usage: @destroy <ref>\r\n".to_string();
         }
         let target_ref = args.trim();
-        if target_ref.starts_with("player/") {
+        if self.world.get(target_ref).map(|o| o.kind == Kind::Player).unwrap_or(false) {
             return "Cannot destroy player objects.\r\n".to_string();
         }
         if let Some(obj) = self.world.get(target_ref) {
@@ -1441,6 +1451,7 @@ impl Engine {
             }
         };
 
+        let dbref_counter = Rc::new(Cell::new(self.world.next_id));
         let result = self
             .softcode
             .run_hook(
@@ -1451,11 +1462,13 @@ impl Engine {
                 room_ref,
                 args,
                 Budget::default(),
+                Rc::clone(&dbref_counter),
             )
             .map_err(|e| e.to_string())?;
 
         let denied = result.denied;
         let effects = softcode::apply_batch(&mut self.world, &result.batch)?;
+        self.world.next_id = dbref_counter.get();
         let emitted_to_actor = effects
             .iter()
             .any(|e| matches!(e, Effect::ToActor { target, .. } if target == actor_ref));
@@ -2108,15 +2121,21 @@ impl Engine {
         if !self.session_has_scope(session_id, Scope::Admin) {
             return "Permission denied.\r\n".to_string();
         }
-        match &self.game_dir {
-            Some(game_dir) => {
-                self.softcode.invalidate_cache();
-                match crate::loader::load_game_dir(std::path::Path::new(game_dir), &mut self.world) {
-                    Ok(()) => "World reloaded from files. Script cache cleared.\r\n".to_string(),
-                    Err(e) => format!("Reload error: {}\r\n", e),
+        let game_dir = match &self.game_dir {
+            Some(g) => g.clone(),
+            None => return "No game_dir configured.\r\n".to_string(),
+        };
+        self.softcode.invalidate_cache();
+        match crate::loader::load_game_dir(std::path::Path::new(&game_dir), &mut self.world) {
+            Ok(key_map) => {
+                // Re-resolve the spawn room in case it appeared (or moved)
+                // in this reload.
+                if let Some(ref_id) = key_map.get(&self.spawn_room) {
+                    self.spawn_room_ref = ref_id.clone();
                 }
+                "World reloaded from files. Script cache cleared.\r\n".to_string()
             }
-            None => "No game_dir configured.\r\n".to_string(),
+            Err(e) => format!("Reload error: {}\r\n", e),
         }
     }
 
@@ -2235,6 +2254,7 @@ impl Engine {
                 .world
                 .objects_in(&room_ref)
                 .into_iter()
+                .chain(self.world.exits_from(&room_ref))
                 .chain(self.world.objects_in(actor_ref))
                 .find(|o| {
                     o.key.to_lowercase().contains(&target_name)
@@ -2646,17 +2666,6 @@ impl Engine {
     }
 }
 
-fn build_starter_world(spawn_room: &str) -> World {
-    let mut world = World::new();
-
-    let key = spawn_room.rsplit('/').next().unwrap_or("spawn");
-    let room = GameObject::new(spawn_room, key, Kind::Room)
-        .with_title("Spawn")
-        .with_description("An empty room. Build your world from here.");
-    world.add_object(room);
-
-    world
-}
 
 #[cfg(test)]
 mod tests {
@@ -2724,7 +2733,7 @@ mod tests {
             kind: "item".into(),
             title: Some("a ruby".into()),
             description: None,
-            location: Some("area/starter/room/town_square".into()),
+            location: Some("#1".into()),
         }).await;
         assert!(resp.ok);
         let ref_id = resp.data.unwrap()["ref_id"].as_str().unwrap().to_string();
@@ -2758,7 +2767,7 @@ mod tests {
             kind: "item".into(),
             title: Some("a test sword".into()),
             description: None,
-            location: Some("area/starter/room/town_square".into()),
+            location: Some("#1".into()),
         }).await;
         assert!(resp.ok);
         resp.data.unwrap()["ref_id"].as_str().unwrap().to_string()
@@ -2776,17 +2785,18 @@ mod tests {
             description: None,
         }).await;
         assert!(resp.ok);
+        let cellar_ref = resp.data.unwrap()["ref_id"].as_str().unwrap().to_string();
 
         let resp = api_call(&tx, ApiRequest::CreateExit {
-            source: "area/starter/room/town_square".into(),
+            source: "#1".into(),
             direction: "down".into(),
-            target: "area/test/room/cellar".into(),
+            target: cellar_ref,
             aliases: Some(vec!["d".into()]),
         }).await;
         assert!(resp.ok);
 
         let resp = api_call(&tx, ApiRequest::ListExits {
-            room_ref: "area/starter/room/town_square".into(),
+            room_ref: "#1".into(),
         }).await;
         assert!(resp.ok);
         let exits = resp.data.unwrap();

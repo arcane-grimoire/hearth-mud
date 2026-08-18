@@ -2,7 +2,7 @@
 //! by [`World`], and a write API that only ever pushes [`Intent`]s into the
 //! batch — see ADR 0001. Nothing here ever gets a `&mut World`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use mlua::{Lua, LuaSerdeExt, Scope, Table, Value};
@@ -112,6 +112,7 @@ pub fn install<'scope, 'env>(
     world: &'env World,
     batch: Rc<RefCell<IntentBatch>>,
     default_location: Option<String>,
+    dbref_counter: Rc<Cell<u64>>,
 ) -> mlua::Result<()> {
     // -- Read API --
 
@@ -492,12 +493,9 @@ pub fn install<'scope, 'env>(
             };
             let ref_id: Option<String> = opts.get("ref").ok();
             let ref_id = ref_id.unwrap_or_else(|| {
-                format!(
-                    "area/spawned/{}/{}-{}",
-                    kind,
-                    key.to_lowercase().replace(' ', "_"),
-                    &uuid::Uuid::new_v4().to_string()[..8]
-                )
+                let id = dbref_counter.get() + 1;
+                dbref_counter.set(id);
+                format!("#{}", id)
             });
 
             b.borrow_mut().push(Intent::Spawn {

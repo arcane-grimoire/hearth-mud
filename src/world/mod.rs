@@ -12,6 +12,7 @@ use std::collections::HashMap;
 pub struct World {
     pub objects: HashMap<String, GameObject>,
     pub scripts: HashMap<String, Script>,
+    pub next_id: u64,
 }
 
 impl World {
@@ -19,7 +20,14 @@ impl World {
         Self {
             objects: HashMap::new(),
             scripts: HashMap::new(),
+            next_id: 0,
         }
+    }
+
+    /// Allocate and return the next dbref, formatted as `"#N"`.
+    pub fn next_dbref(&mut self) -> String {
+        self.next_id += 1;
+        format!("#{}", self.next_id)
     }
 
     pub fn add_object(&mut self, obj: GameObject) {

@@ -9,7 +9,7 @@
 pub mod api;
 pub mod hooks;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -235,11 +235,14 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 obj.description = description.clone();
             }
             Intent::Destroy { target } => {
-                if target.starts_with("player/") {
-                    return Err("destroy: cannot destroy player objects".into());
-                }
-                if world.objects.remove(target).is_none() {
-                    return Err(format!("destroy: no object '{}'", target));
+                match world.get(target) {
+                    Some(obj) if obj.kind == Kind::Player => {
+                        return Err("destroy: cannot destroy player objects".into());
+                    }
+                    Some(_) => {
+                        world.objects.remove(target);
+                    }
+                    None => return Err(format!("destroy: no object '{}'", target)),
                 }
             }
             Intent::Trigger { target, hook } => {
@@ -415,6 +418,7 @@ impl SoftcodeRuntime {
         room_ref: Option<&str>,
         args: Option<&str>,
         budget: Budget,
+        dbref_counter: Rc<Cell<u64>>,
     ) -> Result<ProgramResult, SoftcodeError> {
         self.install_budget(budget);
         let batch = Rc::new(RefCell::new(IntentBatch::default()));
@@ -438,6 +442,7 @@ impl SoftcodeRuntime {
                 world,
                 Rc::clone(&batch),
                 default_location.clone(),
+                Rc::clone(&dbref_counter),
             )?;
 
             let compiled = self.get_or_compile(&program.source, &program.hook)
@@ -517,6 +522,7 @@ impl SoftcodeRuntime {
         entry: &str,
         state: &HashMap<String, serde_json::Value>,
         budget: Budget,
+        dbref_counter: Rc<Cell<u64>>,
     ) -> Result<ProgramResult, SoftcodeError> {
         self.install_budget(budget);
         let batch = Rc::new(RefCell::new(IntentBatch::default()));
@@ -534,6 +540,7 @@ impl SoftcodeRuntime {
                 world,
                 Rc::clone(&batch),
                 None,
+                Rc::clone(&dbref_counter),
             )?;
 
             let compiled = self.get_or_compile(source, entry)
@@ -598,47 +605,65 @@ mod tests {
     use super::*;
     use crate::world::{GameObject, Kind};
 
+    /// Dbref counter for a test run, seeded from the world's current
+    /// `next_id` — mirrors what the engine hands to
+    /// `run_hook`/`run_global_script` in production.
+    fn counter(world: &World) -> Rc<Cell<u64>> {
+        Rc::new(Cell::new(world.next_id))
+    }
+
+    // test_world() creates objects in this fixed order, so dbrefs are
+    // predictable: room "#1", room2 "#2", alice "#3", bob "#4", sword "#5",
+    // shield "#6", guard "#7", exit "#8".
     fn test_world() -> World {
         let mut world = World::new();
-        let mut room = GameObject::new("room/1", "room", Kind::Room).with_title("A Room");
+        let room_ref = world.next_dbref(); // "#1"
+        let mut room = GameObject::new(&room_ref, "room", Kind::Room).with_title("A Room");
         room.description = "A plain room.".into();
         world.add_object(room);
 
-        let mut room2 = GameObject::new("room/2", "room2", Kind::Room).with_title("Another Room");
+        let room2_ref = world.next_dbref(); // "#2"
+        let mut room2 = GameObject::new(&room2_ref, "room2", Kind::Room).with_title("Another Room");
         room2.description = "Another room.".into();
         world.add_object(room2);
 
-        let mut actor = GameObject::new("player/alice", "alice", Kind::Player)
+        let alice_ref = world.next_dbref(); // "#3"
+        let mut actor = GameObject::new(&alice_ref, "alice", Kind::Player)
             .with_title("Alice")
-            .with_location("room/1");
+            .with_location(&room_ref);
         actor.tags.insert(Tag { category: "quest".into(), key: "hero".into() });
         world.add_object(actor);
 
-        let bob = GameObject::new("player/bob", "bob", Kind::Player)
+        let bob_ref = world.next_dbref(); // "#4"
+        let bob = GameObject::new(&bob_ref, "bob", Kind::Player)
             .with_title("Bob")
-            .with_location("room/1");
+            .with_location(&room_ref);
         world.add_object(bob);
 
-        let mut sword = GameObject::new("item/sword", "sword", Kind::Item)
+        let sword_ref = world.next_dbref(); // "#5"
+        let mut sword = GameObject::new(&sword_ref, "sword", Kind::Item)
             .with_title("a rusty sword")
-            .with_location("room/1");
+            .with_location(&room_ref);
         sword.tags.insert(Tag { category: "loot".into(), key: "weapon".into() });
         sword.attrs.insert("damage".into(), serde_json::json!(10));
         world.add_object(sword);
 
-        let shield = GameObject::new("item/shield", "shield", Kind::Item)
+        let shield_ref = world.next_dbref(); // "#6"
+        let shield = GameObject::new(&shield_ref, "shield", Kind::Item)
             .with_title("a wooden shield")
-            .with_location("player/alice");
+            .with_location(&alice_ref);
         world.add_object(shield);
 
-        let npc = GameObject::new("npc/guard", "guard", Kind::Npc)
+        let guard_ref = world.next_dbref(); // "#7"
+        let npc = GameObject::new(&guard_ref, "guard", Kind::Npc)
             .with_title("A Town Guard")
-            .with_location("room/1");
+            .with_location(&room_ref);
         world.add_object(npc);
 
-        let exit = GameObject::new("exit/1_to_2", "north", Kind::Exit)
-            .with_location("room/1")
-            .with_target("room/2")
+        let exit_ref = world.next_dbref(); // "#8"
+        let exit = GameObject::new(&exit_ref, "north", Kind::Exit)
+            .with_location(&room_ref)
+            .with_target(&room2_ref)
             .with_aliases(vec!["n"]);
         world.add_object(exit);
 
@@ -664,11 +689,12 @@ mod tests {
             .run_hook(
                 &world,
                 &program,
-                "item/sword",
-                "player/alice",
-                Some("room/1"),
+                "#5",
+                "#3",
+                Some("#1"),
                 None,
                 Budget::default(),
+                counter(&world),
             )
             .expect("hook should run");
 
@@ -679,8 +705,8 @@ mod tests {
         let effects = apply_batch(&mut world, &result.batch).expect("batch should apply");
         assert_eq!(effects.len(), 2);
         assert_eq!(
-            world.get("item/sword").unwrap().attrs.get("held_by").unwrap(),
-            "player/alice"
+            world.get("#5").unwrap().attrs.get("held_by").unwrap(),
+            "#3"
         );
     }
 
@@ -705,11 +731,12 @@ mod tests {
             .run_hook(
                 &world,
                 &program,
-                "item/sword",
-                "player/alice",
-                Some("room/1"),
+                "#5",
+                "#3",
+                Some("#1"),
                 None,
                 Budget::default(),
+                counter(&world),
             )
             .expect("hook should run");
 
@@ -735,11 +762,12 @@ mod tests {
             .run_hook(
                 &world,
                 &program,
-                "item/sword",
-                "player/alice",
-                Some("room/1"),
+                "#5",
+                "#3",
+                Some("#1"),
                 Some("the button"),
                 Budget::default(),
+                counter(&world),
             )
             .expect("hook should run");
 
@@ -747,7 +775,7 @@ mod tests {
         let mut world = world;
         apply_batch(&mut world, &result.batch).unwrap();
         assert_eq!(
-            world.get("item/sword").unwrap().attrs.get("last_args").unwrap(),
+            world.get("#5").unwrap().attrs.get("last_args").unwrap(),
             "the button"
         );
     }
@@ -772,11 +800,12 @@ mod tests {
             .run_hook(
                 &world,
                 &program,
-                "item/sword",
-                "player/alice",
-                Some("room/1"),
+                "#5",
+                "#3",
+                Some("#1"),
                 None,
                 Budget::new(1000),
+                counter(&world),
             )
             .expect_err("infinite loop should hit budget");
 
@@ -804,22 +833,24 @@ mod tests {
             .run_hook(
                 &world,
                 &program_a,
-                "item/sword",
-                "player/alice",
-                Some("room/1"),
+                "#5",
+                "#3",
+                Some("#1"),
                 None,
                 Budget::default(),
+                counter(&world),
             )
             .unwrap();
         let result_b = runtime
             .run_hook(
                 &world,
                 &program_b,
-                "item/sword",
-                "player/alice",
-                Some("room/1"),
+                "#5",
+                "#3",
+                Some("#1"),
                 None,
                 Budget::default(),
+                counter(&world),
             )
             .unwrap();
 
@@ -859,11 +890,12 @@ mod tests {
             .run_hook(
                 &world,
                 &program,
-                "item/sword",
-                "player/alice",
-                Some("room/1"),
+                "#5",
+                "#3",
+                Some("#1"),
                 Some(""),
                 Budget::default(),
+                counter(&world),
             )
             .unwrap();
 
@@ -876,7 +908,7 @@ mod tests {
             .expect("imp should have been spawned");
         assert_eq!(
             imp.attrs.get("summoned_by").unwrap(),
-            "player/alice"
+            "#3"
         );
     }
 
@@ -884,7 +916,7 @@ mod tests {
         let runtime = SoftcodeRuntime::new();
         let program = ProgramRecord::new("on_get", source);
         runtime
-            .run_hook(world, &program, "item/sword", "player/alice", Some("room/1"), None, Budget::default())
+            .run_hook(world, &program, "#5", "#3", Some("#1"), None, Budget::default(), counter(world))
             .expect("script should run")
     }
 
@@ -900,8 +932,8 @@ mod tests {
         "#);
         let mut w = world.clone();
         apply_batch(&mut w, &result.batch).unwrap();
-        assert_eq!(w.get("item/sword").unwrap().attrs["count"], 1);
-        assert_eq!(w.get("item/sword").unwrap().attrs["first"], "sword");
+        assert_eq!(w.get("#5").unwrap().attrs["count"], 1);
+        assert_eq!(w.get("#5").unwrap().attrs["first"], "sword");
     }
 
     #[test]
@@ -919,8 +951,8 @@ mod tests {
         "#);
         let mut w = world.clone();
         apply_batch(&mut w, &result.batch).unwrap();
-        assert_eq!(w.get("item/sword").unwrap().attrs["found"], "npc/guard");
-        assert_eq!(w.get("item/sword").unwrap().attrs["missing"], true);
+        assert_eq!(w.get("#5").unwrap().attrs["found"], "#7");
+        assert_eq!(w.get("#5").unwrap().attrs["missing"], true);
     }
 
     #[test]
@@ -937,8 +969,8 @@ mod tests {
         "#);
         let mut w = world.clone();
         apply_batch(&mut w, &result.batch).unwrap();
-        assert_eq!(w.get("item/sword").unwrap().attrs["inv_count"], 1);
-        assert_eq!(w.get("item/sword").unwrap().attrs["first_item"], "shield");
+        assert_eq!(w.get("#5").unwrap().attrs["inv_count"], 1);
+        assert_eq!(w.get("#5").unwrap().attrs["first_item"], "shield");
     }
 
     #[test]
@@ -952,7 +984,7 @@ mod tests {
         "#);
         let mut w = world.clone();
         apply_batch(&mut w, &result.batch).unwrap();
-        assert_eq!(w.get("item/sword").unwrap().attrs["player_count"], 2);
+        assert_eq!(w.get("#5").unwrap().attrs["player_count"], 2);
     }
 
     #[test]
@@ -966,27 +998,27 @@ mod tests {
         "#);
         let mut w = world.clone();
         apply_batch(&mut w, &result.batch).unwrap();
-        assert_eq!(w.get("item/sword").unwrap().attrs["room_count"], 2);
+        assert_eq!(w.get("#5").unwrap().attrs["room_count"], 2);
     }
 
     #[test]
     fn predicates() {
         let world = test_world();
-        let result = run_script(&world, r#"
+        let result = run_script(&world, r##"
             function on_get(this, actor, room)
                 set_attr(this, "actor_is_player", is_player(actor))
                 set_attr(this, "actor_is_npc", is_npc(actor))
-                set_attr(this, "guard_is_npc", is_npc("npc/guard"))
+                set_attr(this, "guard_is_npc", is_npc("#7"))
                 set_attr(this, "sword_is_item", is_item(this))
                 set_attr(this, "room_is_room", is_room(room))
-                set_attr(this, "exit_is_exit", is_exit("exit/1_to_2"))
+                set_attr(this, "exit_is_exit", is_exit("#8"))
                 set_attr(this, "exists_yes", exists(actor))
                 set_attr(this, "exists_no", exists("fake/ref"))
             end
-        "#);
+        "##);
         let mut w = world.clone();
         apply_batch(&mut w, &result.batch).unwrap();
-        let s = &w.get("item/sword").unwrap().attrs;
+        let s = &w.get("#5").unwrap().attrs;
         assert_eq!(s["actor_is_player"], true);
         assert_eq!(s["actor_is_npc"], false);
         assert_eq!(s["guard_is_npc"], true);
@@ -1009,23 +1041,23 @@ mod tests {
         let mut w = world.clone();
         apply_batch(&mut w, &result.batch).unwrap();
         // alice doesn't carry the sword (it's in the room), but she has the shield (no loot tag)
-        assert_eq!(w.get("item/sword").unwrap().attrs["has_weapon"], false);
-        assert_eq!(w.get("item/sword").unwrap().attrs["has_potion"], false);
+        assert_eq!(w.get("#5").unwrap().attrs["has_weapon"], false);
+        assert_eq!(w.get("#5").unwrap().attrs["has_potion"], false);
     }
 
     #[test]
     fn same_room_predicate() {
         let world = test_world();
-        let result = run_script(&world, r#"
+        let result = run_script(&world, r##"
             function on_get(this, actor, room)
-                set_attr(this, "alice_bob", same_room(actor, "player/bob"))
-                set_attr(this, "alice_guard", same_room(actor, "npc/guard"))
+                set_attr(this, "alice_bob", same_room(actor, "#4"))
+                set_attr(this, "alice_guard", same_room(actor, "#7"))
             end
-        "#);
+        "##);
         let mut w = world.clone();
         apply_batch(&mut w, &result.batch).unwrap();
-        assert_eq!(w.get("item/sword").unwrap().attrs["alice_bob"], true);
-        assert_eq!(w.get("item/sword").unwrap().attrs["alice_guard"], true);
+        assert_eq!(w.get("#5").unwrap().attrs["alice_bob"], true);
+        assert_eq!(w.get("#5").unwrap().attrs["alice_guard"], true);
     }
 
     #[test]
@@ -1039,31 +1071,31 @@ mod tests {
         "#);
         let mut w = world.clone();
         apply_batch(&mut w, &result.batch).unwrap();
-        assert_eq!(w.get("item/sword").unwrap().title.as_deref(), Some("a gleaming sword"));
-        assert_eq!(w.get("item/sword").unwrap().description, "It shines with inner light.");
+        assert_eq!(w.get("#5").unwrap().title.as_deref(), Some("a gleaming sword"));
+        assert_eq!(w.get("#5").unwrap().description, "It shines with inner light.");
     }
 
     #[test]
     fn destroy_object() {
         let world = test_world();
-        let result = run_script(&world, r#"
+        let result = run_script(&world, r##"
             function on_get(this, actor, room)
-                destroy("npc/guard")
+                destroy("#7")
             end
-        "#);
+        "##);
         let mut w = world.clone();
         apply_batch(&mut w, &result.batch).unwrap();
-        assert!(w.get("npc/guard").is_none());
+        assert!(w.get("#7").is_none());
     }
 
     #[test]
     fn destroy_player_rejected() {
         let world = test_world();
-        let result = run_script(&world, r#"
+        let result = run_script(&world, r##"
             function on_get(this, actor, room)
-                destroy("player/bob")
+                destroy("#4")
             end
-        "#);
+        "##);
         let mut w = world.clone();
         assert!(apply_batch(&mut w, &result.batch).is_err());
     }

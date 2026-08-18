@@ -6,5 +6,5 @@
 # db_path = "hearth.db"
 # autosave_secs = 300
 # tick_secs = 1
-# spawn_room = "area/starter/room/town_square"
+# spawn_room = "starter/town_square"  # "<area>/<key>" from your game_dir files
 # game_dir = "world"

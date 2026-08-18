@@ -60,6 +60,11 @@ impl Database {
                 interval INTEGER NOT NULL DEFAULT 1,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 state_json TEXT NOT NULL DEFAULT '{}'
+            );
+
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );",
         )?;
 
@@ -135,6 +140,10 @@ impl Database {
         tx.execute("DELETE FROM objects", [])?;
         tx.execute("DELETE FROM tags", [])?;
         tx.execute("DELETE FROM scripts", [])?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('next_id', ?1)",
+            params![world.next_id.to_string()],
+        )?;
 
         {
             let mut obj_stmt = tx.prepare(
@@ -303,6 +312,16 @@ impl Database {
             world.scripts.insert(name, script);
         }
 
+        let next_id: u64 = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = 'next_id'", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        world.next_id = next_id;
+
         Ok(world)
     }
 
@@ -332,7 +351,8 @@ mod tests {
         let db = temp_db();
         let mut world = World::new();
 
-        let mut room = GameObject::new("area/test/room/hall", "hall", Kind::Room)
+        let hall_ref = world.next_dbref(); // "#1"
+        let mut room = GameObject::new(&hall_ref, "hall", Kind::Room)
             .with_title("Great Hall");
         room.description = "A grand hall.".into();
         room.attrs.insert("mood".into(), serde_json::json!("eerie"));
@@ -340,9 +360,10 @@ mod tests {
         room.locks.insert("enter".into(), "perm(builder)".into());
         world.add_object(room);
 
-        let item = GameObject::new("area/test/item/sword", "sword", Kind::Item)
+        let sword_ref = world.next_dbref(); // "#2"
+        let item = GameObject::new(&sword_ref, "sword", Kind::Item)
             .with_title("a sharp sword")
-            .with_location("area/test/room/hall");
+            .with_location(&hall_ref);
         world.add_object(item);
 
         db.save_world(&world).unwrap();
@@ -350,15 +371,15 @@ mod tests {
 
         assert_eq!(loaded.objects.len(), 2);
 
-        let room = loaded.get("area/test/room/hall").unwrap();
+        let room = loaded.get(&hall_ref).unwrap();
         assert_eq!(room.title.as_deref(), Some("Great Hall"));
         assert_eq!(room.description, "A grand hall.");
         assert_eq!(room.attrs.get("mood").unwrap(), "eerie");
         assert!(room.tags.contains(&Tag::parse("zone:castle").unwrap()));
         assert_eq!(room.locks.get("enter").unwrap(), "perm(builder)");
 
-        let item = loaded.get("area/test/item/sword").unwrap();
-        assert_eq!(item.location_ref.as_deref(), Some("area/test/room/hall"));
+        let item = loaded.get(&sword_ref).unwrap();
+        assert_eq!(item.location_ref.as_deref(), Some(hall_ref.as_str()));
     }
 
     #[test]
@@ -366,24 +387,27 @@ mod tests {
         let db = temp_db();
         let mut world = World::new();
 
-        let room_a = GameObject::new("area/test/room/a", "a", Kind::Room).with_title("Room A");
-        let room_b = GameObject::new("area/test/room/b", "b", Kind::Room).with_title("Room B");
+        let a_ref = world.next_dbref(); // "#1"
+        let b_ref = world.next_dbref(); // "#2"
+        let room_a = GameObject::new(&a_ref, "a", Kind::Room).with_title("Room A");
+        let room_b = GameObject::new(&b_ref, "b", Kind::Room).with_title("Room B");
         world.add_object(room_a);
         world.add_object(room_b);
 
-        let exit = GameObject::new("area/test/exit/a_to_b", "north", Kind::Exit)
-            .with_location("area/test/room/a")
-            .with_target("area/test/room/b")
+        let exit_ref = world.next_dbref(); // "#3"
+        let exit = GameObject::new(&exit_ref, "north", Kind::Exit)
+            .with_location(&a_ref)
+            .with_target(&b_ref)
             .with_aliases(vec!["n"]);
         world.add_object(exit);
 
         db.save_world(&world).unwrap();
         let loaded = db.load_world().unwrap();
 
-        let exits = loaded.exits_from("area/test/room/a");
+        let exits = loaded.exits_from(&a_ref);
         assert_eq!(exits.len(), 1);
         assert_eq!(exits[0].key, "north");
-        assert_eq!(exits[0].target_ref.as_deref(), Some("area/test/room/b"));
+        assert_eq!(exits[0].target_ref.as_deref(), Some(b_ref.as_str()));
         assert!(exits[0].aliases.contains("n"));
     }
 
@@ -392,7 +416,8 @@ mod tests {
         let db = temp_db();
         let mut world = World::new();
 
-        let mut obj = GameObject::new("area/test/item/gem", "gem", Kind::Item);
+        let gem_ref = world.next_dbref(); // "#1"
+        let mut obj = GameObject::new(&gem_ref, "gem", Kind::Item);
         crate::softcode::hooks::set_program(
             &mut obj,
             "on_get",
@@ -404,7 +429,7 @@ mod tests {
         db.save_world(&world).unwrap();
         let loaded = db.load_world().unwrap();
 
-        let gem = loaded.get("area/test/item/gem").unwrap();
+        let gem = loaded.get(&gem_ref).unwrap();
         assert!(gem.programs.contains_key("on_get"));
         assert!(gem.programs["on_get"].source.contains("Sparkle!"));
     }
@@ -456,8 +481,29 @@ mod tests {
     fn save_then_has_world_data() {
         let db = temp_db();
         let mut world = World::new();
-        world.add_object(GameObject::new("area/test/room/x", "x", Kind::Room));
+        let ref_id = world.next_dbref();
+        world.add_object(GameObject::new(&ref_id, "x", Kind::Room));
         db.save_world(&world).unwrap();
         assert!(db.has_world_data());
+    }
+
+    #[test]
+    fn next_id_round_trips() {
+        let db = temp_db();
+        let mut world = World::new();
+        let ref1 = world.next_dbref();
+        let ref2 = world.next_dbref();
+        world.add_object(GameObject::new(&ref1, "a", Kind::Room));
+        world.add_object(GameObject::new(&ref2, "b", Kind::Room));
+        assert_eq!(world.next_id, 2);
+
+        db.save_world(&world).unwrap();
+        let loaded = db.load_world().unwrap();
+        assert_eq!(loaded.next_id, 2);
+
+        // Next dbref allocated after reload should continue the sequence.
+        let mut loaded = loaded;
+        let ref3 = loaded.next_dbref();
+        assert_eq!(ref3, "#3");
     }
 }

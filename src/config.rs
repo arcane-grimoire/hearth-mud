@@ -22,7 +22,7 @@ impl Default for Config {
             db_path: "hearth.db".into(),
             autosave_secs: 300,
             tick_secs: 1,
-            spawn_room: "area/starter/room/town_square".into(),
+            spawn_room: "starter/town_square".into(),
             game_dir: None,
         }
     }

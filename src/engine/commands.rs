@@ -178,6 +178,7 @@ pub fn do_examine(world: &World, actor_ref: &str, args: &str) -> String {
     let target = world
         .objects_in(&room_ref)
         .into_iter()
+        .chain(world.exits_from(&room_ref))
         .chain(world.objects_in(actor_ref))
         .find(|o| {
             o.key.to_lowercase().contains(&target_name)
@@ -191,6 +192,18 @@ pub fn do_examine(world: &World, actor_ref: &str, args: &str) -> String {
                 out.push_str(&format!("{}\r\n", obj.description));
             }
             out.push_str(&format!("Ref: {}\r\n", obj.ref_id));
+            if obj.kind == Kind::Exit {
+                if let Some(target_ref) = &obj.target_ref {
+                    let dest_name = world.get(target_ref)
+                        .map(|r| r.display_name().to_string())
+                        .unwrap_or_else(|| target_ref.clone());
+                    out.push_str(&format!("Destination: {} ({})\r\n", dest_name, target_ref));
+                }
+                if !obj.aliases.is_empty() {
+                    let aliases: Vec<&String> = obj.aliases.iter().collect();
+                    out.push_str(&format!("Aliases: {}\r\n", aliases.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(", ")));
+                }
+            }
             if !obj.attrs.is_empty() {
                 out.push_str("Attributes:\r\n");
                 for (k, v) in &obj.attrs {
@@ -200,7 +213,7 @@ pub fn do_examine(world: &World, actor_ref: &str, args: &str) -> String {
             if !obj.tags.is_empty() {
                 let tags: Vec<String> = obj.tags.iter().map(|t| t.as_spec()).collect();
                 out.push_str(&format!("Tags: {}\r\n", tags.join(", ")));
-            }
+                }
             out
         }
         None => format!("You don't see '{}' here.\r\n", args),
@@ -231,9 +244,9 @@ pub fn do_help_with_roles(is_builder: bool, is_admin: bool) -> String {
     if is_builder {
         out.push_str(concat!(
             "\r\nBuilder commands:\r\n",
-            "  @dig <key> = <title>             - Create a new room\r\n",
-            "  @open <dir> = <room_ref>         - Create an exit from here\r\n",
-            "  @create <key> = <title>          - Create an item here\r\n",
+            "  @dig <title>                     - Create a new room\r\n",
+            "  @open <dir> = <target_ref>       - Create an exit from here\r\n",
+            "  @create <title>                  - Create an item here\r\n",
             "  @destroy <ref>                   - Destroy an object\r\n",
             "  @describe [<ref> =] <text>       - Set description (default: room)\r\n",
             "  @name [<ref> =] <name>           - Rename an object (default: room)\r\n",

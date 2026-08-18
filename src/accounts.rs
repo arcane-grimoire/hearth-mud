@@ -105,7 +105,6 @@ impl AccountStore {
 
         let hash = hash_password(password)?;
         let id = Uuid::new_v4().to_string();
-        let character_ref = format!("player/{}", lower);
 
         // First account gets admin
         let scopes = if self.accounts.is_empty() {
@@ -118,7 +117,8 @@ impl AccountStore {
             id: id.clone(),
             username: username.to_string(),
             password_hash: hash,
-            character_ref: Some(character_ref),
+            // Assigned a real dbref on first login — see Engine::enter_world.
+            character_ref: None,
             email: None,
             scopes,
         };
@@ -255,7 +255,7 @@ mod tests {
         let mut store = AccountStore::new();
         let account = store.create("TestUser", "password123").unwrap();
         assert_eq!(account.username, "TestUser");
-        assert!(account.character_ref.as_deref() == Some("player/testuser"));
+        assert_eq!(account.character_ref, None);
     }
 
     #[test]

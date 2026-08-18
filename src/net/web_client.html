@@ -38,11 +38,36 @@ ws.onclose = () => { status.textContent = 'Disconnected'; append('\n[Connection 
 ws.onerror = () => { status.textContent = 'Error'; };
 ws.onmessage = (e) => { append(e.data); };
 
-function append(text) {
+const ANSI_COLORS = { 30:'#555',31:'#e06c75',32:'#98c379',33:'#e5c07b',34:'#61afef',35:'#c678dd',36:'#56b6c2',37:'#e0e0e0' };
+
+function ansiToHtml(text) {
   // Strip telnet IAC sequences
   text = text.replace(/[\xff][\xfb-\xfe][\x00-\xff]/g, '');
+  let result = '';
+  let open = 0;
+  const parts = text.split(/(\x1b\[[0-9;]*m)/);
+  for (const part of parts) {
+    const m = part.match(/^\x1b\[([0-9;]*)m$/);
+    if (!m) {
+      const safe = part.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      result += safe;
+      continue;
+    }
+    const codes = m[1].split(';').map(Number);
+    for (const c of codes) {
+      if (c === 0) { while (open > 0) { result += '</span>'; open--; } }
+      else if (c === 1) { result += '<span style="font-weight:bold">'; open++; }
+      else if (c === 2) { result += '<span style="opacity:0.6">'; open++; }
+      else if (ANSI_COLORS[c]) { result += '<span style="color:' + ANSI_COLORS[c] + '">'; open++; }
+    }
+  }
+  while (open > 0) { result += '</span>'; open--; }
+  return result;
+}
+
+function append(text) {
   if (!text) return;
-  output.textContent += text;
+  output.innerHTML += ansiToHtml(text);
   output.scrollTop = output.scrollHeight;
 }
 
