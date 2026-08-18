@@ -81,6 +81,7 @@ src/
 - **Containers** — items can hold other items via `item:container` tag, `put X in Y` / `get X from Y`, capacity limits, nested inventory display, circular containment prevention
 - **Lock DSL** — perm(), has_tag(), has_attr(), in_inventory(), is_kind(), is_owner(), time_between(), AND/OR/NOT
 - **Timers** — `after(ticks, ref, hook, data?)` with DB persistence, `cancel_after()`, `get_timers()`, data payloads
+- **Softcode testing** — `.test.luau` files with assert_eq/assert_true/etc., unit mode (lib modules) and integration mode (full API + world), `@test` command, `cargo test` harness
 - **Ticks** — 1s global heartbeat, per-object on_tick with persistent state, global scripts
 - **Visibility** — system:hidden tag + can_see hook
 - **Global commands** — system:global tag on objects makes their cmd_ hooks available everywhere
@@ -111,9 +112,12 @@ See `docs/adr/` (6 ADRs). See `CONTEXT.md` for domain glossary.
 
 ## Testing
 
-111 tests across: accounts (12), db round-trips (7), engine API (8),
-locks DSL (9), softcode (33), grid (14), loader (6), dungeon (4),
-theme (1), lock validator (7).
+115 tests across: accounts (12), db round-trips (7), engine API (8),
+locks DSL (9), softcode (37), grid (14), loader (6), dungeon (4),
+theme (1), lock validator (7), map templates (9), game softcode (1 harness).
+
+Softcode tests also discover and run `*.test.luau` files from the game
+directory (21 Luau tests across str and collections modules).
 
 ```sh
 cargo test                    # all

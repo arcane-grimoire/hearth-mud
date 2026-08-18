@@ -1238,6 +1238,7 @@ impl Engine {
             "@save" => self.cmd_save(session_id),
             "@shutdown" => self.cmd_shutdown(session_id),
             "@reload-world" => self.cmd_reload_world(session_id),
+            "@test" => self.cmd_test(session_id, &args),
             "@reload" => self.cmd_reload(session_id, &actor_ref, &args),
 
             "@display" => self.cmd_display(&actor_ref, &args),
@@ -3132,6 +3133,88 @@ impl Engine {
             }
             None => format!("No object with ref '{}'.\r\n", target_ref),
         }
+    }
+
+    fn cmd_test(&mut self, session_id: &str, args: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Builder) {
+            return "Permission denied.\r\n".to_string();
+        }
+
+        let game_dir = match &self.game_dir {
+            Some(g) => g.clone(),
+            None => return "No game_dir configured.\r\n".to_string(),
+        };
+
+        let game_path = std::path::Path::new(&game_dir);
+        let test_files = if args.trim().is_empty() {
+            crate::loader::discover_test_files(game_path)
+        } else {
+            let path = game_path.join(args.trim());
+            match std::fs::read_to_string(&path) {
+                Ok(source) => {
+                    let is_lib = path.starts_with(game_path.join("lib"));
+                    vec![crate::loader::TestFile {
+                        path: path.clone(),
+                        relative: args.trim().to_string(),
+                        source,
+                        is_lib,
+                    }]
+                }
+                Err(e) => return format!("Cannot read '{}': {}\r\n", args.trim(), e),
+            }
+        };
+
+        if test_files.is_empty() {
+            return "No .test.luau files found.\r\n".to_string();
+        }
+
+        let mut out = String::new();
+        let mut total_passed = 0usize;
+        let mut total_failed = 0usize;
+
+        for tf in &test_files {
+            let world = if tf.is_lib {
+                None
+            } else {
+                Some(self.world.clone())
+            };
+
+            let result = self.softcode.run_tests(
+                &tf.source,
+                &tf.relative,
+                world.as_ref(),
+                softcode::Budget::default(),
+            );
+
+            match result {
+                Ok(file_result) => {
+                    out.push_str(&format!("\r\n{}:\r\n", tf.relative));
+                    for tr in &file_result.tests {
+                        if tr.passed {
+                            total_passed += 1;
+                            out.push_str(&format!("  PASS {}\r\n", tr.name));
+                        } else {
+                            total_failed += 1;
+                            out.push_str(&format!(
+                                "  FAIL {} -- {}\r\n",
+                                tr.name,
+                                tr.error.as_deref().unwrap_or("?")
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    total_failed += 1;
+                    out.push_str(&format!("\r\n{}: ERROR -- {}\r\n", tf.relative, e));
+                }
+            }
+        }
+
+        out.push_str(&format!(
+            "\r\n{} passed, {} failed\r\n",
+            total_passed, total_failed
+        ));
+        out
     }
 
     fn can_modify_object(&self, session_id: &str, actor_ref: &str, target_ref: &str) -> bool {

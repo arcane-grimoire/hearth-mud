@@ -383,6 +383,7 @@ pub fn do_help_with_roles(is_builder: bool, is_admin: bool) -> String {
             "  @scripts                        - List global scripts\r\n",
             "  @rmscript <name>                - Remove a global script\r\n",
             "  @script-interval <name> = <N>   - Set tick interval\r\n",
+            "  @test [<path>]                   - Run softcode tests\r\n",
             "  @lock <ref>/<type> = <expr>      - Set a lock\r\n",
             "  @unlock <ref>/<type>             - Remove a lock\r\n",
             "  @locks [<ref>]                   - View locks\r\n",

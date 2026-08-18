@@ -842,6 +842,367 @@ fn clear_table(t: &mlua::Table) {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct TestResult {
+    pub name: String,
+    pub passed: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TestFileResult {
+    pub file: String,
+    pub tests: Vec<TestResult>,
+}
+
+impl TestFileResult {
+    pub fn passed(&self) -> usize {
+        self.tests.iter().filter(|t| t.passed).count()
+    }
+
+    pub fn failed(&self) -> usize {
+        self.tests.iter().filter(|t| !t.passed).count()
+    }
+}
+
+fn lua_deep_eq(a: &LuaValue, b: &LuaValue, depth: u32) -> mlua::Result<bool> {
+    if depth > 10 {
+        return Ok(false);
+    }
+    match (a, b) {
+        (LuaValue::Nil, LuaValue::Nil) => Ok(true),
+        (LuaValue::Boolean(a), LuaValue::Boolean(b)) => Ok(a == b),
+        (LuaValue::Integer(a), LuaValue::Integer(b)) => Ok(a == b),
+        (LuaValue::Integer(a), LuaValue::Number(b)) => Ok((*a as f64) == *b),
+        (LuaValue::Number(a), LuaValue::Integer(b)) => Ok(*a == (*b as f64)),
+        (LuaValue::Number(a), LuaValue::Number(b)) => Ok(a == b),
+        (LuaValue::String(a), LuaValue::String(b)) => Ok(a == b),
+        (LuaValue::Table(a), LuaValue::Table(b)) => {
+            for pair in a.pairs::<LuaValue, LuaValue>() {
+                let (key, val_a) = pair?;
+                let val_b: LuaValue = b.get(key.clone())?;
+                if !lua_deep_eq(&val_a, &val_b, depth + 1)? {
+                    return Ok(false);
+                }
+            }
+            for pair in b.pairs::<LuaValue, LuaValue>() {
+                let (key, _) = pair?;
+                let val_a: LuaValue = a.get(key)?;
+                if matches!(val_a, LuaValue::Nil) {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn lua_value_display(v: &LuaValue, depth: u32) -> String {
+    if depth > 3 {
+        return "{...}".to_string();
+    }
+    match v {
+        LuaValue::Nil => "nil".to_string(),
+        LuaValue::Boolean(b) => b.to_string(),
+        LuaValue::Integer(n) => n.to_string(),
+        LuaValue::Number(n) => format!("{}", n),
+        LuaValue::String(s) => format!("\"{}\"", s.to_string_lossy()),
+        LuaValue::Table(t) => {
+            let mut parts = Vec::new();
+            let mut is_seq = true;
+            let mut i = 1i32;
+            for pair in t.pairs::<LuaValue, LuaValue>() {
+                if let Ok((k, v)) = pair {
+                    if matches!(&k, LuaValue::Integer(n) if *n == i) {
+                        parts.push(lua_value_display(&v, depth + 1));
+                        i += 1;
+                    } else {
+                        is_seq = false;
+                        let ks = match &k {
+                            LuaValue::String(s) => s.to_string_lossy().to_string(),
+                            _ => lua_value_display(&k, depth + 1),
+                        };
+                        parts.push(format!("{} = {}", ks, lua_value_display(&v, depth + 1)));
+                    }
+                    if parts.len() > 10 {
+                        parts.push("...".to_string());
+                        break;
+                    }
+                }
+            }
+            if is_seq && !parts.is_empty() {
+                format!("{{{}}}", parts.join(", "))
+            } else {
+                format!("{{{}}}", parts.join(", "))
+            }
+        }
+        _ => format!("<{}>", v.type_name()),
+    }
+}
+
+fn install_test_assertions(lua: &Lua, env: &mlua::Table) -> mlua::Result<()> {
+    env.set(
+        "assert_eq",
+        lua.create_function(
+            |_, (actual, expected, msg): (LuaValue, LuaValue, Option<String>)| {
+                if !lua_deep_eq(&actual, &expected, 0)? {
+                    let label = msg
+                        .map(|m| format!(" ({})", m))
+                        .unwrap_or_default();
+                    Err(mlua::Error::RuntimeError(format!(
+                        "assert_eq failed{}: expected {}, got {}",
+                        label,
+                        lua_value_display(&expected, 0),
+                        lua_value_display(&actual, 0),
+                    )))
+                } else {
+                    Ok(())
+                }
+            },
+        )?,
+    )?;
+
+    env.set(
+        "assert_true",
+        lua.create_function(|_, (value, msg): (LuaValue, Option<String>)| {
+            if !matches!(value, LuaValue::Boolean(true)) {
+                let label = msg
+                    .map(|m| format!(" ({})", m))
+                    .unwrap_or_default();
+                Err(mlua::Error::RuntimeError(format!(
+                    "assert_true failed{}: got {}",
+                    label,
+                    lua_value_display(&value, 0),
+                )))
+            } else {
+                Ok(())
+            }
+        })?,
+    )?;
+
+    env.set(
+        "assert_false",
+        lua.create_function(|_, (value, msg): (LuaValue, Option<String>)| {
+            if !matches!(value, LuaValue::Boolean(false)) {
+                let label = msg
+                    .map(|m| format!(" ({})", m))
+                    .unwrap_or_default();
+                Err(mlua::Error::RuntimeError(format!(
+                    "assert_false failed{}: got {}",
+                    label,
+                    lua_value_display(&value, 0),
+                )))
+            } else {
+                Ok(())
+            }
+        })?,
+    )?;
+
+    env.set(
+        "assert_nil",
+        lua.create_function(|_, (value, msg): (LuaValue, Option<String>)| {
+            if !matches!(value, LuaValue::Nil) {
+                let label = msg
+                    .map(|m| format!(" ({})", m))
+                    .unwrap_or_default();
+                Err(mlua::Error::RuntimeError(format!(
+                    "assert_nil failed{}: got {}",
+                    label,
+                    lua_value_display(&value, 0),
+                )))
+            } else {
+                Ok(())
+            }
+        })?,
+    )?;
+
+    env.set(
+        "assert_not_nil",
+        lua.create_function(|_, (value, msg): (LuaValue, Option<String>)| {
+            if matches!(value, LuaValue::Nil) {
+                let label = msg
+                    .map(|m| format!(" ({})", m))
+                    .unwrap_or_default();
+                Err(mlua::Error::RuntimeError(format!(
+                    "assert_not_nil failed{}",
+                    label,
+                )))
+            } else {
+                Ok(())
+            }
+        })?,
+    )?;
+
+    env.set(
+        "assert_error",
+        lua.create_function(
+            |_, (func, pattern): (mlua::Function, Option<String>)| match func.call::<LuaValue>(()) {
+                Ok(_) => Err(mlua::Error::RuntimeError(
+                    "assert_error failed: expected an error but call succeeded".into(),
+                )),
+                Err(e) => {
+                    if let Some(pat) = pattern {
+                        let msg = e.to_string();
+                        if !msg.contains(&pat) {
+                            Err(mlua::Error::RuntimeError(format!(
+                                "assert_error: error did not match pattern '{}': {}",
+                                pat, msg,
+                            )))
+                        } else {
+                            Ok(())
+                        }
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+        )?,
+    )?;
+
+    Ok(())
+}
+
+impl SoftcodeRuntime {
+    fn discover_test_names(&self, source: &str, name: &str) -> Result<Vec<String>, SoftcodeError> {
+        let compiled = self
+            .get_or_compile(source, name)
+            .map_err(|e| SoftcodeError::Runtime(e.to_string()))?;
+
+        let names: mlua::Result<Vec<String>> = self.lua.scope(|_scope| {
+            let env = self.lua.create_table()?;
+            api::install_stdlib(&self.lua, &env)?;
+            compiled.set_environment(env.clone())?;
+            compiled.call::<()>(())?;
+
+            let mut test_names = Vec::new();
+            for pair in env.pairs::<String, LuaValue>() {
+                if let Ok((key, LuaValue::Function(_))) = pair {
+                    if key.starts_with("test_") {
+                        test_names.push(key);
+                    }
+                }
+            }
+            test_names.sort();
+            Ok(test_names)
+        });
+
+        names.map_err(classify_lua_error)
+    }
+
+    fn clear_module_cache(&self) {
+        if let Ok(cache) = self
+            .lua
+            .named_registry_value::<mlua::Table>(MODULE_CACHE_KEY)
+        {
+            clear_table(&cache);
+        }
+    }
+
+    pub fn run_tests(
+        &self,
+        source: &str,
+        file_name: &str,
+        world: Option<&World>,
+        budget: Budget,
+    ) -> Result<TestFileResult, SoftcodeError> {
+        let test_names = self.discover_test_names(source, file_name)?;
+        let mut results = Vec::new();
+
+        for test_name in &test_names {
+            if world.is_some() {
+                self.clear_module_cache();
+            }
+            self.install_budget(budget);
+
+            let empty_themes: HashMap<String, crate::theme::Theme> = HashMap::new();
+            let empty_templates: HashMap<String, crate::map_template::MapTemplateFile> =
+                HashMap::new();
+
+            let run_result: mlua::Result<()> = self.lua.scope(|scope| {
+                let env = self.lua.create_table()?;
+                api::install_stdlib(&self.lua, &env)?;
+                install_test_assertions(&self.lua, &env)?;
+
+                if let Some(w) = world {
+                    let batch = Rc::new(RefCell::new(IntentBatch::default()));
+                    let dbref_counter = Rc::new(Cell::new(w.next_id));
+                    api::install(
+                        &self.lua,
+                        scope,
+                        &env,
+                        w,
+                        Rc::clone(&batch),
+                        None,
+                        Rc::clone(&dbref_counter),
+                        &empty_themes,
+                        &empty_templates,
+                        &[],
+                    )?;
+
+                    let ctx = self.lua.create_table()?;
+                    let mut sorted_objs: Vec<_> = w.objects.values().collect();
+                    sorted_objs.sort_by(|a, b| a.ref_id.cmp(&b.ref_id));
+                    if let Some(room) = sorted_objs.iter().find(|o| o.kind == Kind::Room) {
+                        ctx.set("room", room.ref_id.clone())?;
+                    }
+                    if let Some(player) = sorted_objs.iter().find(|o| o.kind == Kind::Player) {
+                        ctx.set("actor", player.ref_id.clone())?;
+                    }
+                    if let Some(item) = sorted_objs.iter().find(|o| o.kind == Kind::Item) {
+                        ctx.set("this", item.ref_id.clone())?;
+                    }
+                    env.set("ctx", ctx)?;
+                }
+
+                let compiled = self
+                    .get_or_compile(source, file_name)
+                    .map_err(|e| e.clone())?;
+                compiled.set_environment(env.clone())?;
+                compiled.call::<()>(())?;
+
+                let func: mlua::Function = env.get(test_name.as_str())?;
+
+                if world.is_some() {
+                    let ctx: mlua::Table = env.get("ctx")?;
+                    func.call::<()>(ctx)?;
+                } else {
+                    func.call::<()>(())?;
+                }
+
+                Ok(())
+            });
+
+            self.lua.remove_interrupt();
+
+            match run_result {
+                Ok(()) => results.push(TestResult {
+                    name: test_name.clone(),
+                    passed: true,
+                    error: None,
+                }),
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    let clean = error_msg
+                        .strip_prefix("runtime error: ")
+                        .unwrap_or(&error_msg)
+                        .to_string();
+                    results.push(TestResult {
+                        name: test_name.clone(),
+                        passed: false,
+                        error: Some(clean),
+                    });
+                }
+            }
+        }
+
+        Ok(TestFileResult {
+            file: file_name.to_string(),
+            tests: results,
+        })
+    }
+}
+
 impl Default for SoftcodeRuntime {
     fn default() -> Self {
         Self::new()
@@ -2219,5 +2580,169 @@ mod tests {
         let mut w = world.clone();
         let err = apply_batch(&mut w, &result.batch).unwrap_err();
         assert!(err.contains("ticks must be > 0"));
+    }
+
+    #[test]
+    fn test_assertions_pass() {
+        let runtime = SoftcodeRuntime::new();
+        let result = runtime
+            .run_tests(
+                r#"
+                    function test_assert_eq()
+                        assert_eq(1, 1)
+                        assert_eq("hello", "hello")
+                        assert_eq({1, 2, 3}, {1, 2, 3})
+                    end
+
+                    function test_assert_true_false()
+                        assert_true(true)
+                        assert_false(false)
+                    end
+
+                    function test_assert_nil()
+                        assert_nil(nil)
+                        assert_not_nil(42)
+                    end
+
+                    function test_assert_error()
+                        assert_error(function() error("boom") end)
+                        assert_error(function() error("boom") end, "boom")
+                    end
+                "#,
+                "assertions.test.luau",
+                None,
+                Budget::default(),
+            )
+            .expect("test runner should not error");
+
+        assert_eq!(result.passed(), 4);
+        assert_eq!(result.failed(), 0);
+    }
+
+    #[test]
+    fn test_assertions_fail() {
+        let runtime = SoftcodeRuntime::new();
+        let result = runtime
+            .run_tests(
+                r#"
+                    function test_eq_fails()
+                        assert_eq(1, 2)
+                    end
+
+                    function test_true_fails()
+                        assert_true(false)
+                    end
+                "#,
+                "fail.test.luau",
+                None,
+                Budget::default(),
+            )
+            .expect("test runner should not error");
+
+        assert_eq!(result.passed(), 0);
+        assert_eq!(result.failed(), 2);
+        assert!(result.tests[0].error.as_ref().unwrap().contains("assert_eq failed"));
+        assert!(result.tests[1].error.as_ref().unwrap().contains("assert_true failed"));
+    }
+
+    #[test]
+    fn test_integration_mode() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let result = runtime
+            .run_tests(
+                r#"
+                    function test_get_object(ctx)
+                        local actor = get_object(ctx.actor)
+                        assert_not_nil(actor)
+                        assert_eq(actor.kind, "player")
+                    end
+
+                    function test_room_contents(ctx)
+                        local contents = get_room_contents(ctx.room)
+                        assert_true(#contents > 0)
+                    end
+                "#,
+                "integration.test.luau",
+                Some(&world),
+                Budget::default(),
+            )
+            .expect("test runner should not error");
+
+        assert_eq!(result.passed(), 2);
+        assert_eq!(result.failed(), 0);
+    }
+
+    #[test]
+    fn run_game_softcode_tests() {
+        let game_dir = std::env::var("HEARTH_GAME_DIR")
+            .ok()
+            .or_else(|| {
+                let candidate = std::path::Path::new("../the-last-stag-mud/world");
+                candidate.exists().then(|| candidate.to_string_lossy().to_string())
+            });
+        let game_dir = match game_dir {
+            Some(d) => d,
+            None => {
+                eprintln!("Skipping softcode game tests: game directory not found");
+                return;
+            }
+        };
+
+        let game_path = std::path::Path::new(&game_dir);
+        let runtime = SoftcodeRuntime::new();
+        let modules = crate::loader::load_modules(game_path);
+        runtime.load_modules(modules);
+
+        let test_files = crate::loader::discover_test_files(game_path);
+        if test_files.is_empty() {
+            eprintln!("No .test.luau files found in {}", game_dir);
+            return;
+        }
+
+        let mut total_passed = 0;
+        let mut total_failed = 0;
+        let mut failures = Vec::new();
+
+        for tf in &test_files {
+            let world = if tf.is_lib { None } else { Some(test_world()) };
+            let result = runtime.run_tests(
+                &tf.source,
+                &tf.relative,
+                world.as_ref(),
+                Budget::default(),
+            );
+            match result {
+                Ok(file_result) => {
+                    for tr in &file_result.tests {
+                        if tr.passed {
+                            total_passed += 1;
+                            eprintln!("  PASS {}::{}", tf.relative, tr.name);
+                        } else {
+                            total_failed += 1;
+                            failures.push(format!(
+                                "  FAIL {}::{} -- {}",
+                                tf.relative,
+                                tr.name,
+                                tr.error.as_deref().unwrap_or("?")
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    total_failed += 1;
+                    failures.push(format!("  FAIL {} -- file error: {}", tf.relative, e));
+                }
+            }
+        }
+
+        eprintln!("\n{} passed, {} failed", total_passed, total_failed);
+        if !failures.is_empty() {
+            eprintln!("\nFailures:");
+            for f in &failures {
+                eprintln!("{}", f);
+            }
+            panic!("{} softcode test(s) failed", total_failed);
+        }
     }
 }
