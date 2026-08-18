@@ -366,14 +366,131 @@ error, the program is rejected and the error is shown.
 @program <ref>/on_tick = function on_tick(this, state, room) ... end
 ```
 
+## Modules (require)
+
+Shared Luau code lives in `<game_dir>/lib/*.luau`. Any hook or global script
+can load a module with `require("name")`:
+
+```lua
+local random = require("random")
+local roll = random.roll(20)
+```
+
+Modules return a table (standard Lua module pattern):
+
+```lua
+-- lib/combat_utils.luau
+local M = {}
+function M.roll_damage(base, bonus) return base + math.random(1, bonus) end
+return M
+```
+
+Modules can require other modules (transitive deps). Module return values are
+cached — the source only runs once per engine lifetime. Cache clears on
+`@reload-world`.
+
+Modules have stdlib access (string, table, math, require) but **not** the
+game write API (emit, set_attr, etc.). They're for pure utility code.
+
+### Bundled modules
+
+| Module | Description |
+|--------|-------------|
+| `random` | `roll(sides)`, `dice(n, sides)`, `chance(pct)`, `pick(list)`, `weighted(choices)`, `shuffle(list)`, `sample(list, n)` |
+| `collections` | `Set` class (add/remove/has/union/intersection/difference), `Array` helpers (map/filter/find/reduce/flat/contains/reverse/slice) |
+| `state_machine` | Synchronous FSM: `new({initial, transitions, on_enter, on_exit})`, `:send(event)`, `:can(event)`, `:is(state)` |
+| `signal` | Pub/sub: `new()` → Signal with `:fire(...)`, `:connect(fn)` → Connection with `:disconnect()`. Also `newSubject(...)` for replay-last-value signals. |
+| `text` | Rich formatting with accessible/visual modes. `for_mode(mode)` returns a formatter with `bar`, `header`, `table`, `box`, `stat`, `divider`, `color`, `bold`, `dim`. |
+| `str` | String utilities: `split`, `trim`, `starts_with`, `ends_with`, `title_case`, `pad_right`, `pad_left`, `center`, `truncate`, `pluralize`, `wrap` |
+| `Grid3D` | 3D grid data structure (from luau-grids). See also Rust-side Grid2D below. |
+
+### Display modes and accessibility
+
+Players can toggle their display mode:
+
+```
+@display visual        -- full formatting (ANSI colors, Unicode box-drawing, progress bars)
+@display accessible    -- plain text (screen-reader friendly, no ANSI, descriptive labels)
+```
+
+The mode is stored as the `_display_mode` attr on the player object. Scripts
+read it to choose formatting:
+
+```lua
+local text = require("text")
+local mode = get_attr(actor, "_display_mode") or "visual"
+local fmt = text.for_mode(mode)
+
+-- Visual:     [████████░░░░] 8/12
+-- Accessible: HP: 8/12 (67%)
+emit(actor, fmt.bar(hp, max_hp, 20, "HP"))
+
+-- Visual:     ═══ Combat Status ═══
+-- Accessible: --- Combat Status ---
+emit(actor, fmt.header("Combat Status"))
+```
+
+## Grid2D (Rust-side)
+
+Grid2D is a Rust-backed spatial grid registered as a Lua global. Grid operations
+run in Rust and do **not** consume the instruction budget.
+
+### Creating grids
+
+```lua
+local g = grid_new(10, 10, "floor")       -- 10x10, all cells = "floor"
+local g = grid_from_value(get_attr(obj, "my_grid"))  -- from saved attr
+```
+
+### Methods
+
+| Method | Description |
+|--------|-------------|
+| `g:get(x, y)` | Cell value (1-indexed, nil if out of bounds) |
+| `g:set(x, y, value)` | Set cell (errors if out of bounds) |
+| `g:width()`, `g:height()`, `g:size()` | Dimensions |
+| `g:fill(x1, y1, x2, y2, value)` | Fill rectangular region |
+| `g:to_value()` | Serialize to table for `set_attr()` |
+| `g:find(value)` | First `{x, y}` matching value, or nil |
+| `g:find_all(value)` | List of `{x, y}` matching value |
+| `g:neighbors(x, y)` | 4 cardinal neighbors `{{x, y, value}, ...}` |
+| `g:pathfind(x1, y1, x2, y2, walkable)` | A* path as `{{x,y}, ...}` or nil |
+| `g:has_los(x1, y1, x2, y2, blocking)` | Bresenham line-of-sight (bool) |
+| `g:fov(x, y, radius, blocking)` | Shadowcast field of view `{{x,y}, ...}` |
+| `g:distance_map(x, y, walkable)` | Dijkstra flood → new Grid2D of distances (-1 = unreachable) |
+| `g:flood_fill(x, y, old, new)` | Fill connected region, returns count |
+
+### Persisting grids
+
+```lua
+-- Save
+set_attr(system_obj, "dungeon_map", g:to_value())
+
+-- Load
+local g = grid_from_value(get_attr(system_obj, "dungeon_map"))
+```
+
+### Dungeon layout
+
+`generate_dungeon` automatically stores a layout grid on the entrance room as
+the `dungeon_layout` attribute. Each cell is either `null` (empty) or a room
+ref string:
+
+```lua
+local entrance = generate_dungeon("my-seed")
+local layout = grid_from_value(get_attr(entrance, "dungeon_layout"))
+local room_ref = layout:get(3, 2)  -- "#42" or nil
+```
+
 ## Sandboxing
 
 Programs run in an isolated environment per call:
 
-- **No file/network access.** Luau's baseline globals already exclude `io`,
-  `os.execute`, `require`, etc.
+- **No file/network access.** Luau's baseline globals exclude `io` and
+  `os.execute`. `require` is overridden to load from `lib/` only.
 - **Instruction budget.** A runaway script (infinite loop, excessive recursion)
   is killed after a fixed instruction count. The engine stays responsive.
+  Grid2D operations are exempt (they run in Rust).
 - **No direct mutation.** The write API only queues intents. The engine
   validates and applies them after the script finishes, rolling back the
   entire batch on any error.

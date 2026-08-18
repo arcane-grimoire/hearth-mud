@@ -399,6 +399,29 @@ fn resolve_key(area: &str, reference: &str, key_map: &HashMap<String, String>) -
         .ok_or_else(|| format!("Unresolved reference: '{}'", file_key))
 }
 
+/// Scan `<game_dir>/lib/` for `.luau` module files. Returns a map of
+/// module name (stem) to source code.
+pub fn load_modules(game_dir: &Path) -> HashMap<String, String> {
+    let lib_dir = game_dir.join("lib");
+    let mut modules = HashMap::new();
+    let entries = match std::fs::read_dir(&lib_dir) {
+        Ok(e) => e,
+        Err(_) => return modules,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("luau") {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if let Ok(source) = std::fs::read_to_string(&path) {
+                    modules.insert(stem.to_string(), source);
+                }
+            }
+        }
+    }
+    tracing::info!(count = modules.len(), "Loaded lib modules");
+    modules
+}
+
 fn collect_toml_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -616,5 +639,30 @@ mod tests {
         let mut world = World::new();
         let err = load_game_dir(&dir.path, &mut world).unwrap_err();
         assert!(err.contains("Unresolved reference"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn load_modules_scans_lib_dir() {
+        let dir = TempGameDir::new();
+        let lib_dir = dir.path.join("lib");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        std::fs::write(
+            lib_dir.join("utils.luau"),
+            r#"local M = {} function M.add(a, b) return a + b end return M"#,
+        )
+        .unwrap();
+        std::fs::write(
+            lib_dir.join("helpers.luau"),
+            r#"return { greet = function(n) return "hi " .. n end }"#,
+        )
+        .unwrap();
+        // non-.luau files should be ignored
+        std::fs::write(lib_dir.join("notes.txt"), "not a module").unwrap();
+
+        let modules = load_modules(&dir.path);
+        assert_eq!(modules.len(), 2);
+        assert!(modules.contains_key("utils"));
+        assert!(modules.contains_key("helpers"));
+        assert!(!modules.contains_key("notes"));
     }
 }

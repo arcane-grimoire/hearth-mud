@@ -3,6 +3,7 @@ mod ansi;
 mod config;
 mod db;
 mod dungeon;
+mod grid;
 mod loader;
 mod engine;
 mod locks;

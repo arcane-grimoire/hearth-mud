@@ -382,12 +382,80 @@ pub struct SoftcodeRuntime {
     chunk_cache: std::cell::RefCell<HashMap<u64, mlua::RegistryKey>>,
 }
 
+const MODULE_SOURCES_KEY: &str = "_hearth_module_sources";
+const MODULE_CACHE_KEY: &str = "_hearth_module_cache";
+
 impl SoftcodeRuntime {
     pub fn new() -> Self {
+        let lua = Lua::new();
+        let sources = lua.create_table().expect("create module sources table");
+        lua.set_named_registry_value(MODULE_SOURCES_KEY, sources)
+            .expect("store module sources");
+        let cache = lua.create_table().expect("create module cache table");
+        lua.set_named_registry_value(MODULE_CACHE_KEY, cache)
+            .expect("store module cache");
+
+        Self::install_require(&lua);
+        crate::grid::Grid2D::install_globals(&lua);
+
         Self {
-            lua: Lua::new(),
+            lua,
             chunk_cache: std::cell::RefCell::new(HashMap::new()),
         }
+    }
+
+    fn install_require(lua: &Lua) {
+        let require_fn = lua
+            .create_function(|lua, name: String| {
+                let cache: mlua::Table =
+                    lua.named_registry_value(MODULE_CACHE_KEY)?;
+                let cached: LuaValue = cache.get(name.as_str())?;
+                if cached != LuaValue::Nil {
+                    return Ok(cached);
+                }
+
+                let sources: mlua::Table =
+                    lua.named_registry_value(MODULE_SOURCES_KEY)?;
+                let source: Option<String> = sources.get(name.as_str())?;
+                let source = source.ok_or_else(|| {
+                    mlua::Error::RuntimeError(format!("module '{}' not found", name))
+                })?;
+
+                let chunk = lua.load(&source).set_name(&name).into_function()?;
+                let env = lua.create_table()?;
+                let mt = lua.create_table()?;
+                mt.set("__index", lua.globals())?;
+                env.set_metatable(Some(mt));
+                chunk.set_environment(env)?;
+                let result = chunk.call::<LuaValue>(())?;
+
+                let result = if result == LuaValue::Nil {
+                    LuaValue::Boolean(true)
+                } else {
+                    result
+                };
+                cache.set(name, result.clone())?;
+                Ok(result)
+            })
+            .expect("create require function");
+        lua.globals()
+            .set("require", require_fn)
+            .expect("register require");
+    }
+
+    pub fn load_modules(&self, modules: HashMap<String, String>) {
+        let sources: mlua::Table = self
+            .lua
+            .named_registry_value(MODULE_SOURCES_KEY)
+            .expect("module sources table");
+        for (name, source) in modules {
+            sources.set(name, source).expect("set module source");
+        }
+        let cache: mlua::Table = self
+            .lua
+            .named_registry_value(MODULE_CACHE_KEY)
+            .expect("module cache table");
+        clear_table(&cache);
     }
 
     fn source_hash(source: &str) -> u64 {
@@ -415,6 +483,16 @@ impl SoftcodeRuntime {
 
     pub fn invalidate_cache(&self) {
         self.chunk_cache.borrow_mut().clear();
+        let sources: mlua::Table = self
+            .lua
+            .named_registry_value(MODULE_SOURCES_KEY)
+            .expect("module sources table");
+        clear_table(&sources);
+        let cache: mlua::Table = self
+            .lua
+            .named_registry_value(MODULE_CACHE_KEY)
+            .expect("module cache table");
+        clear_table(&cache);
     }
 
     /// Compile `source` without running it. Used by `@program` to reject
@@ -625,13 +703,23 @@ impl SoftcodeRuntime {
 
         let new_state = Rc::try_unwrap(state_capture)
             .map(|cell| cell.into_inner())
-            .unwrap_or_default();
+            .unwrap_or_else(|rc| rc.borrow().clone());
 
         Ok(ProgramResult {
             batch,
             denied: matches!(ret, LuaValue::Boolean(false)),
             state: new_state,
         })
+    }
+}
+
+fn clear_table(t: &mlua::Table) {
+    let keys: Vec<LuaValue> = t
+        .pairs::<LuaValue, LuaValue>()
+        .filter_map(|p| p.ok().map(|(k, _)| k))
+        .collect();
+    for k in keys {
+        let _ = t.set(k, LuaValue::Nil);
     }
 }
 
@@ -1333,5 +1421,406 @@ mod tests {
         for room_ref in &dungeon_rooms {
             assert!(w.get(room_ref).is_none(), "dungeon room {} should be destroyed", room_ref);
         }
+    }
+
+    #[test]
+    fn require_loads_module_and_caches_it() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let mut modules = HashMap::new();
+        modules.insert(
+            "utils".into(),
+            r#"
+                local M = {}
+                function M.double(n) return n * 2 end
+                return M
+            "#
+            .into(),
+        );
+        runtime.load_modules(modules);
+
+        let program = ProgramRecord::new(
+            "on_get",
+            r#"
+                function on_get(this, actor, room)
+                    local utils = require("utils")
+                    set_attr(this, "val", utils.double(5))
+                end
+            "#,
+        );
+
+        let result = runtime
+            .run_hook(
+                &world,
+                &program,
+                "#5",
+                "#3",
+                Some("#1"),
+                None,
+                Budget::default(),
+                counter(&world),
+                &test_themes(),
+            )
+            .expect("hook should run");
+
+        let mut world = world;
+        apply_batch(&mut world, &result.batch).unwrap();
+        assert_eq!(
+            world.get("#5").unwrap().attrs.get("val").unwrap(),
+            &serde_json::json!(10)
+        );
+    }
+
+    #[test]
+    fn require_unknown_module_errors() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+
+        let program = ProgramRecord::new(
+            "on_get",
+            r#"
+                function on_get(this, actor, room)
+                    local nope = require("nonexistent")
+                end
+            "#,
+        );
+
+        let err = runtime
+            .run_hook(
+                &world,
+                &program,
+                "#5",
+                "#3",
+                Some("#1"),
+                None,
+                Budget::default(),
+                counter(&world),
+                &test_themes(),
+            )
+            .expect_err("should fail on missing module");
+
+        assert!(matches!(err, SoftcodeError::Runtime(_)));
+    }
+
+    #[test]
+    fn require_works_in_global_scripts() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let mut modules = HashMap::new();
+        modules.insert(
+            "math_ext".into(),
+            r#"
+                local M = {}
+                function M.add(a, b) return a + b end
+                return M
+            "#
+            .into(),
+        );
+        runtime.load_modules(modules);
+
+        let result = runtime
+            .run_global_script(
+                &world,
+                r#"
+                    function on_tick(state)
+                        local m = require("math_ext")
+                        state.sum = m.add(3, 4)
+                    end
+                "#,
+                "on_tick",
+                &HashMap::new(),
+                Budget::default(),
+                counter(&world),
+                &test_themes(),
+            )
+            .expect("global script should run");
+
+        assert_eq!(
+            result.state.get("sum").unwrap(),
+            &serde_json::json!(7)
+        );
+    }
+
+    #[test]
+    fn require_transitive_deps() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let mut modules = HashMap::new();
+        modules.insert(
+            "base".into(),
+            r#"
+                local M = {}
+                function M.greet(name) return "Hello, " .. name end
+                return M
+            "#
+            .into(),
+        );
+        modules.insert(
+            "greeter".into(),
+            r#"
+                local base = require("base")
+                local M = {}
+                function M.greet_actor(actor)
+                    return base.greet(actor.display_name)
+                end
+                return M
+            "#
+            .into(),
+        );
+        runtime.load_modules(modules);
+
+        let program = ProgramRecord::new(
+            "on_get",
+            r#"
+                function on_get(this, actor, room)
+                    local greeter = require("greeter")
+                    set_attr(this, "msg", greeter.greet_actor(actor))
+                end
+            "#,
+        );
+
+        let result = runtime
+            .run_hook(
+                &world,
+                &program,
+                "#5",
+                "#3",
+                Some("#1"),
+                None,
+                Budget::default(),
+                counter(&world),
+                &test_themes(),
+            )
+            .expect("hook should run");
+
+        let mut world = world;
+        apply_batch(&mut world, &result.batch).unwrap();
+        assert_eq!(
+            world.get("#5").unwrap().attrs.get("msg").unwrap(),
+            "Hello, Alice"
+        );
+    }
+
+    #[test]
+    fn invalidate_cache_clears_modules() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let mut modules = HashMap::new();
+        modules.insert("v1".into(), "return 1".into());
+        runtime.load_modules(modules);
+
+        let program = ProgramRecord::new(
+            "on_get",
+            r#"
+                function on_get(this, actor, room)
+                    set_attr(this, "ver", require("v1"))
+                end
+            "#,
+        );
+
+        let result = runtime
+            .run_hook(
+                &world,
+                &program,
+                "#5",
+                "#3",
+                Some("#1"),
+                None,
+                Budget::default(),
+                counter(&world),
+                &test_themes(),
+            )
+            .unwrap();
+
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        assert_eq!(w.get("#5").unwrap().attrs.get("ver").unwrap(), 1);
+
+        runtime.invalidate_cache();
+        let mut modules = HashMap::new();
+        modules.insert("v1".into(), "return 2".into());
+        runtime.load_modules(modules);
+
+        let result = runtime
+            .run_hook(
+                &world,
+                &program,
+                "#5",
+                "#3",
+                Some("#1"),
+                None,
+                Budget::default(),
+                counter(&world),
+                &test_themes(),
+            )
+            .unwrap();
+
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        assert_eq!(w.get("#5").unwrap().attrs.get("ver").unwrap(), 2);
+    }
+
+    #[test]
+    fn grid_new_get_set_roundtrip() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let program = ProgramRecord::new(
+            "on_get",
+            r#"
+                function on_get(this, actor, room)
+                    local g = grid_new(3, 3, 0)
+                    g:set(2, 2, "wall")
+                    set_attr(this, "cell", g:get(2, 2))
+                    set_attr(this, "empty", g:get(1, 1))
+                    set_attr(this, "oob", g:get(99, 99) == nil)
+                    local w, h = g:size()
+                    set_attr(this, "w", w)
+                    set_attr(this, "h", h)
+                end
+            "#,
+        );
+
+        let result = runtime
+            .run_hook(
+                &world, &program, "#5", "#3", Some("#1"), None,
+                Budget::default(), counter(&world), &test_themes(),
+            )
+            .unwrap();
+
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        let obj = w.get("#5").unwrap();
+        assert_eq!(obj.attrs.get("cell").unwrap(), "wall");
+        assert_eq!(obj.attrs.get("empty").unwrap(), 0);
+        assert_eq!(obj.attrs.get("oob").unwrap(), true);
+        assert_eq!(obj.attrs.get("w").unwrap(), 3);
+        assert_eq!(obj.attrs.get("h").unwrap(), 3);
+    }
+
+    #[test]
+    fn grid_to_value_from_value_roundtrip() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let program = ProgramRecord::new(
+            "on_get",
+            r#"
+                function on_get(this, actor, room)
+                    local g = grid_new(2, 2, "floor")
+                    g:set(1, 1, "wall")
+                    set_attr(this, "grid", g:to_value())
+                end
+            "#,
+        );
+
+        let result = runtime
+            .run_hook(
+                &world, &program, "#5", "#3", Some("#1"), None,
+                Budget::default(), counter(&world), &test_themes(),
+            )
+            .unwrap();
+
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+
+        let restore_program = ProgramRecord::new(
+            "on_get",
+            r#"
+                function on_get(this, actor, room)
+                    local saved = get_attr(this, "grid")
+                    local g = grid_from_value(saved)
+                    set_attr(this, "restored", g:get(1, 1))
+                    set_attr(this, "w", g:width())
+                end
+            "#,
+        );
+
+        let result2 = runtime
+            .run_hook(
+                &w, &restore_program, "#5", "#3", Some("#1"), None,
+                Budget::default(), counter(&w), &test_themes(),
+            )
+            .unwrap();
+
+        apply_batch(&mut w, &result2.batch).unwrap();
+        let obj = w.get("#5").unwrap();
+        assert_eq!(obj.attrs.get("restored").unwrap(), "wall");
+        assert_eq!(obj.attrs.get("w").unwrap(), 2);
+    }
+
+    #[test]
+    fn grid_pathfind() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let program = ProgramRecord::new(
+            "on_get",
+            r#"
+                function on_get(this, actor, room)
+                    local g = grid_new(5, 5, "floor")
+                    g:set(2, 1, "wall")
+                    g:set(2, 2, "wall")
+                    g:set(2, 3, "wall")
+
+                    local path = g:pathfind(1, 1, 3, 1, "floor")
+                    set_attr(this, "path_len", #path)
+                    set_attr(this, "start_x", path[1].x)
+                    set_attr(this, "end_x", path[#path].x)
+
+                    local blocked = grid_new(3, 1, "wall")
+                    set_attr(this, "no_path", blocked:pathfind(1, 1, 3, 1, "floor") == nil)
+                end
+            "#,
+        );
+
+        let result = runtime
+            .run_hook(
+                &world, &program, "#5", "#3", Some("#1"), None,
+                Budget::default(), counter(&world), &test_themes(),
+            )
+            .unwrap();
+
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        let obj = w.get("#5").unwrap();
+        assert!(obj.attrs.get("path_len").unwrap().as_u64().unwrap() > 3);
+        assert_eq!(obj.attrs.get("start_x").unwrap(), 1);
+        assert_eq!(obj.attrs.get("end_x").unwrap(), 3);
+        assert_eq!(obj.attrs.get("no_path").unwrap(), true);
+    }
+
+    #[test]
+    fn grid_fill_and_find() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let program = ProgramRecord::new(
+            "on_get",
+            r#"
+                function on_get(this, actor, room)
+                    local g = grid_new(4, 4, 0)
+                    g:fill(2, 2, 3, 3, "lava")
+                    local pos = g:find("lava")
+                    set_attr(this, "fx", pos.x)
+                    set_attr(this, "fy", pos.y)
+                    local all = g:find_all("lava")
+                    set_attr(this, "count", #all)
+                    local n = g:neighbors(2, 2)
+                    set_attr(this, "neighbor_count", #n)
+                end
+            "#,
+        );
+
+        let result = runtime
+            .run_hook(
+                &world, &program, "#5", "#3", Some("#1"), None,
+                Budget::default(), counter(&world), &test_themes(),
+            )
+            .unwrap();
+
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        let obj = w.get("#5").unwrap();
+        assert_eq!(obj.attrs.get("fx").unwrap(), 2);
+        assert_eq!(obj.attrs.get("fy").unwrap(), 2);
+        assert_eq!(obj.attrs.get("count").unwrap(), 4);
+        assert_eq!(obj.attrs.get("neighbor_count").unwrap(), 4);
     }
 }

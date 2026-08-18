@@ -48,7 +48,8 @@ src/
   ansi.rs              ANSI color helpers
   config.rs            hearth.toml deserialization
   db.rs                SQLite persistence (save/load world + accounts)
-  loader.rs            Game file loader (TOML + .luau from game_dir)
+  grid.rs              Grid2D userdata — spatial grid with A*, LOS, FOV, Dijkstra
+  loader.rs            Game file loader (TOML + .luau from game_dir, lib/ modules)
   locks.rs             Lock DSL parser and evaluator
   engine/
     mod.rs             Engine loop, session state, all commands, API handler
@@ -60,7 +61,7 @@ src/
     web_client.html    Browser-based MUD client
   softcode/
     mod.rs             Intent enum, IntentBatch, Budget, SoftcodeRuntime, bytecode cache
-    api.rs             35 Luau-facing functions (read, write, predicates, utility)
+    api.rs             38 Luau-facing functions (read, write, predicates, utility, grids)
     hooks.rs           25 known hooks, ProgramRecord with persistent state
   world/
     mod.rs             World struct (objects HashMap, scripts, queries)
@@ -73,13 +74,16 @@ src/
 
 - **Everything is an object** — rooms, items, NPCs, players, exits all share `GameObject`
 - **25 hooks** — can_get, on_get, can_drop, on_drop, can_use, on_use, can_traverse, can_enter, on_enter, on_leave, can_look, on_look, can_say, on_say, can_see, on_move, on_destroy, on_connect, on_disconnect, on_whisper, on_emote, on_receive, on_damage, on_death, on_tick
-- **35 Luau API functions** — read (14), predicates (8), write (12), utility (1)
+- **38 Luau API functions** — read (14), predicates (8), write (14), utility (1), grid (1)
+- **Luau modules** — `require()` loads shared .luau files from `<game_dir>/lib/`
+- **Grid2D userdata** — Rust-backed spatial grid: get/set, A* pathfinding, LOS, FOV, Dijkstra, flood fill
 - **Lock DSL** — perm(), has_tag(), has_attr(), in_inventory(), is_kind(), time_between(), AND/OR/NOT
 - **Ticks** — 1s global heartbeat, per-object on_tick with persistent state, global scripts
 - **Visibility** — system:hidden tag + can_see hook
 - **Global commands** — system:global tag on objects makes their cmd_ hooks available everywhere
 - **File loader** — game_dir config, TOML definitions + .luau files, system:managed tag, @reload-world
 - **Bytecode cache** — compiled Luau chunks cached by source hash, invalidated on @reload-world
+- **Dungeon layout grid** — `generate_dungeon` stores a Grid2D on the entrance room (`dungeon_layout` attr)
 - **REST API** — POST /api with 17 actions (list, create, examine, set, delete, etc.)
 - **Web client** — browser-based at /play with WebSocket
 - **Player persistence** — players marked offline on disconnect, restored on reconnect
@@ -110,12 +114,14 @@ This is a breaking change that touches every file.
 
 ## Testing
 
-55 tests across: accounts (12), db round-trips (7), engine API (8),
-locks DSL (9), softcode (19).
+96 tests across: accounts (12), db round-trips (7), engine API (8),
+locks DSL (9), softcode (28), grid (14), loader (6), dungeon (4),
+theme (1), lock validator (7).
 
 ```sh
 cargo test                    # all
 cargo test softcode           # softcode only
+cargo test grid               # grid + pathfinding
 cargo test engine             # API tests
 cargo test locks              # lock DSL
 ```
@@ -140,5 +146,14 @@ the-last-stag-mud/
       cmd_attack.luau          — troupe member attacks
       cmd_endturn.luau         — monster phase resolution
       cmd_status.luau          — combat status display
+    lib/                      — shared Luau modules (loaded via require())
+      text.luau               — rich formatting with accessible/visual modes
+      str.luau                — string utilities (split, trim, wrap, etc.)
+      collections.luau        — Set, Array helpers
+      random.luau             — dice, weighted choice, shuffle
+      state_machine.luau      — synchronous FSM
+      signal.luau             — pub/sub signals (adapted from luau-signal)
+      grids.luau              — Grid3D entry point (Grid2D is Rust-side)
+      Grid3D.luau             — 3D grid (from luau-grids)
   docs/                       — game design docs from original prototype
 ```

@@ -147,6 +147,58 @@ end
 
 `state` is a persistent table — values survive between ticks. Set `tick_interval` attr on the object to control frequency (default: every tick, i.e. every second).
 
+## Modules (require)
+
+Shared Luau code in `<game_dir>/lib/*.luau` is loaded with `require("name")`. Modules return a table, can require other modules, and are cached until `@reload-world`. Modules have stdlib + require but **not** the write API.
+
+Bundled modules: `random` (dice, weighted, shuffle), `collections` (Set, Array helpers), `state_machine` (sync FSM), `signal` (pub/sub), `Grid3D` (3D grid), `text` (rich formatting with accessible mode), `str` (string utilities).
+
+### text module — accessible-aware formatting
+
+```lua
+local text = require("text")
+local fmt = text.for_mode(get_attr(actor, "_display_mode") or "visual")
+
+emit(actor, fmt.header("Combat Status"))
+emit(actor, fmt.bar(hp, max_hp, 20, "HP"))
+emit(actor, fmt.stat("Defense", 12, "cyan"))
+emit(actor, fmt.table(rows, {"Name", "HP", "Class"}))
+emit(actor, fmt.divider(40))
+emit(actor, fmt.box({"Line 1", "Line 2"}))
+emit(actor, fmt.bold("Important!"))
+emit(actor, fmt.color("danger", "red"))
+```
+
+Visual mode uses ANSI colors, box-drawing, Unicode bars. Accessible mode uses plain text (screen-reader friendly). Players toggle with `@display accessible` / `@display visual`.
+
+### str module — string utilities
+
+`split`, `trim`, `starts_with`, `ends_with`, `title_case`, `pad_right`, `pad_left`, `center`, `truncate`, `pluralize`, `wrap`.
+
+## Grid2D (Rust-side globals)
+
+Rust-backed spatial grid — operations don't consume instruction budget.
+
+```lua
+local g = grid_new(10, 10, "floor")       -- constructor
+local g = grid_from_value(saved_table)    -- deserialize from attr
+
+g:get(x, y)                              -- read cell (1-indexed, nil if OOB)
+g:set(x, y, value)                       -- write cell
+g:width() / g:height() / g:size()        -- dimensions
+g:fill(x1, y1, x2, y2, value)           -- rectangle fill
+g:to_value()                             -- serialize for set_attr()
+g:find(value) / g:find_all(value)        -- spatial search
+g:neighbors(x, y)                        -- 4 cardinal {{x, y, value}, ...}
+g:pathfind(x1, y1, x2, y2, walkable)    -- A* → {{x,y}, ...} or nil
+g:has_los(x1, y1, x2, y2, blocking)     -- Bresenham LOS (bool)
+g:fov(x, y, radius, blocking)           -- shadowcast FOV {{x,y}, ...}
+g:distance_map(x, y, walkable)          -- Dijkstra → new Grid2D of distances
+g:flood_fill(x, y, old, new)            -- fill connected region → count
+```
+
+`generate_dungeon` stores a layout grid on the entrance room (`dungeon_layout` attr) mapping grid positions to room refs.
+
 ## Read API (14 functions)
 
 All accept either an object table or a ref string (`"#5"`).
@@ -181,7 +233,7 @@ All accept either an object table or a ref string (`"#5"`).
 | `is_carrying(actor, "cat:key")` | Actor has item with tag |
 | `same_room(a, b)` | Both in same location |
 
-## Write API (12 functions)
+## Write API (14 functions)
 
 All queue Intents — nothing happens until the script returns and the batch applies.
 
@@ -199,6 +251,8 @@ All queue Intents — nothing happens until the script returns and the batch app
 | `set_description(ref, desc)` | Change description |
 | `destroy(ref)` | Remove object (not players) |
 | `trigger(ref, hook)` | Fire a hook on another object |
+| `set_program(ref, hook, source)` | Attach a Luau program to an object |
+| `prompt(actor, obj, hook)` | Set up interactive prompt |
 
 ## Utility
 
@@ -311,14 +365,19 @@ This pattern works for any complex state — attrs can hold tables, not just sca
 
 ```
 world/
+  lib/                   — shared modules (loaded via require())
+    random.luau          — dice, weighted choice, shuffle
+    collections.luau     — Set, Array helpers
+    state_machine.luau   — synchronous FSM
+    signal.luau          — pub/sub signals
   town/
-    town.toml          — area definition
-    barkeep_talk.luau   — referenced by town.toml programs
+    town.toml            — area definition
+    barkeep_talk.luau    — referenced by town.toml programs
   forest/
     forest.toml
   system/
-    system.toml        — global objects (system:global tag)
-    cmd_fight.luau     — game-wide commands
+    system.toml          — global objects (system:global tag)
+    cmd_fight.luau       — game-wide commands
 ```
 
-Keep `.luau` files next to the `.toml` that references them. The `file` path in programs is relative to the TOML file's directory.
+Keep `.luau` files next to the `.toml` that references them. The `file` path in programs is relative to the TOML file's directory. Shared utility code goes in `lib/` and is loaded with `require("name")`.

@@ -694,6 +694,13 @@ pub fn install<'scope, 'env>(
                 b.borrow_mut().push(intent);
             }
 
+            // Store the layout grid on the entrance room.
+            b.borrow_mut().push(Intent::SetAttr {
+                target: result.entrance_ref.clone(),
+                key: "dungeon_layout".into(),
+                value: result.layout.to_json(),
+            });
+
             Ok(result.entrance_ref)
         })?,
     )?;

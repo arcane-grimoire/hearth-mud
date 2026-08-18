@@ -146,11 +146,14 @@ impl Engine {
         // Always load/reload game files — new content is created,
         // managed content is updated, non-managed content is untouched.
         let mut key_map: HashMap<String, String> = HashMap::new();
+        let softcode = SoftcodeRuntime::new();
         if let Some(game_dir) = &config.game_dir {
-            match crate::loader::load_game_dir(std::path::Path::new(game_dir), &mut world) {
+            let game_path = std::path::Path::new(game_dir);
+            match crate::loader::load_game_dir(game_path, &mut world) {
                 Ok(map) => key_map = map,
                 Err(e) => tracing::error!(error = %e, "Failed to load game content"),
             }
+            softcode.load_modules(crate::loader::load_modules(game_path));
         }
 
         // Resolve the spawn room to a dbref, creating a fallback room if
@@ -179,7 +182,7 @@ impl Engine {
             accounts,
             sessions: HashMap::new(),
             db,
-            softcode: SoftcodeRuntime::new(),
+            softcode,
             rx,
             tick_count: 0,
             tick_secs: config.tick_secs,
@@ -1072,6 +1075,8 @@ impl Engine {
             "@shutdown" => self.cmd_shutdown(session_id),
             "@reload-world" => self.cmd_reload_world(session_id),
             "@reload" => self.cmd_reload(session_id, &actor_ref, &args),
+
+            "@display" => self.cmd_display(&actor_ref, &args),
 
             "help" | "?" => {
                 let is_builder = self.session_has_scope(session_id, Scope::Builder);
@@ -2164,11 +2169,12 @@ impl Engine {
             Some(g) => g.clone(),
             None => return "No game_dir configured.\r\n".to_string(),
         };
+        let game_path = std::path::Path::new(&game_dir);
         self.softcode.invalidate_cache();
-        match crate::loader::load_game_dir(std::path::Path::new(&game_dir), &mut self.world) {
+        self.softcode
+            .load_modules(crate::loader::load_modules(game_path));
+        match crate::loader::load_game_dir(game_path, &mut self.world) {
             Ok(key_map) => {
-                // Re-resolve the spawn room in case it appeared (or moved)
-                // in this reload.
                 if let Some(ref_id) = key_map.get(&self.spawn_room) {
                     self.spawn_room_ref = ref_id.clone();
                 }
@@ -2200,6 +2206,42 @@ impl Engine {
         }
         program.enabled = true;
         format!("Program {}/{} reloaded and enabled.\r\n", target_ref, hook)
+    }
+
+    fn cmd_display(&mut self, actor_ref: &str, args: &str) -> String {
+        let arg = args.trim().to_lowercase();
+        let obj = match self.world.get_mut(actor_ref) {
+            Some(o) => o,
+            None => return "No player object.\r\n".to_string(),
+        };
+        match arg.as_str() {
+            "accessible" | "a11y" | "screenreader" => {
+                obj.attrs.insert(
+                    "_display_mode".into(),
+                    serde_json::json!("accessible"),
+                );
+                "Display mode set to accessible. Formatting simplified for screen readers.\r\n"
+                    .to_string()
+            }
+            "visual" | "default" | "" => {
+                obj.attrs.insert(
+                    "_display_mode".into(),
+                    serde_json::json!("visual"),
+                );
+                "Display mode set to visual.\r\n".to_string()
+            }
+            _ => {
+                let current = obj
+                    .attrs
+                    .get("_display_mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("visual");
+                format!(
+                    "Current mode: {}\r\nUsage: @display visual | @display accessible\r\n",
+                    current
+                )
+            }
+        }
     }
 
     // -- Hook-aware gameplay commands --
@@ -2346,6 +2388,13 @@ impl Engine {
     }
 
     fn do_move(&mut self, actor_ref: &str, exit_ref: &str, target_ref: &str) -> String {
+        if let Some(msg) = self.world.get(actor_ref)
+            .and_then(|a| a.attrs.get("movement_blocked"))
+        {
+            let reason = msg.as_str().unwrap_or("You can't move right now.");
+            return format!("{}\r\n", reason);
+        }
+
         let old_room = self
             .world
             .get(actor_ref)

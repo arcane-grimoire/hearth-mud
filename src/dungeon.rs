@@ -45,6 +45,7 @@ pub struct ZoneConfig {
 pub struct DungeonResult {
     pub entrance_ref: String,
     pub intents: Vec<Intent>,
+    pub layout: crate::grid::Grid2D,
 }
 
 /// Hash an arbitrary string seed down to a u64 via the stdlib's
@@ -130,6 +131,7 @@ function on_enter(this, actor, room)
     set_attr(actor, "combat_monsters", monsters)
     set_attr(actor, "combat_acted", {})
     set_attr(actor, "combat_room", actor.location_ref)
+    set_attr(actor, "movement_blocked", "You can't move while in combat!")
 
     emit(actor, "")
     emit(actor, "Enemies emerge from the shadows!")
@@ -173,13 +175,13 @@ struct Reps {
 /// Build a BSP layout of exactly `room_count` rooms (>= 1), returning the
 /// spanning-tree edges that connect them as
 /// `(room_a_index, room_b_index, direction_from_a_to_b)`.
-fn bsp_layout(room_count: usize, rng: &mut StdRng) -> Vec<(usize, usize, &'static str)> {
+fn bsp_layout(room_count: usize, rng: &mut StdRng) -> (Vec<(usize, usize, &'static str)>, Vec<Rect>) {
     let mut room_rects: Vec<Rect> = Vec::with_capacity(room_count);
     let mut next_idx = 0usize;
     let mut edges = Vec::new();
     let root = Rect { x1: 0, y1: 0, x2: 1000, y2: 1000 };
     build_bsp(root, room_count, 0, rng, &mut next_idx, &mut room_rects, &mut edges);
-    edges
+    (edges, room_rects)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -348,6 +350,7 @@ pub fn generate(
     let mut entrance_ref: Option<String> = None;
     let mut prev_zone_last_room: Option<String> = None;
     let zone_count_total = zones.len();
+    let mut room_positions: Vec<(String, i64, i64)> = Vec::new();
 
     for (zi, zone) in zones.iter().enumerate() {
         let theme = &themes[&zone.theme_name];
@@ -363,7 +366,7 @@ pub fn generate(
             rng.gen_range(zone.room_count_min..=zone.room_count_max)
         }) as usize;
 
-        let edges = bsp_layout(room_count, &mut rng);
+        let (edges, room_rects) = bsp_layout(room_count, &mut rng);
 
         let room_refs: Vec<String> = (0..room_count).map(|_| alloc(&mut next_ref)).collect();
         let zone_entrance = room_refs[0].clone();
@@ -492,6 +495,14 @@ pub fn generate(
             });
         }
 
+        // Track room positions for the layout grid.
+        let zone_y_offset = zi as i64 * 1100;
+        for (i, rect) in room_rects.iter().enumerate() {
+            let cx = (rect.x1 + rect.x2) / 2;
+            let cy = (rect.y1 + rect.y2) / 2 + zone_y_offset;
+            room_positions.push((room_refs[i].clone(), cx, cy));
+        }
+
         // Corridors within the zone, from the BSP spanning tree.
         for (a, b, dir) in edges {
             intents.push(Intent::CreateExit {
@@ -532,10 +543,41 @@ pub fn generate(
         prev_zone_last_room = Some(zone_last);
     }
 
+    // Build a layout grid from room positions.
+    let layout = build_layout_grid(&room_positions);
+
     Ok(DungeonResult {
         entrance_ref: entrance_ref.ok_or_else(|| "generate_dungeon: no rooms generated".to_string())?,
         intents,
+        layout,
     })
+}
+
+fn build_layout_grid(positions: &[(String, i64, i64)]) -> crate::grid::Grid2D {
+    if positions.is_empty() {
+        return crate::grid::Grid2D::new(1, 1, serde_json::Value::Null);
+    }
+
+    let min_x = positions.iter().map(|(_, x, _)| *x).min().unwrap();
+    let max_x = positions.iter().map(|(_, x, _)| *x).max().unwrap();
+    let min_y = positions.iter().map(|(_, _, y)| *y).min().unwrap();
+    let max_y = positions.iter().map(|(_, _, y)| *y).max().unwrap();
+
+    let span_x = (max_x - min_x).max(1);
+    let span_y = (max_y - min_y).max(1);
+
+    let grid_w = (positions.len() as f64).sqrt().ceil().max(3.0) as usize * 2 + 1;
+    let grid_h = ((positions.len() as f64 * span_y as f64 / span_x as f64).sqrt().ceil().max(3.0) as usize) * 2 + 1;
+
+    let mut grid = crate::grid::Grid2D::new(grid_w, grid_h, serde_json::Value::Null);
+
+    for (ref_id, px, py) in positions {
+        let gx = (((*px - min_x) as f64 / span_x as f64) * (grid_w - 1) as f64).round() as usize + 1;
+        let gy = (((*py - min_y) as f64 / span_y as f64) * (grid_h - 1) as f64).round() as usize + 1;
+        grid.set_cell(gx, gy, serde_json::json!(ref_id));
+    }
+
+    grid
 }
 
 #[cfg(test)]
