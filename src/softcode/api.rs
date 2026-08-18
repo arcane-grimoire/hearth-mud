@@ -551,5 +551,25 @@ pub fn install<'scope, 'env>(
         })?,
     )?;
 
+    let b = Rc::clone(&batch);
+    env.set(
+        "prompt",
+        scope.create_function(move |_, (actor, obj, hook): (Value, Value, String)| {
+            let actor_ref = ref_of(&actor)?;
+            let obj_ref = ref_of(&obj)?;
+            b.borrow_mut().push(Intent::SetAttr {
+                target: actor_ref.clone(),
+                key: "_prompt_object".into(),
+                value: serde_json::Value::String(obj_ref),
+            });
+            b.borrow_mut().push(Intent::SetAttr {
+                target: actor_ref,
+                key: "_prompt_hook".into(),
+                value: serde_json::Value::String(hook),
+            });
+            Ok(())
+        })?,
+    )?;
+
     Ok(())
 }

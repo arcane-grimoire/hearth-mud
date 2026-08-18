@@ -962,6 +962,31 @@ impl Engine {
             _ => return,
         };
 
+        // Check for pending prompt — intercept input before command dispatch
+        if let Some(actor) = self.world.get(&actor_ref) {
+            let prompt_obj = actor.attrs.get("_prompt_object").and_then(|v| v.as_str()).map(String::from);
+            let prompt_hook = actor.attrs.get("_prompt_hook").and_then(|v| v.as_str()).map(String::from);
+            if let (Some(obj_ref), Some(hook)) = (prompt_obj, prompt_hook) {
+                // Clear the prompt attrs before firing the hook
+                if let Some(actor) = self.world.get_mut(&actor_ref) {
+                    actor.attrs.remove("_prompt_object");
+                    actor.attrs.remove("_prompt_hook");
+                }
+                let room_ref = self.world.get(&actor_ref).and_then(|o| o.location_ref.clone());
+                let output = match self.fire_hook(&obj_ref, &hook, &actor_ref, room_ref.as_deref(), Some(input)) {
+                    Ok(_) => String::new(),
+                    Err(e) => {
+                        tracing::warn!(hook = %hook, target = %obj_ref, error = %e, "prompt callback error");
+                        "Something goes wrong.\r\n".to_string()
+                    }
+                };
+                if !output.is_empty() {
+                    self.send(session_id, &output);
+                }
+                return;
+            }
+        }
+
         let (cmd, args) = match input.split_once(' ') {
             Some((c, a)) => (c.to_lowercase(), a.trim().to_string()),
             None => (input.to_lowercase(), String::new()),
@@ -2372,6 +2397,21 @@ impl Engine {
         }
         if let Some(actor) = self.world.get_mut(actor_ref) {
             actor.location_ref = Some(target_ref.to_string());
+        }
+
+        // Move followers (troupe members tagged troupe:<actor_ref>)
+        let troupe_tag = crate::world::Tag {
+            category: "troupe".to_string(),
+            key: actor_ref.to_string(),
+        };
+        let followers: Vec<String> = self.world.objects.values()
+            .filter(|o| o.tags.contains(&troupe_tag))
+            .map(|o| o.ref_id.clone())
+            .collect();
+        for ref_id in followers {
+            if let Some(obj) = self.world.get_mut(&ref_id) {
+                obj.location_ref = Some(target_ref.to_string());
+            }
         }
 
         // Fire on_move on the actor
