@@ -44,11 +44,12 @@ pub const KNOWN_HOOKS: &[&str] = &[
 
 /// Whether `name` is a hook the engine will accept on `@program`.
 ///
-/// Any `can_`, `on_` hook must be one of [`KNOWN_HOOKS`]. Any `cmd_`-prefixed
-/// name is accepted unconditionally — that's how new player commands get
-/// added to the game without touching engine code.
+/// Any `can_` hook must be one of [`KNOWN_HOOKS`]. `on_` and `cmd_`-prefixed
+/// names are open-ended — `on_reply`, `on_buy`, `cmd_talk` are all valid.
 pub fn is_valid_hook_name(name: &str) -> bool {
-    KNOWN_HOOKS.contains(&name) || (name.starts_with("cmd_") && name.len() > 4)
+    KNOWN_HOOKS.contains(&name)
+        || (name.starts_with("cmd_") && name.len() > 4)
+        || (name.starts_with("on_") && name.len() > 3)
 }
 
 /// A short human-readable description of a hook, for `@programs` output and
