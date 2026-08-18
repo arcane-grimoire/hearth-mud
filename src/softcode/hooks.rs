@@ -40,6 +40,11 @@ pub const KNOWN_HOOKS: &[&str] = &[
     "on_damage",
     "on_death",
     "on_tick",
+    "on_startup",
+    "on_shutdown",
+    "on_reload",
+    "on_save",
+    "on_create",
 ];
 
 /// Whether `name` is a hook the engine will accept on `@program`.
@@ -81,6 +86,11 @@ pub fn describe_hook(name: &str) -> &'static str {
         "on_damage" => "runs when this object takes damage",
         "on_death" => "runs when this object dies",
         "on_tick" => "runs every N ticks (set tick_interval attr)",
+        "on_startup" => "runs once when the engine starts",
+        "on_shutdown" => "runs once when the engine is shutting down",
+        "on_reload" => "runs after @reload-world completes",
+        "on_save" => "runs before each world save (autosave or manual)",
+        "on_create" => "runs when this object is first created at runtime",
         _ => "a custom player command (cmd_<name>)",
     }
 }

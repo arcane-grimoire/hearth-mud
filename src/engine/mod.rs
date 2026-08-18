@@ -197,6 +197,8 @@ impl Engine {
     pub async fn run(mut self) {
         tracing::info!("Engine started");
 
+        self.fire_lifecycle_hook("on_startup");
+
         let mut tick_interval =
             tokio::time::interval(std::time::Duration::from_secs(self.tick_secs));
         let mut autosave_interval =
@@ -238,7 +240,8 @@ impl Engine {
             }
         }
 
-        tracing::info!("Engine shutting down, saving world...");
+        tracing::info!("Engine shutting down...");
+        self.fire_lifecycle_hook("on_shutdown");
         self.do_save();
     }
 
@@ -314,50 +317,7 @@ impl Engine {
     }
 
     fn fire_tick_hook(&mut self, this_ref: &str) -> Result<(), String> {
-        let program = match self
-            .world
-            .get(this_ref)
-            .and_then(|o| hooks::get_program(o, "on_tick"))
-        {
-            Some(p) => p.clone(),
-            None => return Ok(()),
-        };
-
-        let room_ref = self
-            .world
-            .get(this_ref)
-            .and_then(|o| o.location_ref.clone());
-
-        let dbref_counter = Rc::new(Cell::new(self.world.next_id));
-        let result = self
-            .softcode
-            .run_hook(
-                &self.world,
-                &program,
-                this_ref,
-                this_ref,
-                room_ref.as_deref(),
-                None,
-                Budget::default(),
-                Rc::clone(&dbref_counter),
-                &self.themes,
-            )
-            .map_err(|e| e.to_string())?;
-
-        let effects = softcode::apply_batch(&mut self.world, &result.batch)?;
-        self.world.next_id = dbref_counter.get();
-        self.deliver_effects(&effects, this_ref);
-
-        // Write state back
-        if !result.state.is_empty() {
-            if let Some(obj) = self.world.get_mut(this_ref) {
-                if let Some(prog) = obj.programs.get_mut("on_tick") {
-                    prog.state = result.state;
-                }
-            }
-        }
-
-        Ok(())
+        self.fire_tick_hook_named(this_ref, "on_tick")
     }
 
     fn fire_global_script(&mut self, name: &str) -> Result<(), String> {
@@ -392,7 +352,90 @@ impl Engine {
         Ok(())
     }
 
-    fn do_save(&self) {
+    fn fire_lifecycle_hook(&mut self, hook_name: &str) {
+        let refs: Vec<String> = self
+            .world
+            .objects
+            .values()
+            .filter(|obj| hooks::get_program(obj, hook_name).is_some())
+            .map(|obj| obj.ref_id.clone())
+            .collect();
+        let mut ran = 0u32;
+        for ref_id in &refs {
+            match self.fire_tick_hook_named(ref_id, hook_name) {
+                Ok(()) => ran += 1,
+                Err(e) => {
+                    tracing::warn!(hook = hook_name, target = %ref_id, error = %e, "Lifecycle hook error");
+                }
+            }
+        }
+        if ran > 0 {
+            tracing::info!(hook = hook_name, ran, "Lifecycle hooks fired");
+        }
+    }
+
+    fn fire_on_create(&mut self, ref_id: &str) {
+        if self
+            .world
+            .get(ref_id)
+            .and_then(|o| hooks::get_program(o, "on_create"))
+            .is_none()
+        {
+            return;
+        }
+        if let Err(e) = self.fire_tick_hook_named(ref_id, "on_create") {
+            tracing::warn!(hook = "on_create", target = %ref_id, error = %e, "on_create hook error");
+        }
+    }
+
+    fn fire_tick_hook_named(&mut self, this_ref: &str, hook_name: &str) -> Result<(), String> {
+        let program = match self
+            .world
+            .get(this_ref)
+            .and_then(|o| hooks::get_program(o, hook_name))
+        {
+            Some(p) => p.clone(),
+            None => return Ok(()),
+        };
+
+        let room_ref = self
+            .world
+            .get(this_ref)
+            .and_then(|o| o.location_ref.clone());
+
+        let dbref_counter = Rc::new(Cell::new(self.world.next_id));
+        let result = self
+            .softcode
+            .run_hook(
+                &self.world,
+                &program,
+                this_ref,
+                this_ref,
+                room_ref.as_deref(),
+                None,
+                Budget::default(),
+                Rc::clone(&dbref_counter),
+                &self.themes,
+            )
+            .map_err(|e| e.to_string())?;
+
+        let effects = softcode::apply_batch(&mut self.world, &result.batch)?;
+        self.world.next_id = dbref_counter.get();
+        self.deliver_effects(&effects, this_ref);
+
+        if !result.state.is_empty() {
+            if let Some(obj) = self.world.get_mut(this_ref) {
+                if let Some(prog) = obj.programs.get_mut(hook_name) {
+                    prog.state = result.state;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn do_save(&mut self) {
+        self.fire_lifecycle_hook("on_save");
         match self.db.save_world(&self.world) {
             Ok(()) => tracing::info!(
                 objects = self.world.objects.len(),
@@ -450,6 +493,7 @@ impl Engine {
                     room.description = desc;
                 }
                 self.world.add_object(room);
+                self.fire_on_create(&ref_id);
                 ApiResponse::success(serde_json::json!({ "ref_id": ref_id }))
             }
             ApiRequest::CreateObject { area: _area, key, kind, title, description, location } => {
@@ -463,6 +507,7 @@ impl Engine {
                 if let Some(d) = description { obj.description = d; }
                 if let Some(loc) = location { obj = obj.with_location(loc); }
                 self.world.add_object(obj);
+                self.fire_on_create(&ref_id);
                 ApiResponse::success(serde_json::json!({ "ref_id": ref_id }))
             }
             ApiRequest::CreateExit { source, direction, target, aliases } => {
@@ -480,6 +525,7 @@ impl Engine {
                     exit.aliases = al.into_iter().collect();
                 }
                 self.world.add_object(exit);
+                self.fire_on_create(&ref_id);
                 ApiResponse::success(serde_json::json!({ "ref_id": ref_id }))
             }
             ApiRequest::Examine { ref_id } => {
@@ -903,6 +949,7 @@ impl Engine {
                 .with_description("A traveler.")
                 .with_location(&spawn_room_ref);
             self.world.add_object(player);
+            self.fire_on_create(&ref_id);
             if let Some(account) = self.accounts.get_mut(account_id) {
                 account.character_ref = Some(ref_id.clone());
             }
@@ -1104,6 +1151,7 @@ impl Engine {
         let ref_id = self.world.next_dbref();
         let room = GameObject::new(&ref_id, &key, Kind::Room).with_title(title);
         self.world.add_object(room);
+        self.fire_on_create(&ref_id);
         format!("Room created: {} ({})\r\n", title, ref_id)
     }
 
@@ -1138,6 +1186,7 @@ impl Engine {
             .with_location(&room_ref)
             .with_target(&target);
         self.world.add_object(exit);
+        self.fire_on_create(&exit_ref);
         format!("Exit '{}' created from {} to {}.\r\n", direction, room_ref, target)
     }
 
@@ -1201,6 +1250,7 @@ impl Engine {
             .with_title(title)
             .with_location(&room_ref);
         self.world.add_object(item);
+        self.fire_on_create(&ref_id);
         format!("Created {} ({}).\r\n", title, ref_id)
     }
 
@@ -1775,7 +1825,7 @@ impl Engine {
         "Message sent to all players.\r\n".to_string()
     }
 
-    fn cmd_save(&self, session_id: &str) -> String {
+    fn cmd_save(&mut self, session_id: &str) -> String {
         if !self.session_has_scope(session_id, Scope::Admin) {
             return "Permission denied.\r\n".to_string();
         }
@@ -2178,6 +2228,7 @@ impl Engine {
                 if let Some(ref_id) = key_map.get(&self.spawn_room) {
                     self.spawn_room_ref = ref_id.clone();
                 }
+                self.fire_lifecycle_hook("on_reload");
                 "World reloaded from files. Script cache cleared.\r\n".to_string()
             }
             Err(e) => format!("Reload error: {}\r\n", e),

@@ -273,6 +273,10 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                     .with_target(target);
                 exit.aliases = aliases.iter().cloned().collect();
                 world.add_object(exit);
+                effects.push(Effect::TriggerHook {
+                    target: ref_id.clone(),
+                    hook: "on_create".to_string(),
+                });
             }
             Intent::SetProgram { target, hook, source } => {
                 let obj = world

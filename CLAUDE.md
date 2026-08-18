@@ -62,7 +62,7 @@ src/
   softcode/
     mod.rs             Intent enum, IntentBatch, Budget, SoftcodeRuntime, bytecode cache
     api.rs             38 Luau-facing functions (read, write, predicates, utility, grids)
-    hooks.rs           25 known hooks, ProgramRecord with persistent state
+    hooks.rs           30 known hooks, ProgramRecord with persistent state
   world/
     mod.rs             World struct (objects HashMap, scripts, queries)
     object.rs          GameObject, Kind enum (Room/Item/Npc/Player/Exit)
@@ -73,7 +73,7 @@ src/
 ## Key features
 
 - **Everything is an object** — rooms, items, NPCs, players, exits all share `GameObject`
-- **25 hooks** — can_get, on_get, can_drop, on_drop, can_use, on_use, can_traverse, can_enter, on_enter, on_leave, can_look, on_look, can_say, on_say, can_see, on_move, on_destroy, on_connect, on_disconnect, on_whisper, on_emote, on_receive, on_damage, on_death, on_tick
+- **30 hooks** — can_get, on_get, can_drop, on_drop, can_use, on_use, can_traverse, can_enter, on_enter, on_leave, can_look, on_look, can_say, on_say, can_see, on_move, on_destroy, on_connect, on_disconnect, on_whisper, on_emote, on_receive, on_damage, on_death, on_tick, on_startup, on_shutdown, on_reload, on_save, on_create
 - **38 Luau API functions** — read (14), predicates (8), write (14), utility (1), grid (1)
 - **Luau modules** — `require()` loads shared .luau files from `<game_dir>/lib/`
 - **Grid2D userdata** — Rust-backed spatial grid: get/set, A* pathfinding, LOS, FOV, Dijkstra, flood fill

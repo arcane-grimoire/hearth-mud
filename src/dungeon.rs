@@ -543,6 +543,17 @@ pub fn generate(
         prev_zone_last_room = Some(zone_last);
     }
 
+    // Exit from dungeon entrance back to the overworld.
+    if let Some(ref ent) = entrance_ref {
+        intents.push(Intent::CreateExit {
+            ref_id: alloc(&mut next_ref),
+            source: ent.clone(),
+            direction: "out".into(),
+            target: anchor_ref.to_string(),
+            aliases: vec!["leave".into(), "exit".into()],
+        });
+    }
+
     // Build a layout grid from room positions.
     let layout = build_layout_grid(&room_positions);
 
