@@ -2,11 +2,13 @@ mod accounts;
 mod ansi;
 mod config;
 mod db;
+mod dungeon;
 mod loader;
 mod engine;
 mod locks;
 mod net;
 mod softcode;
+mod theme;
 mod world;
 
 use std::path::Path;

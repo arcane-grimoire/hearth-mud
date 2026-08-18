@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use mlua::{Lua, LuaSerdeExt, Value as LuaValue, VmState};
 
+use crate::theme::Theme;
 use crate::world::{GameObject, Kind, Tag, World};
 use hooks::ProgramRecord;
 
@@ -72,6 +73,18 @@ pub enum Intent {
     },
     Destroy {
         target: String,
+    },
+    CreateExit {
+        ref_id: String,
+        source: String,
+        direction: String,
+        target: String,
+        aliases: Vec<String>,
+    },
+    SetProgram {
+        target: String,
+        hook: String,
+        source: String,
     },
     Trigger {
         target: String,
@@ -244,6 +257,29 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                     }
                     None => return Err(format!("destroy: no object '{}'", target)),
                 }
+            }
+            Intent::CreateExit { ref_id, source, direction, target, aliases } => {
+                if world.get(ref_id).is_some() {
+                    return Err(format!("create_exit: ref '{}' already exists", ref_id));
+                }
+                if world.get(source).is_none() {
+                    return Err(format!("create_exit: no source room '{}'", source));
+                }
+                if world.get(target).is_none() {
+                    return Err(format!("create_exit: no target room '{}'", target));
+                }
+                let mut exit = GameObject::new(ref_id, direction, Kind::Exit)
+                    .with_location(source)
+                    .with_target(target);
+                exit.aliases = aliases.iter().cloned().collect();
+                world.add_object(exit);
+            }
+            Intent::SetProgram { target, hook, source } => {
+                let obj = world
+                    .get_mut(target)
+                    .ok_or_else(|| format!("set_program: no object '{}'", target))?;
+                crate::softcode::hooks::set_program(obj, hook, source.clone())
+                    .map_err(|e| format!("set_program: {}", e))?;
             }
             Intent::Trigger { target, hook } => {
                 if world.get(target).is_none() {
@@ -419,6 +455,7 @@ impl SoftcodeRuntime {
         args: Option<&str>,
         budget: Budget,
         dbref_counter: Rc<Cell<u64>>,
+        themes: &HashMap<String, Theme>,
     ) -> Result<ProgramResult, SoftcodeError> {
         self.install_budget(budget);
         let batch = Rc::new(RefCell::new(IntentBatch::default()));
@@ -443,6 +480,7 @@ impl SoftcodeRuntime {
                 Rc::clone(&batch),
                 default_location.clone(),
                 Rc::clone(&dbref_counter),
+                themes,
             )?;
 
             let compiled = self.get_or_compile(&program.source, &program.hook)
@@ -515,6 +553,7 @@ impl SoftcodeRuntime {
     }
 
     /// Run a global script — no `this` object, just `(state)`.
+    #[allow(clippy::too_many_arguments)]
     pub fn run_global_script(
         &self,
         world: &World,
@@ -523,6 +562,7 @@ impl SoftcodeRuntime {
         state: &HashMap<String, serde_json::Value>,
         budget: Budget,
         dbref_counter: Rc<Cell<u64>>,
+        themes: &HashMap<String, Theme>,
     ) -> Result<ProgramResult, SoftcodeError> {
         self.install_budget(budget);
         let batch = Rc::new(RefCell::new(IntentBatch::default()));
@@ -541,6 +581,7 @@ impl SoftcodeRuntime {
                 Rc::clone(&batch),
                 None,
                 Rc::clone(&dbref_counter),
+                themes,
             )?;
 
             let compiled = self.get_or_compile(source, entry)
@@ -610,6 +651,12 @@ mod tests {
     /// `run_hook`/`run_global_script` in production.
     fn counter(world: &World) -> Rc<Cell<u64>> {
         Rc::new(Cell::new(world.next_id))
+    }
+
+    /// Empty theme map — plenty for tests that don't touch dungeon
+    /// generation.
+    fn test_themes() -> HashMap<String, Theme> {
+        HashMap::new()
     }
 
     // test_world() creates objects in this fixed order, so dbrefs are
@@ -695,6 +742,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
+                &test_themes(),
             )
             .expect("hook should run");
 
@@ -737,6 +785,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
+                &test_themes(),
             )
             .expect("hook should run");
 
@@ -768,6 +817,7 @@ mod tests {
                 Some("the button"),
                 Budget::default(),
                 counter(&world),
+                &test_themes(),
             )
             .expect("hook should run");
 
@@ -806,6 +856,7 @@ mod tests {
                 None,
                 Budget::new(1000),
                 counter(&world),
+                &test_themes(),
             )
             .expect_err("infinite loop should hit budget");
 
@@ -839,6 +890,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
+                &test_themes(),
             )
             .unwrap();
         let result_b = runtime
@@ -851,6 +903,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
+                &test_themes(),
             )
             .unwrap();
 
@@ -896,6 +949,7 @@ mod tests {
                 Some(""),
                 Budget::default(),
                 counter(&world),
+                &test_themes(),
             )
             .unwrap();
 
@@ -916,7 +970,7 @@ mod tests {
         let runtime = SoftcodeRuntime::new();
         let program = ProgramRecord::new("on_get", source);
         runtime
-            .run_hook(world, &program, "#5", "#3", Some("#1"), None, Budget::default(), counter(world))
+            .run_hook(world, &program, "#5", "#3", Some("#1"), None, Budget::default(), counter(world), &test_themes())
             .expect("script should run")
     }
 
@@ -1108,5 +1162,176 @@ mod tests {
                 log("debug: sword picked up by " .. actor.display_name)
             end
         "#);
+    }
+
+    #[test]
+    fn create_exit_creates_a_traversable_exit() {
+        let world = test_world();
+        let result = run_script(&world, r##"
+            function on_get(this, actor, room)
+                local ref = create_exit({ source = "#1", direction = "south", target = "#2" })
+                set_attr(this, "new_exit", ref)
+            end
+        "##);
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        let exit_ref = w.get("#5").unwrap().attrs["new_exit"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let exit = w.get(&exit_ref).unwrap();
+        assert_eq!(exit.key, "south");
+        assert_eq!(exit.location_ref.as_deref(), Some("#1"));
+        assert_eq!(exit.target_ref.as_deref(), Some("#2"));
+    }
+
+    #[test]
+    fn create_exit_rejects_missing_rooms() {
+        let world = test_world();
+        let result = run_script(&world, r##"
+            function on_get(this, actor, room)
+                create_exit({ source = "#1", direction = "south", target = "#999" })
+            end
+        "##);
+        let mut w = world.clone();
+        assert!(apply_batch(&mut w, &result.batch).is_err());
+    }
+
+    #[test]
+    fn set_program_attaches_a_program() {
+        let world = test_world();
+        let result = run_script(&world, r##"
+            function on_get(this, actor, room)
+                set_program("#2", "on_look", "function on_look(this, actor, room) end")
+            end
+        "##);
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        assert!(w.get("#2").unwrap().programs.contains_key("on_look"));
+    }
+
+    #[test]
+    fn set_program_rejects_unknown_hook() {
+        let world = test_world();
+        let result = run_script(&world, r##"
+            function on_get(this, actor, room)
+                set_program("#2", "not_a_real_hook", "return true")
+            end
+        "##);
+        let mut w = world.clone();
+        assert!(apply_batch(&mut w, &result.batch).is_err());
+    }
+
+    fn sample_dungeon_themes() -> HashMap<String, Theme> {
+        let mut themes = HashMap::new();
+        themes.insert(
+            "crypt".to_string(),
+            Theme {
+                name: "crypt".into(),
+                title_prefix: "The Crypt of".into(),
+                room_descriptions: vec![
+                    crate::theme::RoomDescriptions {
+                        shape: "chamber".into(),
+                        texts: vec!["A crypt chamber.".into()],
+                    },
+                    crate::theme::RoomDescriptions {
+                        shape: "corridor".into(),
+                        texts: vec!["A crypt corridor.".into()],
+                    },
+                ],
+                encounters: vec![crate::theme::EncounterTable {
+                    depth: [1, 20],
+                    entries: vec![crate::theme::EncounterEntry {
+                        monster: "skeleton".into(),
+                        count: [1, 2],
+                        weight: 1,
+                    }],
+                }],
+                loot: vec![crate::theme::LootTable {
+                    depth: [1, 20],
+                    items: vec!["bone_charm".into()],
+                }],
+            },
+        );
+        themes
+    }
+
+    #[test]
+    fn generate_dungeon_and_destroy_dungeon_roundtrip() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let themes = sample_dungeon_themes();
+
+        let program = ProgramRecord::new(
+            "cmd_delve",
+            r#"
+                function cmd_delve(this, actor, room, args)
+                    local entrance = generate_dungeon("test-seed", {
+                        { theme = "crypt", room_count = {2, 3} },
+                    })
+                    set_attr(actor, "delve_entrance", entrance)
+                end
+            "#,
+        );
+
+        let result = runtime
+            .run_hook(
+                &world,
+                &program,
+                "#5",
+                "#3",
+                Some("#1"),
+                Some(""),
+                Budget::default(),
+                counter(&world),
+                &themes,
+            )
+            .expect("cmd_delve should run");
+
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).expect("dungeon batch should apply");
+
+        let entrance_ref = w.get("#3").unwrap().attrs["delve_entrance"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(w.get(&entrance_ref).is_some());
+
+        let dungeon_rooms: Vec<String> = w
+            .objects
+            .values()
+            .filter(|o| {
+                o.attrs.get("dungeon_seed").and_then(|v| v.as_str()) == Some("test-seed")
+            })
+            .map(|o| o.ref_id.clone())
+            .collect();
+        assert!(dungeon_rooms.len() >= 2);
+
+        let destroy_program = ProgramRecord::new(
+            "cmd_leave",
+            r#"
+                function cmd_leave(this, actor, room, args)
+                    destroy_dungeon("test-seed")
+                end
+            "#,
+        );
+        let destroy_result = runtime
+            .run_hook(
+                &w,
+                &destroy_program,
+                "#5",
+                "#3",
+                Some("#1"),
+                Some(""),
+                Budget::default(),
+                counter(&w),
+                &themes,
+            )
+            .expect("cmd_leave should run");
+        apply_batch(&mut w, &destroy_result.batch).expect("destroy batch should apply");
+
+        for room_ref in &dungeon_rooms {
+            assert!(w.get(room_ref).is_none(), "dungeon room {} should be destroyed", room_ref);
+        }
     }
 }

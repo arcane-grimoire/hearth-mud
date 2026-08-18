@@ -122,6 +122,10 @@ pub struct Engine {
     /// The dbref the spawn room key currently resolves to.
     spawn_room_ref: String,
     game_dir: Option<String>,
+    /// Dungeon theme data loaded from `<game_dir>/themes/*.toml`. See
+    /// `crate::theme` and `docs/dungeon-generation-design.md` in the game
+    /// repo.
+    themes: HashMap<String, crate::theme::Theme>,
 }
 
 impl Engine {
@@ -164,6 +168,12 @@ impl Engine {
             }
         };
 
+        let themes = config
+            .game_dir
+            .as_deref()
+            .map(|dir| crate::theme::load_themes(std::path::Path::new(dir)))
+            .unwrap_or_default();
+
         Self {
             world,
             accounts,
@@ -177,6 +187,7 @@ impl Engine {
             spawn_room: config.spawn_room.clone(),
             spawn_room_ref,
             game_dir: config.game_dir.clone(),
+            themes,
         }
     }
 
@@ -326,6 +337,7 @@ impl Engine {
                 None,
                 Budget::default(),
                 Rc::clone(&dbref_counter),
+                &self.themes,
             )
             .map_err(|e| e.to_string())?;
 
@@ -361,6 +373,7 @@ impl Engine {
                 &script.state,
                 Budget::default(),
                 Rc::clone(&dbref_counter),
+                &self.themes,
             )
             .map_err(|e| e.to_string())?;
 
@@ -1488,6 +1501,7 @@ impl Engine {
                 args,
                 Budget::default(),
                 Rc::clone(&dbref_counter),
+                &self.themes,
             )
             .map_err(|e| e.to_string())?;
 

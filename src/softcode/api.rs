@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use mlua::{Lua, LuaSerdeExt, Scope, Table, Value};
 
+use crate::theme::Theme;
 use crate::world::{GameObject, Kind, Tag, World};
 use crate::softcode::{Intent, IntentBatch};
 
@@ -105,6 +106,7 @@ fn exits_table(lua: &Lua, world: &World, room_ref: &str) -> mlua::Result<Table> 
 /// Register the read/write API as fields on `env`. Read functions borrow
 /// `world` directly; write functions push [`Intent`]s into `batch` instead
 /// of touching it.
+#[allow(clippy::too_many_arguments)]
 pub fn install<'scope, 'env>(
     _lua: &Lua,
     scope: &'scope Scope<'scope, 'env>,
@@ -113,6 +115,7 @@ pub fn install<'scope, 'env>(
     batch: Rc<RefCell<IntentBatch>>,
     default_location: Option<String>,
     dbref_counter: Rc<Cell<u64>>,
+    themes: &'env std::collections::HashMap<String, Theme>,
 ) -> mlua::Result<()> {
     // -- Read API --
 
@@ -460,6 +463,8 @@ pub fn install<'scope, 'env>(
     )?;
 
     let b = Rc::clone(&batch);
+    let dbref = Rc::clone(&dbref_counter);
+    let default_loc_for_spawn = default_location.clone();
     env.set(
         "spawn",
         scope.create_function(move |_, opts: Table| {
@@ -485,7 +490,7 @@ pub fn install<'scope, 'env>(
             let location: Option<Value> = opts.get("location").ok();
             let location = match location {
                 Some(v) => ref_of(&v)?,
-                None => default_location.clone().ok_or_else(|| {
+                None => default_loc_for_spawn.clone().ok_or_else(|| {
                     mlua::Error::RuntimeError(
                         "spawn: no 'location' given and no default room in context".into(),
                     )
@@ -493,8 +498,8 @@ pub fn install<'scope, 'env>(
             };
             let ref_id: Option<String> = opts.get("ref").ok();
             let ref_id = ref_id.unwrap_or_else(|| {
-                let id = dbref_counter.get() + 1;
-                dbref_counter.set(id);
+                let id = dbref.get() + 1;
+                dbref.set(id);
                 format!("#{}", id)
             });
 
@@ -542,6 +547,55 @@ pub fn install<'scope, 'env>(
     )?;
 
     let b = Rc::clone(&batch);
+    let dbref = Rc::clone(&dbref_counter);
+    env.set(
+        "create_exit",
+        scope.create_function(move |_, opts: Table| {
+            let source: Value = opts.get("source")?;
+            let source = ref_of(&source)?;
+            let direction: String = opts.get("direction")?;
+            let target: Value = opts.get("target")?;
+            let target = ref_of(&target)?;
+            let aliases: Option<Table> = opts.get("aliases").ok();
+            let alias_vec = match aliases {
+                Some(tbl) => {
+                    let mut v = Vec::new();
+                    for pair in tbl.sequence_values::<String>() {
+                        v.push(pair?);
+                    }
+                    v
+                }
+                None => Vec::new(),
+            };
+
+            let ref_id = {
+                let id = dbref.get() + 1;
+                dbref.set(id);
+                format!("#{}", id)
+            };
+
+            b.borrow_mut().push(Intent::CreateExit {
+                ref_id: ref_id.clone(),
+                source,
+                direction,
+                target,
+                aliases: alias_vec,
+            });
+            Ok(ref_id)
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
+        "set_program",
+        scope.create_function(move |_, (r, hook, source): (Value, String, String)| {
+            let target = ref_of(&r)?;
+            b.borrow_mut().push(Intent::SetProgram { target, hook, source });
+            Ok(())
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
     env.set(
         "trigger",
         scope.create_function(move |_, (r, hook): (Value, String)| {
@@ -567,6 +621,115 @@ pub fn install<'scope, 'env>(
                 key: "_prompt_hook".into(),
                 value: serde_json::Value::String(hook),
             });
+            Ok(())
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    let dbref = Rc::clone(&dbref_counter);
+    let default_loc = default_location.clone();
+    env.set(
+        "generate_dungeon",
+        scope.create_function(move |_, (seed, config): (String, Option<Table>)| {
+            let anchor_ref = default_loc.clone().ok_or_else(|| {
+                mlua::Error::RuntimeError(
+                    "generate_dungeon: no room context to anchor the dungeon (call it from a hook with an actor in a room)".into(),
+                )
+            })?;
+
+            let zones = match config {
+                Some(tbl) => {
+                    let mut zones = Vec::new();
+                    for pair in tbl.sequence_values::<Table>() {
+                        let zt = pair?;
+                        let theme_name: String = zt.get("theme").unwrap_or_else(|_| "crypt".to_string());
+                        let room_count: Option<Table> = zt.get("room_count").ok();
+                        let (min, max) = match room_count {
+                            Some(rc) => {
+                                let min: u32 = rc.get(1).unwrap_or(4);
+                                let max: u32 = rc.get(2).unwrap_or(6);
+                                (min, max)
+                            }
+                            None => (4, 6),
+                        };
+                        zones.push(crate::dungeon::ZoneConfig {
+                            theme_name,
+                            room_count_min: min,
+                            room_count_max: max,
+                            zone_number: zones.len() as u32 + 1,
+                        });
+                    }
+                    zones
+                }
+                None => {
+                    // Default: 3 zones with escalating difficulty
+                    vec![
+                        crate::dungeon::ZoneConfig { theme_name: "crypt".into(), room_count_min: 4, room_count_max: 6, zone_number: 1 },
+                        crate::dungeon::ZoneConfig { theme_name: "crypt".into(), room_count_min: 5, room_count_max: 8, zone_number: 2 },
+                        crate::dungeon::ZoneConfig { theme_name: "crypt".into(), room_count_min: 3, room_count_max: 4, zone_number: 3 },
+                    ]
+                }
+            };
+
+            let db_start = dbref.get() + 1;
+            let result = crate::dungeon::generate(&seed, &zones, themes, db_start, &anchor_ref)
+                .map_err(mlua::Error::RuntimeError)?;
+
+            // Advance the dbref counter past all generated refs.
+            let max_ref = result
+                .intents
+                .iter()
+                .filter_map(|i| match i {
+                    Intent::Spawn { ref_id, .. } | Intent::CreateExit { ref_id, .. } => {
+                        ref_id.trim_start_matches('#').parse::<u64>().ok()
+                    }
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(dbref.get());
+            dbref.set(max_ref);
+
+            // Push all intents into the batch.
+            for intent in result.intents {
+                b.borrow_mut().push(intent);
+            }
+
+            Ok(result.entrance_ref)
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
+        "destroy_dungeon",
+        scope.create_function(move |_, seed: String| {
+            let refs_to_destroy: Vec<String> = world
+                .objects
+                .values()
+                .filter(|obj| {
+                    obj.attrs
+                        .get("dungeon_seed")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| s == seed)
+                })
+                .map(|obj| obj.ref_id.clone())
+                .collect();
+
+            // Also find exits belonging to these rooms.
+            let room_set: std::collections::HashSet<&str> =
+                refs_to_destroy.iter().map(|s| s.as_str()).collect();
+            let exit_refs: Vec<String> = world
+                .objects
+                .values()
+                .filter(|obj| {
+                    obj.kind == Kind::Exit
+                        && obj.location_ref.as_deref().is_some_and(|loc| room_set.contains(loc))
+                })
+                .map(|obj| obj.ref_id.clone())
+                .collect();
+
+            for target in refs_to_destroy.into_iter().chain(exit_refs) {
+                b.borrow_mut().push(Intent::Destroy { target });
+            }
             Ok(())
         })?,
     )?;
