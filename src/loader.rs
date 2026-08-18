@@ -379,6 +379,15 @@ fn install_programs(
     programs: &std::collections::HashMap<String, ProgramSource>,
     base_dir: &Path,
 ) -> Result<(), String> {
+    let stale: Vec<String> = obj
+        .programs
+        .keys()
+        .filter(|hook| !programs.contains_key(*hook))
+        .cloned()
+        .collect();
+    for hook in stale {
+        hooks::remove_program(obj, &hook);
+    }
     for (hook, source) in programs {
         let code = source.resolve(base_dir)?;
         hooks::set_program(obj, hook, code)?;
@@ -429,6 +438,9 @@ pub fn load_modules(game_dir: &Path) -> HashMap<String, String> {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("luau") {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if stem.ends_with(".test") {
+                    continue;
+                }
                 if let Ok(source) = std::fs::read_to_string(&path) {
                     modules.insert(stem.to_string(), source);
                 }
@@ -452,6 +464,52 @@ fn collect_toml_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
             && path.file_name().and_then(|f| f.to_str()) != Some("hearth.toml")
         {
             out.push(path);
+        }
+    }
+}
+
+pub struct TestFile {
+    pub path: std::path::PathBuf,
+    pub relative: String,
+    pub source: String,
+    pub is_lib: bool,
+}
+
+pub fn discover_test_files(game_dir: &Path) -> Vec<TestFile> {
+    let mut files = Vec::new();
+    collect_test_files(game_dir, game_dir, &mut files);
+    files.sort_by(|a, b| a.relative.cmp(&b.relative));
+    files
+}
+
+fn collect_test_files(base: &Path, dir: &Path, out: &mut Vec<TestFile>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_test_files(base, &path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("luau") {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if stem.ends_with(".test") {
+                    if let Ok(source) = std::fs::read_to_string(&path) {
+                        let relative = path
+                            .strip_prefix(base)
+                            .unwrap_or(&path)
+                            .to_string_lossy()
+                            .to_string();
+                        let is_lib = path.starts_with(base.join("lib"));
+                        out.push(TestFile {
+                            path,
+                            relative,
+                            source,
+                            is_lib,
+                        });
+                    }
+                }
+            }
         }
     }
 }
