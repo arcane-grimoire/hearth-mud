@@ -2,5 +2,13 @@
 hearth.db
 hearth.db-wal
 hearth.db-shm
+*.db-journal
 web/node_modules
 web/dist
+
+.env
+.env.*
+.DS_Store
+Thumbs.db
+*.pem
+*.key
