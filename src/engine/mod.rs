@@ -40,6 +40,9 @@ pub struct ExitData {
 pub struct EntityData {
     pub name: String,
     pub kind: String,
+    pub ref_id: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub owned: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2529,6 +2532,8 @@ impl Engine {
             .map(|o| EntityData {
                 name: o.display_name().to_string(),
                 kind: format!("{}", o.kind),
+                ref_id: o.ref_id.clone(),
+                owned: o.owner_ref.as_deref() == Some(actor_ref),
             })
             .collect();
 

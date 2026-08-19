@@ -50,6 +50,10 @@ body {
   font-style: italic;
 }
 
+.echo {
+  color: var(--text-muted);
+}
+
 .b { font-weight: bold; }
 .dim { opacity: 0.7; }
 .i { font-style: italic; }

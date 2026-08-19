@@ -1,6 +1,10 @@
 <script>
   let { oncommand } = $props();
   let inputEl;
+
+  export function focus() {
+    inputEl?.focus();
+  }
   let value = $state('');
   let history = $state([]);
   let histIdx = $state(-1);

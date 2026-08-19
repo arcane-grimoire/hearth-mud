@@ -2,12 +2,15 @@
   import Output from './components/Output.svelte';
   import InputBar from './components/InputBar.svelte';
   import Sidebar from './components/Sidebar.svelte';
+  import Editor from './components/Editor.svelte';
+  import { setToken } from './lib/api.js';
 
   let output;
   let status = $state('connecting');
   let sidebarOpen = $state(true);
   let roomData = $state(null);
-  let apiToken = $state(null);
+  let scopes = $state([]);
+  let editingEntity = $state(null);
   let ws;
   let reconnectTimer;
 
@@ -41,7 +44,8 @@
             roomData = msg;
             break;
           case 'auth':
-            apiToken = msg.token;
+            setToken(msg.token);
+            scopes = msg.scopes || [];
             break;
           case 'prompt':
             break;
@@ -64,6 +68,7 @@
 
   function handleCommand(cmd) {
     if (ws?.readyState === WebSocket.OPEN) {
+      output?.append(`<span class="echo">&gt; ${cmd.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</span>\n`);
       ws.send(cmd);
     }
   }
@@ -76,6 +81,24 @@
     handleCommand(cmd);
   }
 
+  function openEditor(entity) {
+    editingEntity = entity;
+  }
+
+  function closeEditor() {
+    editingEntity = null;
+  }
+
+  let isBuilder = $derived(scopes.includes('builder') || scopes.includes('admin'));
+  let inputBar;
+
+  function handleKeydown(e) {
+    if (e.key === 'Escape') {
+      if (editingEntity) closeEditor();
+      inputBar?.focus();
+    }
+  }
+
   $effect(() => {
     connect();
     return () => {
@@ -85,6 +108,7 @@
   });
 </script>
 
+<svelte:window onkeydown={handleKeydown} />
 <div class="app">
   <header class="topbar">
     <div class="topbar-left">
@@ -104,12 +128,14 @@
 
   <div class="main">
     <Output bind:this={output} oncommand={handleCommand} />
-    {#if sidebarOpen}
-      <Sidebar {status} room={roomData} {sendCommand} />
+    {#if editingEntity}
+      <Editor entity={editingEntity} onclose={closeEditor} />
+    {:else if sidebarOpen}
+      <Sidebar {status} room={roomData} {sendCommand} {isBuilder} onedit={openEditor} />
     {/if}
   </div>
 
-  <InputBar oncommand={handleCommand} />
+  <InputBar bind:this={inputBar} oncommand={handleCommand} />
 </div>
 
 <style>
@@ -202,7 +228,8 @@
   }
 
   @media (max-width: 700px) {
-    .main :global(.sidebar) {
+    .main :global(.sidebar),
+    .main :global(.editor) {
       position: absolute;
       right: 0;
       top: 40px;

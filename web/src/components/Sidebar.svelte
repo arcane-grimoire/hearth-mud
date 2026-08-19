@@ -1,9 +1,9 @@
 <script>
-  let { status = 'disconnected', room = null, sendCommand = () => {} } = $props();
+  let { status = 'disconnected', room = null, sendCommand = () => {}, isBuilder = false, onedit = () => {} } = $props();
 
-  let players = $derived(room?.contents?.filter(e => e.kind === 'Player') ?? []);
-  let npcs = $derived(room?.contents?.filter(e => e.kind === 'Npc') ?? []);
-  let items = $derived(room?.contents?.filter(e => e.kind === 'Item') ?? []);
+  let players = $derived(room?.contents?.filter(e => e.kind === 'player') ?? []);
+  let npcs = $derived(room?.contents?.filter(e => e.kind === 'npc') ?? []);
+  let items = $derived(room?.contents?.filter(e => e.kind === 'item') ?? []);
   let exits = $derived(room?.exits ?? []);
 </script>
 
@@ -16,7 +16,12 @@
           <div class="entity player">{p.name}</div>
         {/each}
         {#each npcs as n}
-          <div class="entity npc">{n.name}</div>
+          <div class="entity npc">
+            <span>{n.name}</span>
+            {#if n.owned || isBuilder}
+              <button class="edit-btn" onclick={() => onedit(n)}>edit</button>
+            {/if}
+          </div>
         {/each}
       {:else}
         <span class="empty">Nobody</span>
@@ -29,7 +34,12 @@
     <div class="panel-body">
       {#if items.length}
         {#each items as item}
-          <div class="entity item">{item.name}</div>
+          <div class="entity item">
+            <span>{item.name}</span>
+            {#if item.owned || isBuilder}
+              <button class="edit-btn" onclick={() => onedit(item)}>edit</button>
+            {/if}
+          </div>
         {/each}
       {:else}
         <span class="empty">Nothing</span>
@@ -94,6 +104,10 @@
 
   .entity {
     padding: 1px 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
   }
 
   .player {
@@ -107,6 +121,23 @@
 
   .item {
     color: var(--text-secondary);
+  }
+
+  .edit-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    cursor: pointer;
+    padding: 0 4px;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    flex-shrink: 0;
+  }
+
+  .edit-btn:hover {
+    color: var(--accent);
   }
 
   .exits {
