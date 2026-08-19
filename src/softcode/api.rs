@@ -6,12 +6,53 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use mlua::{Lua, LuaSerdeExt, Scope, Table, Value};
+use mlua::{Lua, LuaSerdeExt, MultiValue, Scope, Table, Value};
 
 use crate::map_template::MapTemplateFile;
 use crate::theme::Theme;
 use crate::world::{GameObject, Kind, Tag, World};
 use crate::softcode::{Intent, IntentBatch};
+
+enum PathSeg {
+    Key(String),
+    Index(usize),
+}
+
+fn set_nested(root: &mut serde_json::Value, path: &[PathSeg], value: serde_json::Value) -> Result<(), String> {
+    if path.is_empty() {
+        *root = value;
+        return Ok(());
+    }
+    match &path[0] {
+        PathSeg::Key(k) => {
+            if !root.is_object() {
+                *root = serde_json::Value::Object(serde_json::Map::new());
+            }
+            let obj = root.as_object_mut().unwrap();
+            if path.len() == 1 {
+                obj.insert(k.clone(), value);
+            } else {
+                let child = obj.entry(k.clone()).or_insert(serde_json::Value::Object(serde_json::Map::new()));
+                set_nested(child, &path[1..], value)?;
+            }
+        }
+        PathSeg::Index(i) => {
+            if !root.is_array() {
+                *root = serde_json::Value::Array(Vec::new());
+            }
+            let arr = root.as_array_mut().unwrap();
+            while arr.len() <= *i {
+                arr.push(serde_json::Value::Null);
+            }
+            if path.len() == 1 {
+                arr[*i] = value;
+            } else {
+                set_nested(&mut arr[*i], &path[1..], value)?;
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Give `env` read access to the ambient standard library (string, table,
 /// math, pairs/ipairs/ etc.) by falling through to the real globals table on
@@ -151,6 +192,91 @@ pub fn install<'scope, 'env>(
                 .get(&r)
                 .map(|o| o.attrs.contains_key(&key))
                 .unwrap_or(false))
+        })?,
+    )?;
+
+    env.set(
+        "pick",
+        scope.create_function(move |lua, args: MultiValue| {
+            let mut args_vec: Vec<Value> = args.into_vec();
+            if args_vec.len() < 2 {
+                return Err(mlua::Error::RuntimeError("pick: need at least (ref, attr_key)".into()));
+            }
+            let r = ref_of(&args_vec[0])?;
+            let attr_key = match &args_vec[1] {
+                Value::String(s) => s.to_str()?.to_string(),
+                _ => return Err(mlua::Error::RuntimeError("pick: attr key must be a string".into())),
+            };
+            let obj = world.get(&r).ok_or_else(|| {
+                mlua::Error::RuntimeError(format!("pick: no object '{}'", r))
+            })?;
+            let root = match obj.attrs.get(&attr_key) {
+                Some(v) => v,
+                None => return Ok(Value::Nil),
+            };
+            let path = args_vec.split_off(2);
+            let mut current = root;
+            for key in &path {
+                match key {
+                    Value::Integer(i) => {
+                        let idx = (*i - 1) as usize;
+                        match current.as_array().and_then(|a| a.get(idx)) {
+                            Some(v) => current = v,
+                            None => return Ok(Value::Nil),
+                        }
+                    }
+                    Value::String(s) => {
+                        let s = s.to_str()?;
+                        match current.as_object().and_then(|o| o.get(s.as_ref())) {
+                            Some(v) => current = v,
+                            None => return Ok(Value::Nil),
+                        }
+                    }
+                    _ => return Err(mlua::Error::RuntimeError("pick: path keys must be strings or integers".into())),
+                }
+            }
+            lua.to_value(current)
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
+        "set_val",
+        scope.create_function(move |lua, args: MultiValue| {
+            let args_vec: Vec<Value> = args.into_vec();
+            if args_vec.len() < 4 {
+                return Err(mlua::Error::RuntimeError("set_val: need at least (ref, attr_key, path_key, value)".into()));
+            }
+            let target = ref_of(&args_vec[0])?;
+            let attr_key = match &args_vec[1] {
+                Value::String(s) => s.to_str()?.to_string(),
+                _ => return Err(mlua::Error::RuntimeError("set_val: attr key must be a string".into())),
+            };
+            let new_value: serde_json::Value = lua.from_value(args_vec[args_vec.len() - 1].clone())?;
+
+            let mut path = Vec::new();
+            for key in &args_vec[2..args_vec.len() - 1] {
+                match key {
+                    Value::Integer(i) => path.push(PathSeg::Index((*i - 1) as usize)),
+                    Value::String(s) => path.push(PathSeg::Key(s.to_str()?.to_string())),
+                    _ => return Err(mlua::Error::RuntimeError("set_val: path keys must be strings or integers".into())),
+                }
+            }
+
+            let mut root: serde_json::Value = world
+                .get(&target)
+                .and_then(|o| o.attrs.get(&attr_key).cloned())
+                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+            // Walk to the leaf and set the value using a pointer built from path
+            set_nested(&mut root, &path, new_value).map_err(mlua::Error::RuntimeError)?;
+
+            b.borrow_mut().push(Intent::SetAttr {
+                target,
+                key: attr_key,
+                value: root,
+            });
+            Ok(())
         })?,
     )?;
 
