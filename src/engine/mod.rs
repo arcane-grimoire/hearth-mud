@@ -937,6 +937,7 @@ impl Engine {
                 if let Some(room_ref) = &room {
                     let _ = self.fire_hook(room_ref, "on_disconnect", actor_ref, Some(room_ref), None);
                 }
+                self.fire_global_hooks("on_disconnect", actor_ref, room.as_deref(), None);
 
                 if let Some(obj) = self.world.get_mut(actor_ref) {
                     obj.tags.insert(crate::world::Tag {
@@ -1306,6 +1307,7 @@ impl Engine {
         if let Some(room_ref) = &room {
             let _ = self.fire_hook(room_ref, "on_connect", &player_ref, Some(room_ref), None);
         }
+        self.fire_global_hooks("on_connect", &player_ref, room.as_deref(), None);
     }
 
     fn session_account_id(&self, session_id: &str) -> Option<String> {
@@ -1906,6 +1908,30 @@ impl Engine {
             denied,
             emitted_to_actor,
         })
+    }
+
+    fn fire_global_hooks(
+        &mut self,
+        hook_name: &str,
+        actor_ref: &str,
+        room_ref: Option<&str>,
+        args: Option<&str>,
+    ) {
+        let global_tag = crate::world::Tag {
+            category: "system".into(),
+            key: "global".into(),
+        };
+        let refs: Vec<String> = self
+            .world
+            .objects
+            .values()
+            .filter(|o| o.tags.contains(&global_tag))
+            .filter(|o| hooks::get_program(o, hook_name).is_some())
+            .map(|o| o.ref_id.clone())
+            .collect();
+        for ref_id in refs {
+            let _ = self.fire_hook(&ref_id, hook_name, actor_ref, room_ref, args);
+        }
     }
 
     fn deliver_effects(&mut self, effects: &[Effect], actor_ref: &str) {
@@ -3167,6 +3193,7 @@ impl Engine {
 
         // Fire on_leave on old room
         let _ = self.fire_hook(&old_room, "on_leave", actor_ref, Some(&old_room), None);
+        self.fire_global_hooks("on_leave", actor_ref, Some(&old_room), None);
 
         // Move the player
         if self.world.get(target_ref).is_none() {
@@ -3196,6 +3223,7 @@ impl Engine {
 
         // Fire on_enter on new room
         let _ = self.fire_hook(target_ref, "on_enter", actor_ref, Some(target_ref), None);
+        self.fire_global_hooks("on_enter", actor_ref, Some(target_ref), None);
 
         self.look_with_visibility(actor_ref)
     }

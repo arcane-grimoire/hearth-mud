@@ -16,6 +16,7 @@
   let status = $state('connecting');
   let sidebarOpen = $state(true);
   let roomData = $state(null);
+  let gamePanels = $state(new Map());
   let scopes = $state([]);
   let editingEntity = $state(null);
   let settingsOpen = $state(false);
@@ -57,7 +58,11 @@
             scopes = msg.scopes || [];
             break;
           case 'prompt': break;
-          case 'game': break;
+          case 'game':
+            if (msg.channel && msg.data?.widget) {
+              gamePanels = new Map(gamePanels).set(msg.channel, msg.data);
+            }
+            break;
         }
       } catch {
         output?.append(e.data);
@@ -147,7 +152,7 @@
     {:else if editingEntity}
       <Editor entity={editingEntity} onclose={closeEditor} />
     {:else if sidebarOpen}
-      <Sidebar {status} room={roomData} {sendCommand} {isBuilder} onedit={openEditor} />
+      <Sidebar {status} room={roomData} {sendCommand} {isBuilder} onedit={openEditor} {gamePanels} />
     {/if}
   </div>
 

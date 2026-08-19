@@ -1,7 +1,8 @@
 <script>
   import { Chip, StatusDot } from '@kenn-io/kit-ui';
+  import GamePanel from './GamePanel.svelte';
 
-  let { status = 'disconnected', room = null, sendCommand = () => {}, isBuilder = false, onedit = () => {} } = $props();
+  let { status = 'disconnected', room = null, sendCommand = () => {}, isBuilder = false, onedit = () => {}, gamePanels = new Map() } = $props();
 
   let players = $derived(room?.contents?.filter(e => e.kind === 'player') ?? []);
   let npcs = $derived(room?.contents?.filter(e => e.kind === 'npc') ?? []);
@@ -17,6 +18,10 @@
 </script>
 
 <aside class="sidebar">
+  {#each [...gamePanels] as [channel, data]}
+    <GamePanel {channel} {data} {sendCommand} />
+  {/each}
+
   <div class="panel">
     <h3 class="panel-label">Who's Here</h3>
     <div class="panel-body">
