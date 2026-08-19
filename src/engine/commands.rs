@@ -356,6 +356,7 @@ pub fn do_help_with_roles(is_builder: bool, is_admin: bool) -> String {
         "  whisper <who> <msg> - Whisper to a player\r\n",
         "  emote <action>    - Emote (or :action)\r\n",
         "  @password <old> <new> - Change your password\r\n",
+        "  @token create|list|revoke - Manage API tokens\r\n",
         "  who               - See who's online\r\n",
         "  quit              - Disconnect\r\n",
         "  help (?)          - This message\r\n",

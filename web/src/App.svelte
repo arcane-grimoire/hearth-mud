@@ -7,6 +7,7 @@
   let status = $state('connecting');
   let sidebarOpen = $state(true);
   let roomData = $state(null);
+  let apiToken = $state(null);
   let ws;
   let reconnectTimer;
 
@@ -38,6 +39,9 @@
             break;
           case 'room':
             roomData = msg;
+            break;
+          case 'auth':
+            apiToken = msg.token;
             break;
           case 'prompt':
             break;

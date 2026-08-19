@@ -77,14 +77,22 @@ async fn ws_handler(
 
 async fn api_handler(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<ApiRequest>,
 ) -> impl IntoResponse {
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.to_string());
+
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
 
     if state
         .engine_tx
         .send(EngineMessage::ApiRequest {
             request,
+            token,
             reply: reply_tx,
         })
         .is_err()

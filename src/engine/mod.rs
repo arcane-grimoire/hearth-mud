@@ -27,6 +27,7 @@ pub enum ClientMessage {
     },
     Inventory { items: Vec<ItemData> },
     Game { channel: String, data: serde_json::Value },
+    Auth { token: String, scopes: Vec<String> },
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -62,6 +63,7 @@ pub enum EngineMessage {
     },
     ApiRequest {
         request: ApiRequest,
+        token: Option<String>,
         reply: tokio::sync::oneshot::Sender<ApiResponse>,
     },
     Shutdown,
@@ -124,6 +126,12 @@ struct Session {
     state: SessionState,
 }
 
+struct TokenInfo {
+    account_id: String,
+    label: String,
+    persistent: bool,
+}
+
 /// The outcome of [`Engine::fire_hook`].
 struct HookRun {
     /// Whether the Program's hook function explicitly returned `false`.
@@ -159,6 +167,8 @@ pub struct Engine {
     map_templates: HashMap<String, crate::map_template::MapTemplateFile>,
     /// Hooks scheduled to fire in the future via `after(ticks, target, hook)`.
     scheduled_hooks: Vec<ScheduledHook>,
+    /// API tokens: hash → info. Both session (ephemeral) and persistent tokens.
+    api_tokens: HashMap<String, TokenInfo>,
 }
 
 use crate::softcode::ScheduledHook;
@@ -223,6 +233,13 @@ impl Engine {
             Vec::new()
         });
 
+        let mut api_tokens = HashMap::new();
+        if let Ok(tokens) = db.load_tokens() {
+            for (hash, account_id, label) in tokens {
+                api_tokens.insert(hash, TokenInfo { account_id, label, persistent: true });
+            }
+        }
+
         Self {
             world,
             accounts,
@@ -239,6 +256,7 @@ impl Engine {
             themes,
             map_templates,
             scheduled_hooks,
+            api_tokens,
         }
     }
 
@@ -269,8 +287,8 @@ impl Engine {
                         Some(EngineMessage::PlayerInput { session_id, input }) => {
                             self.handle_input(&session_id, &input);
                         }
-                        Some(EngineMessage::ApiRequest { request, reply }) => {
-                            let response = self.handle_api_request(request);
+                        Some(EngineMessage::ApiRequest { request, token, reply }) => {
+                            let response = self.handle_api_request(request, token);
                             let _ = reply.send(response);
                         }
                         Some(EngineMessage::Shutdown) | None => {
@@ -591,7 +609,57 @@ impl Engine {
         }
     }
 
-    fn handle_api_request(&mut self, req: ApiRequest) -> ApiResponse {
+    fn hash_token(token: &str) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        token.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
+    fn handle_api_request(&mut self, req: ApiRequest, token: Option<String>) -> ApiResponse {
+        let is_read = matches!(
+            &req,
+            ApiRequest::ListRooms
+                | ApiRequest::ListObjects { .. }
+                | ApiRequest::Examine { .. }
+                | ApiRequest::ListPrograms { .. }
+                | ApiRequest::ListExits { .. }
+        );
+
+        if !is_read {
+            let account_id = token
+                .as_deref()
+                .map(Self::hash_token)
+                .and_then(|hash| self.api_tokens.get(&hash))
+                .map(|info| info.account_id.clone());
+
+            let account_id = match account_id {
+                Some(id) => id,
+                None => return ApiResponse::error("Authentication required"),
+            };
+
+            let has_builder = self
+                .accounts
+                .get(&account_id)
+                .map(|a| a.has_scope(Scope::Builder))
+                .unwrap_or(false);
+
+            if !has_builder {
+                return ApiResponse::error("Builder scope required");
+            }
+
+            if matches!(&req, ApiRequest::SaveWorld) {
+                let has_admin = self
+                    .accounts
+                    .get(&account_id)
+                    .map(|a| a.has_scope(Scope::Admin))
+                    .unwrap_or(false);
+                if !has_admin {
+                    return ApiResponse::error("Admin scope required");
+                }
+            }
+        }
+
         match req {
             ApiRequest::ListRooms => {
                 let rooms: Vec<serde_json::Value> = self
@@ -857,6 +925,10 @@ impl Engine {
             }
             tracing::info!(session_id, "Player disconnected");
         }
+
+        let session_label = format!("session-{}", &session_id[..8]);
+        self.api_tokens
+            .retain(|_, t| !(t.label == session_label && !t.persistent));
     }
 
     fn handle_input(&mut self, session_id: &str, input: &str) {
@@ -1117,6 +1189,30 @@ impl Engine {
             String::new()
         };
 
+        let token = uuid::Uuid::new_v4().to_string();
+        let token_hash = Self::hash_token(&token);
+        self.api_tokens.insert(
+            token_hash,
+            TokenInfo {
+                account_id: account_id.to_string(),
+                label: format!("session-{}", &session_id[..8]),
+                persistent: false,
+            },
+        );
+
+        let scopes: Vec<String> = self
+            .accounts
+            .get(account_id)
+            .map(|a| a.scopes.iter().map(|s| s.label().to_string()).collect())
+            .unwrap_or_default();
+
+        if let Some(session) = self.sessions.get(session_id) {
+            let _ = session.tx.send(ClientMessage::Auth {
+                token,
+                scopes,
+            });
+        }
+
         self.send(
             session_id,
             &format!("\r\nWelcome back, {}.{}\r\n\r\n", username, scope_msg),
@@ -1272,6 +1368,7 @@ impl Engine {
             "@test" => self.cmd_test(session_id, &args),
             "@reload" => self.cmd_reload(session_id, &actor_ref, &args),
 
+            "@token" | "@tokens" => self.cmd_token(session_id, &args),
             "@display" => self.cmd_display(&actor_ref, &args),
 
             "help" | "?" => {
@@ -1799,6 +1896,90 @@ impl Engine {
                 });
             }
         }
+    }
+
+    fn cmd_token(&mut self, session_id: &str, args: &str) -> String {
+        let account_id = match self.session_account_id(session_id) {
+            Some(id) => id,
+            None => return "Not logged in.\r\n".to_string(),
+        };
+
+        let (sub, rest) = match args.split_once(' ') {
+            Some((s, r)) => (s.trim(), r.trim()),
+            None => (args.trim(), ""),
+        };
+
+        match sub {
+            "create" => {
+                if rest.is_empty() {
+                    return "Usage: @token create <label>\r\n".to_string();
+                }
+                if self
+                    .api_tokens
+                    .values()
+                    .any(|t| t.account_id == account_id && t.label == rest && t.persistent)
+                {
+                    return format!("Token '{}' already exists. Revoke it first.\r\n", rest);
+                }
+                let token = uuid::Uuid::new_v4().to_string();
+                let token_hash = Self::hash_token(&token);
+                self.api_tokens.insert(
+                    token_hash,
+                    TokenInfo {
+                        account_id,
+                        label: rest.to_string(),
+                        persistent: true,
+                    },
+                );
+                self.save_tokens();
+                format!(
+                    "Token created: {}\r\nSave this — it won't be shown again.\r\n",
+                    token
+                )
+            }
+            "list" => {
+                let tokens: Vec<&TokenInfo> = self
+                    .api_tokens
+                    .values()
+                    .filter(|t| t.account_id == account_id && t.persistent)
+                    .collect();
+                if tokens.is_empty() {
+                    "No API tokens.\r\n".to_string()
+                } else {
+                    let mut out = "API tokens:\r\n".to_string();
+                    for t in tokens {
+                        out.push_str(&format!("  {}\r\n", t.label));
+                    }
+                    out
+                }
+            }
+            "revoke" => {
+                if rest.is_empty() {
+                    return "Usage: @token revoke <label>\r\n".to_string();
+                }
+                let before = self.api_tokens.len();
+                self.api_tokens.retain(|_, t| {
+                    !(t.account_id == account_id && t.label == rest && t.persistent)
+                });
+                if self.api_tokens.len() < before {
+                    self.save_tokens();
+                    format!("Token '{}' revoked.\r\n", rest)
+                } else {
+                    format!("No token named '{}'.\r\n", rest)
+                }
+            }
+            _ => "Usage: @token create|list|revoke\r\n".to_string(),
+        }
+    }
+
+    fn save_tokens(&self) {
+        let tokens: Vec<(String, String, String)> = self
+            .api_tokens
+            .iter()
+            .filter(|(_, t)| t.persistent)
+            .map(|(hash, t)| (hash.clone(), t.account_id.clone(), t.label.clone()))
+            .collect();
+        self.db.save_tokens(&tokens).ok();
     }
 
     fn send_to_room(&self, room_ref: &str, message: &str, exclude: &[String]) {
@@ -3350,18 +3531,34 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    const TEST_TOKEN: &str = "test-api-token";
+
     async fn test_engine() -> (mpsc::UnboundedSender<EngineMessage>, tokio::task::JoinHandle<()>) {
         let db = crate::db::Database::open(Path::new(":memory:")).unwrap();
         let config = Config::default();
         let (tx, rx) = mpsc::unbounded_channel();
-        let engine = Engine::new(rx, db, &config);
+        let mut engine = Engine::new(rx, db, &config);
+        let account = engine.accounts.create("test_builder", "password123").unwrap();
+        let account_id = account.id.clone();
+        engine.accounts.grant_scope(&account_id, Scope::Builder);
+        engine.accounts.grant_scope(&account_id, Scope::Admin);
+        let token_hash = Engine::hash_token(TEST_TOKEN);
+        engine.api_tokens.insert(token_hash, TokenInfo {
+            account_id,
+            label: "test".to_string(),
+            persistent: false,
+        });
         let handle = tokio::spawn(engine.run());
         (tx, handle)
     }
 
     async fn api_call(tx: &mpsc::UnboundedSender<EngineMessage>, req: ApiRequest) -> ApiResponse {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        tx.send(EngineMessage::ApiRequest { request: req, reply: reply_tx }).unwrap();
+        tx.send(EngineMessage::ApiRequest {
+            request: req,
+            token: Some(TEST_TOKEN.to_string()),
+            reply: reply_tx,
+        }).unwrap();
         reply_rx.await.unwrap()
     }
 
