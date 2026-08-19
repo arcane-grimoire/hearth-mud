@@ -5,34 +5,18 @@
   let { open = false, onclose = () => {}, scopes = [], oncommand = () => {} } = $props();
 
   let tokenLabel = $state('');
-  let tokens = $state([]);
-  let loadingTokens = $state(false);
   let fontSize = $state(localStorage.getItem('hearth-font-size') || '14');
-
-  $effect(() => {
-    if (open) loadTokens();
-  });
 
   $effect(() => {
     document.documentElement.style.setProperty('--font-size-output', fontSize + 'px');
     localStorage.setItem('hearth-font-size', fontSize);
   });
 
-  async function loadTokens() {
-    loadingTokens = true;
-    oncommand('@token list');
-    loadingTokens = false;
-  }
-
-  async function createToken() {
+  function createToken() {
     const label = tokenLabel.trim();
     if (!label) return;
     oncommand(`@token create ${label}`);
     tokenLabel = '';
-  }
-
-  function revokeToken(label) {
-    oncommand(`@token revoke ${label}`);
   }
 
   function changePassword() {

@@ -28,6 +28,37 @@ cd web && npm run build                      # production build to web/dist/
 
 First account created gets admin/builder/player scopes.
 
+## Dev workflow
+
+Hearth has three moving parts during development. Which ones to run
+depends on what you're changing:
+
+| Changing           | Run                                                  |
+| ------------------ | ---------------------------------------------------- |
+| Rust backend       | `cargo run -- ../the-last-stag-mud/hearth.toml`      |
+| Web client only    | Backend + `cd web && npm run dev` (hot reload on :5173) |
+| Softcode (Luau)    | Backend running, edit .luau files, `@reload-world` in-game |
+| Game content (TOML)| Backend running, edit .toml files, `@reload-world` in-game |
+
+**Web client dev:** The Vite dev server on port 5173 proxies `/ws` and
+`/api` to the Rust backend on port 8000. Open `http://localhost:5173`.
+Changes to `.svelte` and `.css` files hot-reload instantly. The web
+client uses `@kenn-io/kit-ui` (vendored in `web/kit-ui/`) for UI
+components and `@lucide/svelte` for icons.
+
+**Backend dev:** `cargo run` serves the built web client from
+`web/dist/` (if it exists) or falls back to `src/net/web_client.html`.
+For rapid frontend iteration, use the Vite dev server instead.
+
+**WebSocket protocol:** The web client connects to `/ws`. Server sends
+JSON messages with `type` field: `text` (BBCode HTML), `room` (structured
+room data for sidebar), `auth` (token + scopes), `prompt`, `game`.
+Client sends plain text commands.
+
+**REST API:** POST to `/api` with JSON `{ action, ...params }`.
+Auth via `Authorization: Bearer <token>` header. See `src/net/web.rs`
+and `src/engine/mod.rs` for the full action list.
+
 ## Architecture
 
 Single-writer engine owns all world state in one tokio task. Everything
@@ -55,9 +86,13 @@ src/
   markup.rs            BBCode → ANSI (telnet) and BBCode → HTML (web) converters
   config.rs            hearth.toml deserialization
   db.rs                SQLite persistence (save/load world + accounts)
+  dungeon.rs           Procedural dungeon generation
   grid.rs              Grid2D userdata — spatial grid with A*, LOS, FOV, Dijkstra
   loader.rs            Game file loader (TOML + .luau from game_dir, lib/ modules)
   locks.rs             Lock DSL parser and evaluator
+  map_template.rs      Map template definitions and generation
+  noise.rs             Noise functions exposed to Luau (perlin, simplex, etc.)
+  theme.rs             Theme system for styled output
   engine/
     mod.rs             Engine loop, session state, all commands, API handler
     commands.rs        Gameplay commands (look, go, get, etc.)
@@ -68,23 +103,36 @@ src/
     web_client.html    Fallback HTML client (used when web/dist/ not built)
   softcode/
     mod.rs             Intent enum, IntentBatch, Budget, SoftcodeRuntime, bytecode cache
-    api.rs             55 Luau-facing functions (read, write, predicates, utility, noise, rng, math, scheduling, emit_data)
-    hooks.rs           30 known hooks, ProgramRecord with persistent state
+    api.rs             Luau-facing functions (read, write, predicates, utility, noise, rng, math, scheduling, emit_data)
+    hooks.rs           32 known hooks, ProgramRecord with persistent state
   world/
     mod.rs             World struct (objects HashMap, scripts, queries)
     object.rs          GameObject, Kind enum (Room/Item/Npc/Player/Exit)
     script.rs          Script (global tick scripts)
     tag.rs             Tag (category:key)
-web/
-  package.json         Vite + Svelte 5 project
-  vite.config.js       Dev server config (proxies /ws and /api to backend)
+web/                   Svelte 5 + Vite web client
+  package.json         Dependencies: @kenn-io/kit-ui (local), @lucide/svelte, svelte 5, vite 6
+  vite.config.js       Dev server config (proxies /ws and /api to backend on :8000)
+  index.html           Vite entry HTML
+  kit-ui/              Local UI component library (subtree)
   src/
-    App.svelte         Main layout: topbar, output pane, sidebar, input bar
+    main.js            Svelte mount, imports kit-ui theme + app styles
+    App.svelte         Main layout: TopBar, output pane, sidebar/editor, input bar, settings drawer
     app.css            Theme variables, BBCode markup classes, scrollbar styles
+    lib/
+      api.js           REST API client (POST /api with Bearer token auth)
     components/
       Output.svelte    Scrolling text output with auto-scroll, clickable [cmd] elements
       InputBar.svelte  Command input with history (up/down, prev/next buttons)
       Sidebar.svelte   Structured panels: Who's Here, What's Here, Exits (clickable chips)
+      Editor.svelte    In-browser object editor: title, description, program CRUD via REST API
+      Settings.svelte  Settings drawer: theme toggle, font size, API tokens, account, admin actions
+docs/
+  adr/                 6 architectural decision records (ADR 0001–0006)
+  plans/               Pending work (dbref-migration.md)
+  commands.md          Command reference
+  getting-started.md   Getting started guide
+  softcode-guide.md    Softcode programming guide
 ```
 
 ## Key features

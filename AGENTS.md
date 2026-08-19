@@ -2,13 +2,13 @@
 
 ## What this project is
 
-Hearth MUD is a Rust MUD framework. The game (The Last Stag) is a
-separate repo at `../the-last-stag-mud/`. Game content is pure
-Luau + TOML — no Rust changes needed for game features.
+Hearth MUD is a Rust MUD framework with a Svelte 5 web client. The game
+(The Last Stag) is a separate repo at `../the-last-stag-mud/`. Game
+content is pure Luau + TOML — no Rust changes needed for game features.
 
 ## Before you start
 
-1. Read `CLAUDE.md` for full architecture and source layout
+1. Read `CLAUDE.md` for full architecture, source layout, and dev workflow
 2. Read `CONTEXT.md` for domain vocabulary (Object, Kind, Hook, Intent, etc.)
 3. Check `docs/adr/` for architectural decisions and rationale
 4. Check `docs/plans/` for pending work
@@ -16,11 +16,46 @@ Luau + TOML — no Rust changes needed for game features.
 ## Running
 
 ```sh
-cargo run -- ../the-last-stag-mud/hearth.toml   # run with game
-cargo test                                       # 55 tests, all must pass
+cargo run -- ../the-last-stag-mud/hearth.toml   # run with game (telnet :4000, web :8000)
+cargo test                                       # 121 tests, all must pass
 ```
 
 Delete `*.db` files when schema changes. First account gets admin.
+
+## Web client
+
+The web client lives in `web/` — Svelte 5 + Vite, uses `@kenn-io/kit-ui`
+(vendored in `web/kit-ui/`) for UI components and `@lucide/svelte` for icons.
+
+```sh
+cd web && npm install         # first time
+cd web && npm run dev         # hot-reload dev server on :5173
+cd web && npm run build       # production build to web/dist/
+```
+
+**Dev server proxies** `/ws` and `/api` to the Rust backend on `:8000`
+(configured in `web/vite.config.js`). Open `http://localhost:5173` for
+live development.
+
+**Key files:**
+
+| File                          | Purpose                                            |
+| ----------------------------- | -------------------------------------------------- |
+| `web/src/main.js`             | Svelte mount, imports kit-ui theme + app styles     |
+| `web/src/App.svelte`          | Main layout, WebSocket connection, message dispatch |
+| `web/src/app.css`             | Theme vars, BBCode markup classes                   |
+| `web/src/lib/api.js`          | REST API client (POST /api with Bearer auth)        |
+| `web/src/components/Output.svelte`   | Scrolling text output, auto-scroll, clickable cmds |
+| `web/src/components/InputBar.svelte` | Command input with history (up/down arrows)        |
+| `web/src/components/Sidebar.svelte`  | Structured panels: Who/What's Here, Exits          |
+| `web/src/components/Editor.svelte`   | In-browser object editor (title, desc, programs)   |
+| `web/src/components/Settings.svelte` | Settings drawer (theme, font, tokens, admin)       |
+
+**WebSocket protocol:** Server sends JSON `{ type, ... }` — types are
+`text`, `room`, `auth`, `prompt`, `game`. Client sends plain text commands.
+
+**REST API:** POST `/api` with JSON `{ action, ...params }`, auth via
+`Authorization: Bearer <token>`. Actions defined in `src/engine/mod.rs`.
 
 ## How softcode works
 
@@ -31,7 +66,7 @@ The engine applies the batch atomically after the script finishes.
 The Luau VM is reused across calls. Compiled bytecode is cached by source
 hash. Each call gets a fresh sandboxed environment table.
 
-35 API functions are available to scripts — see `src/softcode/api.rs` or
+API functions are available to scripts — see `src/softcode/api.rs` or
 `the-last-stag-mud/types/hearth.d.luau` for the full typed reference.
 
 ## How the file loader works
@@ -91,6 +126,15 @@ See `docs/plans/dbref-migration.md`. This is the next major change:
 2. Handle in `handle_api_request()`
 3. Both use serde for JSON serialization
 
+### Adding a web client component
+1. Create `.svelte` file in `web/src/components/`
+2. Import from `@kenn-io/kit-ui` for UI primitives (Button, TextInput, IconButton, etc.)
+3. Import icons from `@lucide/svelte/icons/<name>`
+4. Use Svelte 5 runes (`$state`, `$derived`, `$effect`, `$props`)
+5. Wire into `App.svelte` or parent component
+6. Use `api()` from `web/src/lib/api.js` for REST calls
+7. For real-time data, use the WebSocket message types in `App.svelte`
+
 ### Adding game content (no Rust changes)
 1. Create/edit TOML files in `the-last-stag-mud/world/`
 2. Create `.luau` files for programs
@@ -104,6 +148,8 @@ See `docs/plans/dbref-migration.md`. This is the next major change:
 - Softcode tests use `run_script()` helper for quick script evaluation
 - Lock tests use plain unit tests with mock objects
 - Always run full suite before committing: `cargo test`
+- Web client has no automated tests — verify UI changes by running
+  the Vite dev server (`cd web && npm run dev`) and testing in browser
 
 ## Don't
 
