@@ -939,5 +939,103 @@ pub fn install<'scope, 'env>(
         })?,
     )?;
 
+    env.set(
+        "get_map_template",
+        scope.create_function(move |lua, name: String| {
+            let template = map_templates.get(&name).ok_or_else(|| {
+                mlua::Error::RuntimeError(format!("get_map_template: unknown map '{}'", name))
+            })?;
+
+            let grid = template.parse_grid();
+            let out = lua.create_table()?;
+            out.set("name", template.map.name.clone())?;
+            out.set("width", grid.width)?;
+            out.set("height", grid.height)?;
+
+            let cells_table = lua.create_table()?;
+            for y in 0..grid.height {
+                for x in 0..grid.width {
+                    if let Some(ch) = grid.cells[y][x] {
+                        let key = format!("{},{}", x, y);
+                        let cell = lua.create_table()?;
+                        cell.set("x", x)?;
+                        cell.set("y", y)?;
+                        let terrain_key = ch.to_string();
+                        cell.set("terrain", terrain_key.clone())?;
+
+                        if let Some(terrain) = template.terrain.get(&terrain_key) {
+                            cell.set("theme", terrain.theme.clone())?;
+                            cell.set("passable", terrain.passable)?;
+                            if let Some(prefix) = &terrain.title_prefix {
+                                cell.set("title_prefix", prefix.clone())?;
+                            }
+                        }
+
+                        if let Some(ov) = template.cells.get(&key) {
+                            if let Some(title) = &ov.title {
+                                cell.set("title", title.clone())?;
+                            }
+                            if let Some(desc) = &ov.description {
+                                cell.set("description", desc.clone())?;
+                            }
+                            if let Some(fixed) = &ov.fixed_room {
+                                cell.set("fixed_room", fixed.clone())?;
+                            }
+                            if let Some(p) = ov.passable {
+                                cell.set("passable", p)?;
+                            }
+                            if !ov.encounters.is_empty() {
+                                let enc = lua.create_table()?;
+                                for (i, e) in ov.encounters.iter().enumerate() {
+                                    let entry = lua.create_table()?;
+                                    entry.set("monster", e.monster.clone())?;
+                                    entry.set("count_min", e.count[0])?;
+                                    entry.set("count_max", e.count[1])?;
+                                    enc.set(i + 1, entry)?;
+                                }
+                                cell.set("encounters", enc)?;
+                            }
+                        }
+
+                        cells_table.set(key, cell)?;
+                    }
+                }
+            }
+            out.set("cells", cells_table)?;
+
+            let terrain_table = lua.create_table()?;
+            for (key, def) in &template.terrain {
+                let t = lua.create_table()?;
+                t.set("theme", def.theme.clone())?;
+                t.set("passable", def.passable)?;
+                if let Some(prefix) = &def.title_prefix {
+                    t.set("title_prefix", prefix.clone())?;
+                }
+                terrain_table.set(key.clone(), t)?;
+            }
+            out.set("terrain", terrain_table)?;
+
+            Ok(out)
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
+        "apply_template",
+        scope.create_function(move |_, (r, template): (Value, Table)| {
+            let target = ref_of(&r)?;
+            for pair in template.pairs::<String, String>() {
+                if let Ok((hook, source)) = pair {
+                    b.borrow_mut().push(Intent::SetProgram {
+                        target: target.clone(),
+                        hook,
+                        source,
+                    });
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
     Ok(())
 }
