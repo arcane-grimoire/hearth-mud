@@ -11,7 +11,7 @@ use mlua::{Lua, LuaSerdeExt, MultiValue, Scope, Table, Value};
 use crate::map_template::MapTemplateFile;
 use crate::theme::Theme;
 use crate::world::{GameObject, Kind, Tag, World};
-use crate::softcode::{Intent, IntentBatch};
+use crate::softcode::{Intent, IntentBatch, ink};
 
 enum PathSeg {
     Key(String),
@@ -163,6 +163,7 @@ pub fn install<'scope, 'env>(
     map_templates: &'env std::collections::HashMap<String, MapTemplateFile>,
     scheduled_hooks: &'env [crate::softcode::ScheduledHook],
     tick_count: u64,
+    ink_runtime: &'env RefCell<ink::InkRuntime>,
 ) -> mlua::Result<()> {
     // -- Read API --
 
@@ -1354,5 +1355,198 @@ pub fn install<'scope, 'env>(
         })?,
     )?;
 
+    // -- Ink dialog API --
+
+    env.set(
+        "ink_start",
+        scope.create_function(
+            move |lua, (actor, npc, opts): (Value, Value, Option<Table>)| {
+                let player_ref = ref_of(&actor)?;
+                let npc_ref = ref_of(&npc)?;
+
+                let source = if let Some(ref opts) = opts {
+                    if let Ok(file_name) = opts.get::<String>("file") {
+                        ink_runtime
+                            .borrow()
+                            .read_ink_file(&file_name)
+                            .map_err(mlua::Error::external)?
+                    } else {
+                        npc_ink_source(world, &npc_ref)?
+                    }
+                } else {
+                    npc_ink_source(world, &npc_ref)?
+                };
+
+                let resume = opts
+                    .as_ref()
+                    .and_then(|o| o.get::<bool>("resume").ok())
+                    .unwrap_or(true);
+                let state_key = format!("_ink_state_{player_ref}");
+                let saved_state = if resume {
+                    world
+                        .get(&npc_ref)
+                        .and_then(|o| o.attrs.get(&state_key))
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                } else {
+                    None
+                };
+
+                let output = ink_runtime
+                    .borrow_mut()
+                    .start_conversation(
+                        &player_ref,
+                        &npc_ref,
+                        &source,
+                        saved_state.as_deref(),
+                    )
+                    .map_err(mlua::Error::external)?;
+                ink_output_to_table(lua, &output)
+            },
+        )?,
+    )?;
+
+    env.set(
+        "ink_continue",
+        scope.create_function(move |lua, (actor, npc): (Value, Value)| {
+            let player_ref = ref_of(&actor)?;
+            let npc_ref = ref_of(&npc)?;
+            let output = ink_runtime
+                .borrow_mut()
+                .continue_story(&player_ref, &npc_ref)
+                .map_err(mlua::Error::external)?;
+            ink_output_to_table(lua, &output)
+        })?,
+    )?;
+
+    env.set(
+        "ink_choose",
+        scope.create_function(move |lua, (actor, npc, index): (Value, Value, usize)| {
+            let player_ref = ref_of(&actor)?;
+            let npc_ref = ref_of(&npc)?;
+            let output = ink_runtime
+                .borrow_mut()
+                .choose(&player_ref, &npc_ref, index)
+                .map_err(mlua::Error::external)?;
+            ink_output_to_table(lua, &output)
+        })?,
+    )?;
+
+    env.set(
+        "ink_get_var",
+        scope.create_function(move |lua, (actor, npc, name): (Value, Value, String)| {
+            let player_ref = ref_of(&actor)?;
+            let npc_ref = ref_of(&npc)?;
+            let val = ink_runtime
+                .borrow()
+                .get_variable(&player_ref, &npc_ref, &name)
+                .map_err(mlua::Error::external)?;
+            match val {
+                Some(v) => lua.to_value(&v),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
+    env.set(
+        "ink_set_var",
+        scope.create_function(
+            move |lua, (actor, npc, name, val): (Value, Value, String, Value)| {
+                let player_ref = ref_of(&actor)?;
+                let npc_ref = ref_of(&npc)?;
+                let json_val: serde_json::Value = lua.from_value(val)?;
+                ink_runtime
+                    .borrow_mut()
+                    .set_variable(&player_ref, &npc_ref, &name, &json_val)
+                    .map_err(mlua::Error::external)?;
+                Ok(())
+            },
+        )?,
+    )?;
+
+    {
+        let b = Rc::clone(&batch);
+        env.set(
+            "ink_end",
+            scope.create_function(
+                move |_, (actor, npc, save): (Value, Value, Option<bool>)| {
+                    let player_ref = ref_of(&actor)?;
+                    let npc_ref = ref_of(&npc)?;
+                    let save = save.unwrap_or(false);
+                    let state = ink_runtime
+                        .borrow_mut()
+                        .end_conversation(&player_ref, &npc_ref, save)
+                        .map_err(mlua::Error::external)?;
+                    if let Some(state_json) = state {
+                        let key = format!("_ink_state_{player_ref}");
+                        b.borrow_mut().push(Intent::SetAttr {
+                            target: npc_ref,
+                            key,
+                            value: serde_json::Value::String(state_json),
+                        });
+                    }
+                    Ok(true)
+                },
+            )?,
+        )?;
+    }
+
+    env.set(
+        "ink_goto",
+        scope.create_function(
+            move |lua, (actor, npc, path): (Value, Value, String)| {
+                let player_ref = ref_of(&actor)?;
+                let npc_ref = ref_of(&npc)?;
+                let output = ink_runtime
+                    .borrow_mut()
+                    .goto(&player_ref, &npc_ref, &path)
+                    .map_err(mlua::Error::external)?;
+                ink_output_to_table(lua, &output)
+            },
+        )?,
+    )?;
+
     Ok(())
+}
+
+fn npc_ink_source(world: &World, npc_ref: &str) -> mlua::Result<String> {
+    world
+        .get(npc_ref)
+        .and_then(|o| o.attrs.get("_ink_source"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| {
+            mlua::Error::RuntimeError(format!(
+                "object {npc_ref} has no _ink_source attribute"
+            ))
+        })
+}
+
+fn ink_output_to_table(lua: &Lua, output: &ink::InkOutput) -> mlua::Result<Value> {
+    let t = lua.create_table()?;
+    t.set("text", output.text.clone())?;
+    t.set("can_continue", output.can_continue)?;
+    t.set("ended", output.ended)?;
+
+    let choices = lua.create_table()?;
+    for (i, choice) in output.choices.iter().enumerate() {
+        let c = lua.create_table()?;
+        c.set("index", choice.index)?;
+        c.set("text", choice.text.clone())?;
+        let tags = lua.create_table()?;
+        for (j, tag) in choice.tags.iter().enumerate() {
+            tags.set(j + 1, tag.clone())?;
+        }
+        c.set("tags", tags)?;
+        choices.set(i + 1, c)?;
+    }
+    t.set("choices", choices)?;
+
+    let tags = lua.create_table()?;
+    for (i, tag) in output.tags.iter().enumerate() {
+        tags.set(i + 1, tag.clone())?;
+    }
+    t.set("tags", tags)?;
+
+    Ok(Value::Table(t))
 }
