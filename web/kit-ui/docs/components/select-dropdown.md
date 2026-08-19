@@ -1,0 +1,74 @@
+# SelectDropdown
+
+Accessible single-select combobox (ARIA `combobox` + `listbox`) with full
+keyboard navigation: arrows move the highlight, Enter/Space selects, Escape
+closes and refocuses the trigger. Extracted from middleman.
+
+```svelte
+<script lang="ts">
+  import { SelectDropdown, type SelectDropdownOption } from "@kenn-io/kit-ui";
+
+  let sort = $state("updated");
+  const options: SelectDropdownOption[] = [
+    { value: "updated", label: "Recently updated" },
+    { value: "created", label: "Newest" },
+    { value: "rebase", label: "Rebase and merge", triggerLabel: "Rebase", disabled: true },
+  ];
+</script>
+
+<SelectDropdown value={sort} {options} title="Sort" onchange={(v) => (sort = v)} />
+```
+
+## Props
+
+| Prop       | Type                      | Default   | Notes                                                                                                                                                                                  |
+| ---------- | ------------------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `value`    | `string`                  | required  | Selected option value                                                                                                                                                                  |
+| `options`  | `SelectDropdownOption[]`  | required  |                                                                                                                                                                                        |
+| `onchange` | `(value: string) => void` | required  |                                                                                                                                                                                        |
+| `title`    | `string`                  | —         | Prefix for the accessible trigger label ("Sort: Newest") and tooltip                                                                                                                   |
+| `disabled` | `boolean`                 | `false`   |                                                                                                                                                                                        |
+| `align`    | `"start" \| "end"`        | `"start"` | Menu edge aligned with the trigger. Keep `start` — the menu already clamps to the viewport and flips above when out of room; use `end` only for triggers hugging the right screen edge |
+| `class`    | `string`                  | `""`      |                                                                                                                                                                                        |
+
+The menu is `position: fixed` and positioned per open (and on scroll/resize),
+so normal `overflow: hidden`/`auto` ancestors can't clip it, and long option
+lists cap at 320px with internal scrolling (keyboard navigation keeps the
+highlighted option in view). One CSS caveat: an ancestor with `transform`,
+`filter`, or `contain: paint` becomes the containing block for fixed
+descendants — don't put the dropdown inside animated/transformed containers
+(or drop the transform once the animation settles).
+
+## Option shape
+
+```ts
+interface SelectDropdownOption {
+  value: string;
+  label: string;
+  triggerLabel?: string; // shorter label for the closed trigger
+  disabled?: boolean;
+  indicator?: SelectDropdownIndicator; // small status dot after the label
+}
+
+interface SelectDropdownIndicator {
+  /** "neutral" (default) | "info" | "success" | "warning" | "danger" */
+  tone?: SelectDropdownIndicatorTone;
+  /** Tooltip / accessible description of what the dot signals. */
+  title?: string;
+}
+```
+
+An option's `indicator` renders a small dot after its label in the list, and
+after the trigger text while that option is the selection. `tone` defaults to
+**neutral** — a muted dot (`--text-muted`); the semantic tones resolve through
+the shared `data-kit-tone` accent map in `theme.css`. Color must not carry the
+meaning alone: give the dot a `title` — it shows as a tooltip, joins the
+option's accessible name, and is appended to the trigger's aria-label while
+selected ("Primary: Reviews (roborev daemon unreachable)"). A titleless dot is
+decorative and hidden from assistive tech. This is what
+[TopBar](top-bar.md#tab-indicators) feeds tab indicators through when its tabs
+collapse.
+
+**Gotcha:** unlike a native `<select>`, an unmatched `value` does not render
+blank — the trigger falls back to the first option. If you feed `options` from
+a filtered/async list, keep `value` consistent with the visible options.
