@@ -151,6 +151,24 @@ impl IntentBatch {
     pub fn len(&self) -> usize {
         self.intents.len()
     }
+
+    /// Check for a pending write to `target`/`key`, scanning in reverse so
+    /// the latest write wins. Returns `Some(Some(value))` for a pending set,
+    /// `Some(None)` for a pending unset, or `None` if no write is pending.
+    pub fn pending_attr(&self, target: &str, key: &str) -> Option<Option<&serde_json::Value>> {
+        for intent in self.intents.iter().rev() {
+            match intent {
+                Intent::SetAttr { target: t, key: k, value } if t == target && k == key => {
+                    return Some(Some(value));
+                }
+                Intent::UnsetAttr { target: t, key: k } if t == target && k == key => {
+                    return Some(None);
+                }
+                _ => {}
+            }
+        }
+        None
+    }
 }
 
 /// An outward-facing side effect produced by applying an [`IntentBatch`].

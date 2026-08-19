@@ -43,6 +43,13 @@ body {
 .c-magenta { color: #c678dd; }
 .c-cyan { color: #56b6c2; }
 .c-white { color: #abb2bf; }
+.c-bright-red { color: #ff6b7a; }
+.c-bright-green { color: #b5e890; }
+.c-bright-yellow { color: #ffd68a; }
+.c-bright-blue { color: #7cc5ff; }
+.c-bright-magenta { color: #d98cee; }
+.c-bright-cyan { color: #73d0db; }
+.c-bright-white { color: #d7dae0; }
 
 .cmd {
   cursor: pointer;

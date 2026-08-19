@@ -17,6 +17,13 @@ const TAGS: &[TagDef] = &[
     TagDef { name: "magenta", ansi_on: "\x1b[35m", ansi_off: "\x1b[39m", html_class: "c-magenta" },
     TagDef { name: "cyan",    ansi_on: "\x1b[36m", ansi_off: "\x1b[39m", html_class: "c-cyan" },
     TagDef { name: "white",   ansi_on: "\x1b[37m", ansi_off: "\x1b[39m", html_class: "c-white" },
+    TagDef { name: "bright_red",     ansi_on: "\x1b[91m", ansi_off: "\x1b[39m", html_class: "c-bright-red" },
+    TagDef { name: "bright_green",   ansi_on: "\x1b[92m", ansi_off: "\x1b[39m", html_class: "c-bright-green" },
+    TagDef { name: "bright_yellow",  ansi_on: "\x1b[93m", ansi_off: "\x1b[39m", html_class: "c-bright-yellow" },
+    TagDef { name: "bright_blue",    ansi_on: "\x1b[94m", ansi_off: "\x1b[39m", html_class: "c-bright-blue" },
+    TagDef { name: "bright_magenta", ansi_on: "\x1b[95m", ansi_off: "\x1b[39m", html_class: "c-bright-magenta" },
+    TagDef { name: "bright_cyan",    ansi_on: "\x1b[96m", ansi_off: "\x1b[39m", html_class: "c-bright-cyan" },
+    TagDef { name: "bright_white",   ansi_on: "\x1b[97m", ansi_off: "\x1b[39m", html_class: "c-bright-white" },
 ];
 
 fn find_tag(name: &str) -> Option<&'static TagDef> {

@@ -174,9 +174,23 @@ pub fn install<'scope, 'env>(
     )?;
 
     env.set(
+        "resolve_key",
+        scope.create_function(move |_, file_key: String| {
+            Ok(crate::loader::resolve_file_key(world, &file_key))
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
         "get_attr",
         scope.create_function(move |lua, (r, key): (Value, String)| {
             let r = ref_of(&r)?;
+            if let Some(pending) = b.borrow().pending_attr(&r, &key) {
+                return match pending {
+                    Some(v) => lua.to_value(v),
+                    None => Ok(Value::Nil),
+                };
+            }
             match world.get(&r).and_then(|o| o.attrs.get(&key)) {
                 Some(v) => lua.to_value(v),
                 None => Ok(Value::Nil),
@@ -184,10 +198,14 @@ pub fn install<'scope, 'env>(
         })?,
     )?;
 
+    let b = Rc::clone(&batch);
     env.set(
         "has_attr",
         scope.create_function(move |_, (r, key): (Value, String)| {
             let r = ref_of(&r)?;
+            if let Some(pending) = b.borrow().pending_attr(&r, &key) {
+                return Ok(pending.is_some());
+            }
             Ok(world
                 .get(&r)
                 .map(|o| o.attrs.contains_key(&key))
@@ -195,6 +213,7 @@ pub fn install<'scope, 'env>(
         })?,
     )?;
 
+    let b = Rc::clone(&batch);
     env.set(
         "pick",
         scope.create_function(move |lua, args: MultiValue| {
@@ -207,15 +226,22 @@ pub fn install<'scope, 'env>(
                 Value::String(s) => s.to_str()?.to_string(),
                 _ => return Err(mlua::Error::RuntimeError("pick: attr key must be a string".into())),
             };
-            let obj = world.get(&r).ok_or_else(|| {
-                mlua::Error::RuntimeError(format!("pick: no object '{}'", r))
-            })?;
-            let root = match obj.attrs.get(&attr_key) {
-                Some(v) => v,
-                None => return Ok(Value::Nil),
-            };
+
+            let root_val: serde_json::Value;
+            if let Some(pending) = b.borrow().pending_attr(&r, &attr_key) {
+                match pending {
+                    Some(v) => root_val = v.clone(),
+                    None => return Ok(Value::Nil),
+                }
+            } else {
+                match world.get(&r).and_then(|o| o.attrs.get(&attr_key)) {
+                    Some(v) => root_val = v.clone(),
+                    None => return Ok(Value::Nil),
+                }
+            }
+
             let path = args_vec.split_off(2);
-            let mut current = root;
+            let mut current = &root_val;
             for key in &path {
                 match key {
                     Value::Integer(i) => {
