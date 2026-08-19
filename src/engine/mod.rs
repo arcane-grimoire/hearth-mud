@@ -2617,11 +2617,35 @@ impl Engine {
         }
     }
 
-    fn send_room_data(&self, session_id: &str, actor_ref: &str) {
+    fn send_room_data(&mut self, session_id: &str, actor_ref: &str) {
         let room_ref = match self.world.get(actor_ref).and_then(|a| a.location_ref.clone()) {
             Some(r) => r,
             None => return,
         };
+
+        let hidden_tag = Tag { category: "system".into(), key: "hidden".into() };
+        let offline_tag = Tag { category: "system".into(), key: "offline".into() };
+
+        // Resolve can_see for hidden objects (same logic as look_with_visibility)
+        let hidden_candidates: Vec<(String, bool)> = self
+            .world
+            .objects_in(&room_ref)
+            .iter()
+            .filter(|o| o.tags.contains(&hidden_tag) && o.ref_id != actor_ref)
+            .map(|o| (o.ref_id.clone(), o.programs.contains_key("can_see")))
+            .collect();
+        let mut hidden_refs: Vec<String> = Vec::new();
+        for (ref_id, has_can_see) in hidden_candidates {
+            if !has_can_see {
+                hidden_refs.push(ref_id);
+                continue;
+            }
+            match self.fire_hook(&ref_id, "can_see", actor_ref, Some(&room_ref), None) {
+                Ok(run) if !run.denied => {}
+                _ => hidden_refs.push(ref_id),
+            }
+        }
+
         let room = match self.world.get(&room_ref) {
             Some(r) => r,
             None => return,
@@ -2635,9 +2659,12 @@ impl Engine {
             ExitData { dir: e.key.clone(), name: dest_name }
         }).collect();
 
-        let offline_tag = Tag { category: "system".into(), key: "offline".into() };
         let contents: Vec<EntityData> = self.world.objects_in(&room_ref).into_iter()
-            .filter(|o| o.ref_id != actor_ref && !o.tags.contains(&offline_tag))
+            .filter(|o| {
+                o.ref_id != actor_ref
+                    && !o.tags.contains(&offline_tag)
+                    && !hidden_refs.contains(&o.ref_id)
+            })
             .map(|o| EntityData {
                 name: o.display_name().to_string(),
                 kind: format!("{}", o.kind),
@@ -3061,6 +3088,16 @@ impl Engine {
             None => return "You're floating in the void.\r\n".to_string(),
         };
 
+        // If the room has an on_look hook, let it handle everything
+        let room_has_on_look = self
+            .world
+            .get(&room_ref)
+            .is_some_and(|o| o.programs.contains_key("on_look"));
+        if room_has_on_look {
+            let _ = self.fire_hook(&room_ref, "on_look", actor_ref, Some(&room_ref), None);
+            return String::new();
+        }
+
         let hidden_tag = crate::world::Tag {
             category: "system".into(),
             key: "hidden".into(),
@@ -3077,13 +3114,11 @@ impl Engine {
 
         for (ref_id, has_can_see) in candidates {
             if !has_can_see {
-                // No can_see hook — hidden means hidden
                 hidden_refs.push(ref_id);
                 continue;
             }
-            // Fire can_see — if it returns false (denied), stay hidden
             match self.fire_hook(&ref_id, "can_see", actor_ref, Some(&room_ref), None) {
-                Ok(run) if !run.denied => {} // can_see returned true — viewer sees it
+                Ok(run) if !run.denied => {}
                 _ => hidden_refs.push(ref_id),
             }
         }
@@ -3417,6 +3452,23 @@ impl Engine {
             }
         }
 
+        // If the room has on_say, let the hook handle all distribution
+        let room_has_on_say = self
+            .world
+            .get(&room_ref)
+            .is_some_and(|o| o.programs.contains_key("on_say"));
+        if room_has_on_say {
+            // Store the message as an attr so the hook can read it
+            if let Some(room_obj) = self.world.get_mut(&room_ref) {
+                room_obj.attrs.insert("_say_message".into(), serde_json::json!(message));
+            }
+            let _ = self.fire_hook(&room_ref, "on_say", actor_ref, Some(&room_ref), None);
+            if let Some(room_obj) = self.world.get_mut(&room_ref) {
+                room_obj.attrs.remove("_say_message");
+            }
+            return String::new();
+        }
+
         let speaker_name = self
             .world
             .get(actor_ref)
@@ -3436,9 +3488,6 @@ impl Engine {
                 }
             }
         }
-
-        // Fire on_say on the room
-        let _ = self.fire_hook(&room_ref, "on_say", actor_ref, Some(&room_ref), None);
 
         format!("You say, \"{}\"\r\n", message)
     }
