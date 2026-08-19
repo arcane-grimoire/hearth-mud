@@ -701,6 +701,55 @@ pub fn install<'scope, 'env>(
 
     let b = Rc::clone(&batch);
     env.set(
+        "emit_nearby",
+        scope.create_function(
+            move |_, (r, x, y, radius, message, exclude): (Value, f64, f64, f64, String, Option<Table>)| {
+                let room = ref_of(&r)?;
+                let mut exclude_refs = Vec::new();
+                if let Some(t) = exclude {
+                    for pair in t.sequence_values::<Value>() {
+                        exclude_refs.push(ref_of(&pair?)?);
+                    }
+                }
+                b.borrow_mut().push(Intent::EmitNearby {
+                    room,
+                    x,
+                    y,
+                    radius,
+                    message,
+                    exclude: exclude_refs,
+                });
+                Ok(())
+            },
+        )?,
+    )?;
+
+    env.set(
+        "get_nearby",
+        scope.create_function(move |lua, (r, x, y, radius): (Value, f64, f64, f64)| {
+            let room = ref_of(&r)?;
+            let r2 = radius * radius;
+            let out = lua.create_table()?;
+            let mut i = 1;
+            for obj in world.objects.values() {
+                if obj.location_ref.as_deref() != Some(&room) {
+                    continue;
+                }
+                let ox = obj.attrs.get("_x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let oy = obj.attrs.get("_y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let dx = ox - x;
+                let dy = oy - y;
+                if dx * dx + dy * dy <= r2 {
+                    out.set(i, object_to_table(lua, obj)?)?;
+                    i += 1;
+                }
+            }
+            Ok(out)
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
         "move_object",
         scope.create_function(move |_, (r, dest): (Value, Value)| {
             let target = ref_of(&r)?;
@@ -887,9 +936,15 @@ pub fn install<'scope, 'env>(
     let b = Rc::clone(&batch);
     env.set(
         "trigger",
-        scope.create_function(move |_, (r, hook): (Value, String)| {
+        scope.create_function(move |lua, (r, hook, data): (Value, String, Option<Value>)| {
             let target = ref_of(&r)?;
-            b.borrow_mut().push(Intent::Trigger { target, hook });
+            let data = match data {
+                Some(v) if !matches!(v, Value::Nil) => {
+                    Some(lua.from_value::<serde_json::Value>(v)?)
+                }
+                _ => None,
+            };
+            b.borrow_mut().push(Intent::Trigger { target, hook, data });
             Ok(())
         })?,
     )?;

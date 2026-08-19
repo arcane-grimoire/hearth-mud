@@ -101,6 +101,15 @@ pub enum Intent {
     Trigger {
         target: String,
         hook: String,
+        data: Option<serde_json::Value>,
+    },
+    EmitNearby {
+        room: String,
+        x: f64,
+        y: f64,
+        radius: f64,
+        message: String,
+        exclude: Vec<String>,
     },
     /// Attach a Lock DSL expression to one of `target`'s hooks (e.g.
     /// `"can_enter"`). Used by `map_template`'s `lock` cell override — see
@@ -196,6 +205,15 @@ pub enum Effect {
     TriggerHook {
         target: String,
         hook: String,
+        data: Option<serde_json::Value>,
+    },
+    EmitNearby {
+        room: String,
+        x: f64,
+        y: f64,
+        radius: f64,
+        message: String,
+        exclude: Vec<String>,
     },
     EmitData {
         target: String,
@@ -371,6 +389,7 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 effects.push(Effect::TriggerHook {
                     target: ref_id.clone(),
                     hook: "on_create".to_string(),
+                    data: None,
                 });
             }
             Intent::SetProgram { target, hook, source } => {
@@ -380,13 +399,24 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 crate::softcode::hooks::set_program(obj, hook, source.clone())
                     .map_err(|e| format!("set_program: {}", e))?;
             }
-            Intent::Trigger { target, hook } => {
+            Intent::Trigger { target, hook, data } => {
                 if world.get(target).is_none() {
                     return Err(format!("trigger: no object '{}'", target));
                 }
                 effects.push(Effect::TriggerHook {
                     target: target.clone(),
                     hook: hook.clone(),
+                    data: data.clone(),
+                });
+            }
+            Intent::EmitNearby { room, x, y, radius, message, exclude } => {
+                effects.push(Effect::EmitNearby {
+                    room: room.clone(),
+                    x: *x,
+                    y: *y,
+                    radius: *radius,
+                    message: message.clone(),
+                    exclude: exclude.clone(),
                 });
             }
             Intent::SetLock { target, hook, expr } => {

@@ -1967,21 +1967,53 @@ impl Engine {
                 Effect::CancelScheduledHook { target, hook } => {
                     self.scheduled_hooks.retain(|s| !(s.target == *target && s.hook == *hook));
                 }
-                Effect::TriggerHook { target, hook } => {
-                    triggers.push((target.clone(), hook.clone()));
+                Effect::TriggerHook { target, hook, data } => {
+                    triggers.push((target.clone(), hook.clone(), data.clone()));
+                }
+                Effect::EmitNearby { room, x, y, radius, message, exclude } => {
+                    let r2 = radius * radius;
+                    for (_, session) in &self.sessions {
+                        if let SessionState::Playing { actor_ref: ar, .. } = &session.state {
+                            if exclude.contains(ar) {
+                                continue;
+                            }
+                            if let Some(actor) = self.world.get(ar) {
+                                if actor.location_ref.as_deref() != Some(room) {
+                                    continue;
+                                }
+                                let ax = actor.attrs.get("_x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let ay = actor.attrs.get("_y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let dx = ax - x;
+                                let dy = ay - y;
+                                if dx * dx + dy * dy <= r2 {
+                                    let _ = session.tx.send(ClientMessage::Text { text: message.clone() });
+                                }
+                            }
+                        }
+                    }
                 }
                 Effect::EmitData { target, channel, data } => {
                     self.send_emit_data(target, channel, data);
                 }
             }
         }
-        for (target, hook) in triggers {
+        for (target, hook, data) in triggers {
             let room_ref = self
                 .world
                 .get(&target)
                 .and_then(|o| o.location_ref.clone());
+            if data.is_some() {
+                if let Some(obj) = self.world.get_mut(&target) {
+                    obj.attrs.insert("_trigger_data".into(), data.clone().unwrap());
+                }
+            }
             if let Err(e) = self.fire_hook(&target, &hook, actor_ref, room_ref.as_deref(), None) {
                 tracing::warn!(hook = %hook, target = %target, error = %e, "Triggered hook error");
+            }
+            if data.is_some() {
+                if let Some(obj) = self.world.get_mut(&target) {
+                    obj.attrs.remove("_trigger_data");
+                }
             }
         }
     }
