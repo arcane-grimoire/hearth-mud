@@ -1992,6 +1992,57 @@ impl Engine {
                         }
                     }
                 }
+                Effect::EmitRadius { room, radius, messages, exclude } => {
+                    // BFS walk from source room through exits
+                    let mut visited: HashMap<String, u32> = HashMap::new();
+                    let mut queue: std::collections::VecDeque<(String, u32)> = std::collections::VecDeque::new();
+                    visited.insert(room.clone(), 0);
+                    queue.push_back((room.clone(), 0));
+
+                    while let Some((current_room, dist)) = queue.pop_front() {
+                        if let Some(msg) = messages.get(&dist) {
+                            for (_, session) in &self.sessions {
+                                if let SessionState::Playing { actor_ref: ar, .. } = &session.state {
+                                    if exclude.contains(ar) {
+                                        continue;
+                                    }
+                                    if let Some(actor) = self.world.get(ar) {
+                                        if actor.location_ref.as_deref() == Some(&current_room) {
+                                            let _ = session.tx.send(ClientMessage::Text {
+                                                text: msg.clone(),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if dist < *radius {
+                            for exit in self.world.exits_from(&current_room) {
+                                if let Some(target_ref) = &exit.target_ref {
+                                    let muffle = exit
+                                        .attrs
+                                        .get("muffle")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0) as u32;
+                                    let blocked = exit
+                                        .attrs
+                                        .get("blocked_sound")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false);
+                                    if blocked {
+                                        continue;
+                                    }
+                                    let next_dist = dist + 1 + muffle;
+                                    if next_dist <= *radius && !visited.contains_key(target_ref) {
+                                        visited.insert(target_ref.clone(), next_dist);
+                                        queue.push_back((target_ref.clone(), next_dist));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 Effect::EmitData { target, channel, data } => {
                     self.send_emit_data(target, channel, data);
                 }

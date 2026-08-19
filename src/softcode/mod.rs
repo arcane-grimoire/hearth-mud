@@ -139,6 +139,12 @@ pub enum Intent {
         channel: String,
         data: serde_json::Value,
     },
+    EmitRadius {
+        room: String,
+        radius: u32,
+        messages: HashMap<u32, String>,
+        exclude: Vec<String>,
+    },
 }
 
 /// The intents a Program has queued during a single run. Collected while the
@@ -219,6 +225,12 @@ pub enum Effect {
         target: String,
         channel: String,
         data: serde_json::Value,
+    },
+    EmitRadius {
+        room: String,
+        radius: u32,
+        messages: HashMap<u32, String>,
+        exclude: Vec<String>,
     },
 }
 
@@ -466,6 +478,17 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                     target: target.clone(),
                     channel: channel.clone(),
                     data: data.clone(),
+                });
+            }
+            Intent::EmitRadius { room, radius, messages, exclude } => {
+                if world.get(room).is_none() {
+                    return Err(format!("emit_radius: no room '{}'", room));
+                }
+                effects.push(Effect::EmitRadius {
+                    room: room.clone(),
+                    radius: *radius,
+                    messages: messages.clone(),
+                    exclude: exclude.clone(),
                 });
             }
         }

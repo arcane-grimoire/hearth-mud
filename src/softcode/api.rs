@@ -724,6 +724,35 @@ pub fn install<'scope, 'env>(
         )?,
     )?;
 
+    let b = Rc::clone(&batch);
+    env.set(
+        "emit_radius",
+        scope.create_function(
+            move |_, (r, radius, messages, exclude): (Value, u32, Table, Option<Table>)| {
+                let room = ref_of(&r)?;
+                let mut msg_map = HashMap::new();
+                for pair in messages.pairs::<u32, String>() {
+                    if let Ok((dist, msg)) = pair {
+                        msg_map.insert(dist, msg);
+                    }
+                }
+                let mut exclude_refs = Vec::new();
+                if let Some(t) = exclude {
+                    for pair in t.sequence_values::<Value>() {
+                        exclude_refs.push(ref_of(&pair?)?);
+                    }
+                }
+                b.borrow_mut().push(Intent::EmitRadius {
+                    room,
+                    radius,
+                    messages: msg_map,
+                    exclude: exclude_refs,
+                });
+                Ok(())
+            },
+        )?,
+    )?;
+
     env.set(
         "get_nearby",
         scope.create_function(move |lua, (r, x, y, radius): (Value, f64, f64, f64)| {
