@@ -1071,24 +1071,19 @@ impl Engine {
                 let account_id = account.id.clone();
                 let character_ref = account.character_ref.clone().unwrap_or_default();
 
-                // Check if already logged in
-                for (other_sid, other_session) in &self.sessions {
-                    if other_sid == session_id {
-                        continue;
-                    }
-                    if let SessionState::Playing {
-                        account_id: other_account_id,
-                        ..
-                    } = &other_session.state
-                    {
-                        if *other_account_id == account_id {
-                            self.send(session_id, "\r\nThat account is already logged in.\r\nUsername: ");
-                            if let Some(session) = self.sessions.get_mut(session_id) {
-                                session.state = SessionState::PromptUsername;
-                            }
-                            return;
-                        }
-                    }
+                // Kick any existing sessions for this account
+                let stale: Vec<String> = self
+                    .sessions
+                    .iter()
+                    .filter(|(sid, s)| {
+                        *sid != session_id
+                            && matches!(&s.state, SessionState::Playing { account_id: aid, .. } if *aid == account_id)
+                    })
+                    .map(|(sid, _)| sid.clone())
+                    .collect();
+                for old_sid in stale {
+                    self.send(&old_sid, "\r\nLogged in from another session.\r\n");
+                    self.sessions.remove(&old_sid);
                 }
 
                 self.enter_world(session_id, &username, &character_ref, &account_id);
