@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Json, State, WebSocketUpgrade};
-use axum::response::{Html, IntoResponse};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use tokio::sync::mpsc;
@@ -12,6 +12,14 @@ use uuid::Uuid;
 
 use crate::engine::{ApiRequest, ApiResponse, ClientMessage, EngineMessage};
 use crate::markup;
+
+#[cfg(feature = "bundle-web")]
+use rust_embed::Embed;
+
+#[cfg(feature = "bundle-web")]
+#[derive(Embed)]
+#[folder = "web/dist/"]
+struct EmbeddedAssets;
 
 #[derive(Clone)]
 struct AppState {
@@ -47,9 +55,7 @@ pub async fn start_web(
             .not_found_service(ServeFile::new(dir.join("index.html")));
         base.fallback_service(serve)
     } else {
-        tracing::info!("Using embedded web client (run `npm run build` in web/ for the full UI)");
-        base.route("/", get(index_handler))
-            .route("/play", get(index_handler))
+        web_fallback(base)
     };
 
     let addr: SocketAddr = addr.parse().map_err(|e| {
@@ -64,8 +70,55 @@ pub async fn start_web(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
 }
 
-async fn index_handler() -> impl IntoResponse {
-    Html(include_str!("web_client.html"))
+#[cfg(feature = "bundle-web")]
+fn web_fallback(base: Router) -> Router {
+    tracing::info!("Serving bundled web client");
+    base.fallback(embedded_handler)
+}
+
+#[cfg(not(feature = "bundle-web"))]
+fn web_fallback(base: Router) -> Router {
+    tracing::info!("No web client (build with --features bundle-web or run `npm run build` in web/)");
+    base
+}
+
+#[cfg(feature = "bundle-web")]
+async fn embedded_handler(uri: axum::http::Uri) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+
+    if let Some(file) = EmbeddedAssets::get(path) {
+        let mime = match path.rsplit('.').next().unwrap_or("") {
+            "html" => "text/html; charset=utf-8",
+            "js" | "mjs" => "application/javascript; charset=utf-8",
+            "css" => "text/css; charset=utf-8",
+            "svg" => "image/svg+xml",
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "ico" => "image/x-icon",
+            "woff2" => "font/woff2",
+            "woff" => "font/woff",
+            "json" => "application/json",
+            "wasm" => "application/wasm",
+            _ => "application/octet-stream",
+        };
+        return (StatusCode::OK, [(header::CONTENT_TYPE, mime)], file.data.to_vec())
+            .into_response();
+    }
+
+    // SPA fallback
+    if let Some(file) = EmbeddedAssets::get("index.html") {
+        return (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            file.data.to_vec(),
+        )
+            .into_response();
+    }
+
+    StatusCode::NOT_FOUND.into_response()
 }
 
 async fn ws_handler(

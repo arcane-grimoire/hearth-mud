@@ -3,12 +3,14 @@
   import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
   import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
   import SettingsIcon from '@lucide/svelte/icons/settings';
+  import DatabaseIcon from '@lucide/svelte/icons/database';
   import Output from './components/Output.svelte';
   import InputBar from './components/InputBar.svelte';
   import Sidebar from './components/Sidebar.svelte';
   import Editor from './components/Editor.svelte';
+  import Admin from './components/Admin.svelte';
   import Settings from './components/Settings.svelte';
-  import { setToken } from './lib/api.js';
+  import { setToken, getSavedToken } from './lib/api.js';
 
   let output;
   let status = $state('connecting');
@@ -17,6 +19,7 @@
   let scopes = $state([]);
   let editingEntity = $state(null);
   let settingsOpen = $state(false);
+  let adminOpen = $state(false);
   let ws;
   let reconnectTimer;
 
@@ -32,7 +35,11 @@
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${proto}//${location.host}/ws`);
 
-    ws.onopen = () => { status = 'connected'; };
+    ws.onopen = () => {
+      status = 'connected';
+      const saved = getSavedToken();
+      if (saved) ws.send(`reconnect ${saved}`);
+    };
     ws.onclose = () => {
       status = 'disconnected';
       output?.append('<span class="system">\n[Connection closed]\n</span>');
@@ -74,8 +81,9 @@
   }
 
   function sendCommand(cmd) { handleCommand(cmd); }
-  function openEditor(entity) { editingEntity = entity; }
+  function openEditor(entity) { editingEntity = entity; adminOpen = false; }
   function closeEditor() { editingEntity = null; }
+  function toggleAdmin() { adminOpen = !adminOpen; editingEntity = null; }
   function toggleSidebar() { sidebarOpen = !sidebarOpen; }
 
   let isBuilder = $derived(scopes.includes('builder') || scopes.includes('admin'));
@@ -108,6 +116,11 @@
       {/if}
     {/snippet}
     {#snippet right()}
+      {#if isBuilder}
+        <IconButton ariaLabel="Admin" size="sm" onclick={toggleAdmin}>
+          <DatabaseIcon size={14} />
+        </IconButton>
+      {/if}
       <IconButton ariaLabel="Settings" size="sm" onclick={() => settingsOpen = true}>
         <SettingsIcon size={14} />
       </IconButton>
@@ -129,7 +142,9 @@
 
   <div class="main">
     <Output bind:this={output} oncommand={handleCommand} />
-    {#if editingEntity}
+    {#if adminOpen}
+      <Admin onclose={() => adminOpen = false} />
+    {:else if editingEntity}
       <Editor entity={editingEntity} onclose={closeEditor} />
     {:else if sidebarOpen}
       <Sidebar {status} room={roomData} {sendCommand} {isBuilder} onedit={openEditor} />
@@ -174,7 +189,8 @@
 
   @media (max-width: 700px) {
     .main :global(.sidebar),
-    .main :global(.editor) {
+    .main :global(.editor),
+    .main :global(.admin) {
       position: absolute;
       right: 0;
       top: 44px;

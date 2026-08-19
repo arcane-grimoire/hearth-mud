@@ -133,6 +133,7 @@ struct TokenInfo {
     account_id: String,
     label: String,
     persistent: bool,
+    expires_at: Option<u64>,
 }
 
 /// The outcome of [`Engine::fire_hook`].
@@ -238,8 +239,8 @@ impl Engine {
 
         let mut api_tokens = HashMap::new();
         if let Ok(tokens) = db.load_tokens() {
-            for (hash, account_id, label) in tokens {
-                api_tokens.insert(hash, TokenInfo { account_id, label, persistent: true });
+            for (hash, account_id, label, expires_at) in tokens {
+                api_tokens.insert(hash, TokenInfo { account_id, label, persistent: true, expires_at });
             }
         }
 
@@ -407,6 +408,15 @@ impl Engine {
                         error = %e, "Scheduled hook error"
                     );
                 }
+            }
+        }
+
+        // Clean up expired tokens every 60 ticks (~1 minute)
+        if tick % 60 == 0 {
+            let before = self.api_tokens.len();
+            self.api_tokens.retain(|_, t| !Self::is_token_expired(t));
+            if self.api_tokens.len() < before {
+                self.save_tokens();
             }
         }
 
@@ -619,6 +629,17 @@ impl Engine {
         format!("{:016x}", hasher.finish())
     }
 
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn is_token_expired(info: &TokenInfo) -> bool {
+        info.expires_at.map_or(false, |exp| Self::now_secs() > exp)
+    }
+
     fn handle_api_request(&mut self, req: ApiRequest, token: Option<String>) -> ApiResponse {
         let is_read = matches!(
             &req,
@@ -634,6 +655,7 @@ impl Engine {
                 .as_deref()
                 .map(Self::hash_token)
                 .and_then(|hash| self.api_tokens.get(&hash))
+                .filter(|info| !Self::is_token_expired(info))
                 .map(|info| info.account_id.clone());
 
             let account_id = match account_id {
@@ -959,7 +981,59 @@ impl Engine {
         }
     }
 
+    fn handle_token_reconnect(&mut self, session_id: &str, token: &str) {
+        let token_hash = Self::hash_token(token);
+
+        let (account_id, expired) = match self.api_tokens.get(&token_hash) {
+            Some(info) => (info.account_id.clone(), Self::is_token_expired(info)),
+            None => {
+                self.send(session_id, "\r\nSession expired. Please log in.\r\nUsername: ");
+                return;
+            }
+        };
+
+        if expired {
+            self.api_tokens.remove(&token_hash);
+            self.save_tokens();
+            self.send(session_id, "\r\nSession expired. Please log in.\r\nUsername: ");
+            return;
+        }
+
+        let account = match self.accounts.get(&account_id) {
+            Some(a) => a,
+            None => {
+                self.send(session_id, "\r\nAccount not found. Please log in.\r\nUsername: ");
+                return;
+            }
+        };
+
+        let username = account.username.clone();
+        let character_ref = account.character_ref.clone().unwrap_or_default();
+
+        // If already logged in from another session (e.g. stale tab), kick the old one
+        let stale: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(sid, s)| {
+                *sid != session_id
+                    && matches!(&s.state, SessionState::Playing { account_id: aid, .. } if *aid == account_id)
+            })
+            .map(|(sid, _)| sid.clone())
+            .collect();
+        for old_sid in stale {
+            self.send(&old_sid, "\r\nReconnected from another session.\r\n");
+            self.sessions.remove(&old_sid);
+        }
+
+        self.enter_world(session_id, &username, &character_ref, &account_id);
+    }
+
     fn handle_login_username(&mut self, session_id: &str, input: &str) {
+        if let Some(token) = input.strip_prefix("reconnect ") {
+            self.handle_token_reconnect(session_id, token.trim());
+            return;
+        }
+
         if input.eq_ignore_ascii_case("create") {
             if let Some(session) = self.sessions.get_mut(session_id) {
                 session.state = SessionState::CreateUsername;
@@ -1199,9 +1273,11 @@ impl Engine {
             TokenInfo {
                 account_id: account_id.to_string(),
                 label: format!("session-{}", &session_id[..8]),
-                persistent: false,
+                persistent: true,
+                expires_at: Some(Self::now_secs() + 30 * 24 * 60 * 60),
             },
         );
+        self.save_tokens();
 
         let scopes: Vec<String> = self
             .accounts
@@ -1932,6 +2008,7 @@ impl Engine {
                         account_id,
                         label: rest.to_string(),
                         persistent: true,
+                        expires_at: None,
                     },
                 );
                 self.save_tokens();
@@ -1976,11 +2053,11 @@ impl Engine {
     }
 
     fn save_tokens(&self) {
-        let tokens: Vec<(String, String, String)> = self
+        let tokens: Vec<(String, String, String, Option<u64>)> = self
             .api_tokens
             .iter()
             .filter(|(_, t)| t.persistent)
-            .map(|(hash, t)| (hash.clone(), t.account_id.clone(), t.label.clone()))
+            .map(|(hash, t)| (hash.clone(), t.account_id.clone(), t.label.clone(), t.expires_at))
             .collect();
         self.db.save_tokens(&tokens).ok();
     }
@@ -3552,6 +3629,7 @@ mod tests {
             account_id,
             label: "test".to_string(),
             persistent: false,
+            expires_at: None,
         });
         let handle = tokio::spawn(engine.run());
         (tx, handle)

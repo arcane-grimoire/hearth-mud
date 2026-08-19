@@ -88,9 +88,12 @@ impl Database {
             CREATE TABLE IF NOT EXISTS api_tokens (
                 token_hash TEXT PRIMARY KEY,
                 account_id TEXT NOT NULL,
-                label TEXT NOT NULL
+                label TEXT NOT NULL,
+                expires_at INTEGER
             );"
         )?;
+
+        let _ = self.conn.execute("ALTER TABLE api_tokens ADD COLUMN expires_at INTEGER", []);
 
         Ok(())
     }
@@ -404,29 +407,30 @@ impl Database {
         Ok(hooks)
     }
 
-    pub fn save_tokens(&self, tokens: &[(String, String, String)]) -> rusqlite::Result<()> {
+    pub fn save_tokens(&self, tokens: &[(String, String, String, Option<u64>)]) -> rusqlite::Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("DELETE FROM api_tokens", [])?;
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO api_tokens (token_hash, account_id, label) VALUES (?1, ?2, ?3)",
+                "INSERT INTO api_tokens (token_hash, account_id, label, expires_at) VALUES (?1, ?2, ?3, ?4)",
             )?;
-            for (hash, account_id, label) in tokens {
-                stmt.execute(params![hash, account_id, label])?;
+            for (hash, account_id, label, expires_at) in tokens {
+                stmt.execute(params![hash, account_id, label, expires_at])?;
             }
         }
         tx.commit()
     }
 
-    pub fn load_tokens(&self) -> rusqlite::Result<Vec<(String, String, String)>> {
+    pub fn load_tokens(&self) -> rusqlite::Result<Vec<(String, String, String, Option<u64>)>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT token_hash, account_id, label FROM api_tokens")?;
+            .prepare("SELECT token_hash, account_id, label, expires_at FROM api_tokens")?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, Option<u64>>(3)?,
             ))
         })?;
         rows.collect()
