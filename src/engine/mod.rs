@@ -173,6 +173,8 @@ pub struct Engine {
     scheduled_hooks: Vec<ScheduledHook>,
     /// API tokens: hash → info. Both session (ephemeral) and persistent tokens.
     api_tokens: HashMap<String, TokenInfo>,
+    /// Content hashes from the last load/reload, used to skip unchanged files.
+    file_hashes: HashMap<std::path::PathBuf, u64>,
 }
 
 use crate::softcode::ScheduledHook;
@@ -195,11 +197,15 @@ impl Engine {
         // Always load/reload game files — new content is created,
         // managed content is updated, non-managed content is untouched.
         let mut key_map: HashMap<String, String> = HashMap::new();
+        let mut file_hashes: HashMap<std::path::PathBuf, u64> = HashMap::new();
         let softcode = SoftcodeRuntime::new();
         if let Some(game_dir) = &config.game_dir {
             let game_path = std::path::Path::new(game_dir);
-            match crate::loader::load_game_dir(game_path, &mut world) {
-                Ok(map) => key_map = map,
+            match crate::loader::load_game_dir(game_path, &mut world, &HashMap::new()) {
+                Ok(result) => {
+                    key_map = result.key_map;
+                    file_hashes = result.file_hashes;
+                }
                 Err(e) => tracing::error!(error = %e, "Failed to load game content"),
             }
             softcode.load_modules(crate::loader::load_modules(game_path));
@@ -261,6 +267,7 @@ impl Engine {
             map_templates,
             scheduled_hooks,
             api_tokens,
+            file_hashes,
         }
     }
 
@@ -2914,13 +2921,30 @@ impl Engine {
         self.softcode.invalidate_cache();
         self.softcode
             .load_modules(crate::loader::load_modules(game_path));
-        match crate::loader::load_game_dir(game_path, &mut self.world) {
-            Ok(key_map) => {
-                if let Some(ref_id) = key_map.get(&self.spawn_room) {
+        match crate::loader::load_game_dir(game_path, &mut self.world, &self.file_hashes) {
+            Ok(result) => {
+                if let Some(ref_id) = result.key_map.get(&self.spawn_room) {
                     self.spawn_room_ref = ref_id.clone();
                 }
+                self.file_hashes = result.file_hashes;
                 self.fire_lifecycle_hook("on_reload");
-                "World reloaded from files. Script cache cleared.\r\n".to_string()
+
+                let mut msg = String::new();
+                if result.changed_files.is_empty() && result.created == 0 {
+                    msg.push_str("No changes detected.\r\n");
+                } else {
+                    use std::fmt::Write;
+                    let _ = write!(
+                        msg,
+                        "Reload: {} created, {} updated, {} unchanged\r\n",
+                        result.created, result.updated, result.skipped
+                    );
+                    for file in &result.changed_files {
+                        let _ = write!(msg, "  modified: {}\r\n", file);
+                    }
+                }
+                msg.push_str("Script cache cleared.\r\n");
+                msg
             }
             Err(e) => format!("Reload error: {}\r\n", e),
         }

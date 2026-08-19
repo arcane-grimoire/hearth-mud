@@ -1,10 +1,28 @@
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
 use crate::softcode::hooks;
 use crate::world::{GameObject, Kind, Script, Tag, World};
+
+fn hash_content(content: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[derive(Debug)]
+pub struct LoadResult {
+    pub key_map: HashMap<String, String>,
+    pub created: u32,
+    pub updated: u32,
+    pub skipped: u32,
+    pub file_hashes: HashMap<PathBuf, u64>,
+    pub changed_files: Vec<String>,
+}
 
 const MANAGED_TAG: Tag = Tag {
     category: String::new(),
@@ -143,7 +161,11 @@ struct ParsedArea {
 /// Returns a map of `"<area>/<key>"` file keys to the dbrefs they resolved
 /// to, so callers (e.g. spawn-room resolution) can look up file-defined
 /// objects by their human-readable key.
-pub fn load_game_dir(game_dir: &Path, world: &mut World) -> Result<HashMap<String, String>, String> {
+pub fn load_game_dir(
+    game_dir: &Path,
+    world: &mut World,
+    prev_hashes: &HashMap<PathBuf, u64>,
+) -> Result<LoadResult, String> {
     if !game_dir.exists() {
         return Err(format!("Game directory not found: {}", game_dir.display()));
     }
@@ -154,15 +176,37 @@ pub fn load_game_dir(game_dir: &Path, world: &mut World) -> Result<HashMap<Strin
 
     if area_files.is_empty() {
         tracing::info!(?game_dir, "No TOML files found in game directory");
-        return Ok(HashMap::new());
+        return Ok(LoadResult {
+            key_map: HashMap::new(),
+            created: 0,
+            updated: 0,
+            skipped: 0,
+            file_hashes: HashMap::new(),
+            changed_files: Vec::new(),
+        });
     }
+
+    let mut new_hashes: HashMap<PathBuf, u64> = HashMap::new();
+    let mut changed_files: Vec<String> = Vec::new();
 
     // Parse every area file up front — later passes need to see all of them
     // together to resolve cross-file/cross-area references.
     let mut parsed: Vec<ParsedArea> = Vec::new();
+    let mut skipped_files: Vec<PathBuf> = Vec::new();
     for path in &area_files {
         let contents = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+        let hash = hash_content(&contents);
+        new_hashes.insert(path.clone(), hash);
+
+        if prev_hashes.get(path) == Some(&hash) {
+            skipped_files.push(path.clone());
+            continue;
+        }
+
+        let relative = path.strip_prefix(game_dir).unwrap_or(path);
+        changed_files.push(relative.display().to_string());
+
         let area_file: AreaFile = toml::from_str(&contents)
             .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
         let area_name = area_file.area.clone().unwrap_or_else(|| {
@@ -178,6 +222,8 @@ pub fn load_game_dir(game_dir: &Path, world: &mut World) -> Result<HashMap<Strin
             file: area_file,
         });
     }
+
+    let skipped = skipped_files.len() as u32;
 
     let managed = managed_tag();
     let mut created = 0u32;
@@ -354,14 +400,48 @@ pub fn load_game_dir(game_dir: &Path, world: &mut World) -> Result<HashMap<Strin
         }
     }
 
+    // Also hash .luau files referenced by programs in changed areas
+    for area in &parsed {
+        for programs in area.file.rooms.iter().flat_map(|r| std::iter::once(&r.programs))
+            .chain(area.file.objects.iter().map(|o| &o.programs))
+        {
+            for source in programs.values() {
+                if let ProgramSource::File { file } = source {
+                    let path = area.base_dir.join(file);
+                    if path.exists() {
+                        if let Ok(contents) = std::fs::read_to_string(&path) {
+                            let hash = hash_content(&contents);
+                            if prev_hashes.get(&path) != Some(&hash) {
+                                let relative = path.strip_prefix(game_dir).unwrap_or(&path);
+                                let name = relative.display().to_string();
+                                if !changed_files.contains(&name) {
+                                    changed_files.push(name);
+                                }
+                            }
+                            new_hashes.insert(path, hash);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     tracing::info!(
         ?game_dir,
         created,
         updated,
+        skipped,
         "Game content loaded from files"
     );
 
-    Ok(key_map)
+    Ok(LoadResult {
+        key_map,
+        created,
+        updated,
+        skipped,
+        file_hashes: new_hashes,
+        changed_files,
+    })
 }
 
 fn sync_managed_tags(obj: &mut GameObject, file_tags: &[String]) {
@@ -593,7 +673,7 @@ mod tests {
         );
 
         let mut world = World::new();
-        let key_map = load_game_dir(&dir.path, &mut world).expect("load should succeed");
+        let key_map = load_game_dir(&dir.path, &mut world, &HashMap::new()).expect("load should succeed").key_map;
 
         let crossroads_ref = key_map.get("town/crossroads").expect("crossroads in key_map");
         let square_ref = key_map.get("town/square").expect("square in key_map");
@@ -638,7 +718,7 @@ mod tests {
         );
 
         let mut world = World::new();
-        let key_map = load_game_dir(&dir.path, &mut world).expect("load should succeed");
+        let key_map = load_game_dir(&dir.path, &mut world, &HashMap::new()).expect("load should succeed").key_map;
 
         let crossroads_ref = key_map.get("town/crossroads").unwrap();
         let edge_ref = key_map.get("forest/edge").unwrap();
@@ -664,11 +744,11 @@ mod tests {
         dir.write_area("town", "town.toml", source);
 
         let mut world = World::new();
-        let key_map1 = load_game_dir(&dir.path, &mut world).expect("first load");
+        let key_map1 = load_game_dir(&dir.path, &mut world, &HashMap::new()).expect("first load").key_map;
         let next_id_after_first = world.next_id;
         let object_count_after_first = world.objects.len();
 
-        let key_map2 = load_game_dir(&dir.path, &mut world).expect("reload");
+        let key_map2 = load_game_dir(&dir.path, &mut world, &HashMap::new()).expect("reload").key_map;
 
         assert_eq!(world.next_id, next_id_after_first, "reload must not mint new dbrefs");
         assert_eq!(world.objects.len(), object_count_after_first, "reload must not duplicate objects");
@@ -692,7 +772,7 @@ mod tests {
         );
 
         let mut world = World::new();
-        let key_map1 = load_game_dir(&dir.path, &mut world).unwrap();
+        let key_map1 = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap().key_map;
         let ref_id = key_map1.get("town/crossroads").unwrap().clone();
 
         dir.write_area(
@@ -706,7 +786,7 @@ mod tests {
                 description = "New description."
             "#,
         );
-        let key_map2 = load_game_dir(&dir.path, &mut world).unwrap();
+        let key_map2 = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap().key_map;
 
         assert_eq!(key_map2.get("town/crossroads"), Some(&ref_id));
         assert_eq!(world.get(&ref_id).unwrap().description, "New description.");
@@ -731,7 +811,7 @@ mod tests {
         );
 
         let mut world = World::new();
-        let err = load_game_dir(&dir.path, &mut world).unwrap_err();
+        let err = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap_err();
         assert!(err.contains("Unresolved reference"), "unexpected error: {}", err);
     }
 
