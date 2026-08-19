@@ -425,14 +425,32 @@ fn resolve_key(area: &str, reference: &str, key_map: &HashMap<String, String>) -
         .ok_or_else(|| format!("Unresolved reference: '{}'", file_key))
 }
 
-/// Scan `<game_dir>/lib/` for `.luau` module files. Returns a map of
-/// module name (stem) to source code.
+/// Built-in stdlib modules, embedded at compile time.
+const STDLIB_MODULES: &[(&str, &str)] = &[
+    ("str", include_str!("../lib/str.luau")),
+    ("collections", include_str!("../lib/collections.luau")),
+    ("random", include_str!("../lib/random.luau")),
+    ("signal", include_str!("../lib/signal.luau")),
+    ("state_machine", include_str!("../lib/state_machine.luau")),
+    ("Grid3D", include_str!("../lib/Grid3D.luau")),
+    ("grids", include_str!("../lib/grids.luau")),
+];
+
+/// Load lib modules: embedded stdlib first, then `<game_dir>/lib/` which
+/// can override any stdlib module by name.
 pub fn load_modules(game_dir: &Path) -> HashMap<String, String> {
+    let mut modules: HashMap<String, String> = STDLIB_MODULES
+        .iter()
+        .map(|(name, src)| (name.to_string(), src.to_string()))
+        .collect();
+
     let lib_dir = game_dir.join("lib");
-    let mut modules = HashMap::new();
     let entries = match std::fs::read_dir(&lib_dir) {
         Ok(e) => e,
-        Err(_) => return modules,
+        Err(_) => {
+            tracing::info!(count = modules.len(), "Loaded lib modules (stdlib only)");
+            return modules;
+        }
     };
     for entry in entries.flatten() {
         let path = entry.path();
@@ -735,9 +753,12 @@ mod tests {
         std::fs::write(lib_dir.join("notes.txt"), "not a module").unwrap();
 
         let modules = load_modules(&dir.path);
-        assert_eq!(modules.len(), 2);
+        assert_eq!(modules.len(), STDLIB_MODULES.len() + 2);
         assert!(modules.contains_key("utils"));
         assert!(modules.contains_key("helpers"));
         assert!(!modules.contains_key("notes"));
+        // stdlib modules are present
+        assert!(modules.contains_key("str"));
+        assert!(modules.contains_key("collections"));
     }
 }
