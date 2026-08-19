@@ -4,7 +4,7 @@ COPY web/ .
 RUN npm ci && npm run build
 
 FROM rust:1-slim AS builder
-RUN apt-get update && apt-get install -y pkg-config && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y pkg-config g++ && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
