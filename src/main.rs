@@ -8,6 +8,7 @@ mod loader;
 mod engine;
 mod locks;
 mod map_template;
+mod markup;
 mod net;
 mod noise;
 mod softcode;
@@ -49,10 +50,20 @@ async fn main() {
         }
     });
 
+    let game_web_dir = config.game_web_dir.as_ref().map(|d| {
+        if let Some(game_dir) = &config.game_dir {
+            let game_root = std::path::Path::new(game_dir)
+                .parent()
+                .unwrap_or(std::path::Path::new(game_dir));
+            game_root.join(d).to_string_lossy().to_string()
+        } else {
+            d.clone()
+        }
+    });
     let web_addr = config.web_addr.clone();
     let web_tx = engine_tx.clone();
     let web_handle = tokio::spawn(async move {
-        if let Err(e) = net::start_web(&web_addr, web_tx).await {
+        if let Err(e) = net::start_web(&web_addr, web_tx, game_web_dir.as_deref()).await {
             tracing::error!(error = %e, "Web server failed");
         }
     });

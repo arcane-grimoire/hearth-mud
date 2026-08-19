@@ -518,6 +518,17 @@ pub fn install<'scope, 'env>(
 
     let b = Rc::clone(&batch);
     env.set(
+        "emit_data",
+        scope.create_function(move |lua, (r, channel, data): (Value, String, Value)| {
+            let target = ref_of(&r)?;
+            let json: serde_json::Value = lua.from_value(data)?;
+            b.borrow_mut().push(Intent::EmitData { target, channel, data: json });
+            Ok(())
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
         "move_object",
         scope.create_function(move |_, (r, dest): (Value, Value)| {
             let target = ref_of(&r)?;

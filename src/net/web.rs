@@ -7,9 +7,11 @@ use axum::routing::{get, post};
 use axum::Router;
 use tokio::sync::mpsc;
 use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 
-use crate::engine::{ApiRequest, ApiResponse, EngineMessage};
+use crate::engine::{ApiRequest, ApiResponse, ClientMessage, EngineMessage};
+use crate::markup;
 
 #[derive(Clone)]
 struct AppState {
@@ -19,18 +21,36 @@ struct AppState {
 pub async fn start_web(
     addr: &str,
     engine_tx: mpsc::UnboundedSender<EngineMessage>,
+    game_web_dir: Option<&str>,
 ) -> std::io::Result<()> {
     let state = AppState {
         engine_tx: engine_tx.clone(),
     };
 
-    let app = Router::new()
-        .route("/", get(index_handler))
-        .route("/play", get(index_handler))
+    let base = Router::new()
         .route("/ws", get(ws_handler))
         .route("/api", post(api_handler))
         .with_state(state)
         .layer(CorsLayer::permissive());
+
+    let web_dir = game_web_dir
+        .map(std::path::Path::new)
+        .filter(|p| p.is_dir())
+        .or_else(|| {
+            let p = std::path::Path::new("web/dist");
+            if p.is_dir() { Some(p) } else { None }
+        });
+
+    let app = if let Some(dir) = web_dir {
+        tracing::info!(dir = %dir.display(), "Serving web client");
+        let serve = ServeDir::new(dir)
+            .not_found_service(ServeFile::new(dir.join("index.html")));
+        base.fallback_service(serve)
+    } else {
+        tracing::info!("Using embedded web client (run `npm run build` in web/ for the full UI)");
+        base.route("/", get(index_handler))
+            .route("/play", get(index_handler))
+    };
 
     let addr: SocketAddr = addr.parse().map_err(|e| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{}", e))
@@ -90,7 +110,7 @@ async fn handle_ws(socket: WebSocket, engine_tx: mpsc::UnboundedSender<EngineMes
     let session_id = Uuid::new_v4().to_string();
     let (mut ws_tx, mut ws_rx) = socket.split();
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<ClientMessage>();
 
     let _ = engine_tx.send(EngineMessage::PlayerConnected {
         session_id: session_id.clone(),
@@ -102,7 +122,23 @@ async fn handle_ws(socket: WebSocket, engine_tx: mpsc::UnboundedSender<EngineMes
     let write_session_id = session_id.clone();
     let write_handle = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if ws_tx.send(Message::Text(msg.into())).await.is_err() {
+            let json = match &msg {
+                ClientMessage::Text { text } => {
+                    let html = markup::to_html(text);
+                    if html.is_empty() { continue; }
+                    serde_json::json!({"type": "text", "text": html}).to_string()
+                }
+                ClientMessage::Prompt { echo } => {
+                    serde_json::json!({"type": "prompt", "echo": echo}).to_string()
+                }
+                other => {
+                    match serde_json::to_string(other) {
+                        Ok(j) => j,
+                        Err(_) => continue,
+                    }
+                }
+            };
+            if ws_tx.send(Message::Text(json.into())).await.is_err() {
                 break;
             }
         }
@@ -133,3 +169,4 @@ async fn handle_ws(socket: WebSocket, engine_tx: mpsc::UnboundedSender<EngineMes
 
     write_handle.abort();
 }
+

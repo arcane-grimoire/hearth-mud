@@ -2,3 +2,5 @@
 hearth.db
 hearth.db-wal
 hearth.db-shm
+web/node_modules
+web/dist

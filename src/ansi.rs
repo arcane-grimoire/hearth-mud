@@ -1,35 +1,39 @@
-pub const RESET: &str = "\x1b[0m";
-pub const BOLD: &str = "\x1b[1m";
-pub const DIM: &str = "\x1b[2m";
+pub const RESET: &str = "[/]";
+pub const BOLD: &str = "[b]";
+pub const DIM: &str = "[dim]";
 
-pub const RED: &str = "\x1b[31m";
-pub const GREEN: &str = "\x1b[32m";
-pub const YELLOW: &str = "\x1b[33m";
-pub const BLUE: &str = "\x1b[34m";
-pub const MAGENTA: &str = "\x1b[35m";
-pub const CYAN: &str = "\x1b[36m";
-pub const WHITE: &str = "\x1b[37m";
+pub const RED: &str = "[red]";
+pub const GREEN: &str = "[green]";
+pub const YELLOW: &str = "[yellow]";
+pub const BLUE: &str = "[blue]";
+pub const MAGENTA: &str = "[magenta]";
+pub const CYAN: &str = "[cyan]";
+pub const WHITE: &str = "[white]";
 
 pub fn room_title(name: &str) -> String {
-    format!("{BOLD}{CYAN}{name}{RESET}")
+    format!("[b][cyan]{name}[/]")
 }
 
-pub fn exit_list(exits: &str) -> String {
-    format!("{DIM}[Exits: {GREEN}{exits}{RESET}{DIM}]{RESET}")
+pub fn exit_list(exits: &[&str]) -> String {
+    let linked: Vec<String> = exits
+        .iter()
+        .map(|e| format!("[cmd={e}][green]{e}[/green][/cmd]"))
+        .collect();
+    format!("[dim][Exits: {}][/dim]", linked.join(", "))
 }
 
 pub fn player_name(name: &str) -> String {
-    format!("{BOLD}{WHITE}{name}{RESET}")
+    format!("[b][white]{name}[/]")
 }
 
 pub fn system_msg(msg: &str) -> String {
-    format!("{YELLOW}{msg}{RESET}")
+    format!("[yellow]{msg}[/]")
 }
 
 pub fn error_msg(msg: &str) -> String {
-    format!("{RED}{msg}{RESET}")
+    format!("[red]{msg}[/]")
 }
 
 pub fn admin_msg(msg: &str) -> String {
-    format!("{BOLD}{MAGENTA}{msg}{RESET}")
+    format!("[b][magenta]{msg}[/]")
 }

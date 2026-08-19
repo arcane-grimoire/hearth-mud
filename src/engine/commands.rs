@@ -33,7 +33,7 @@ pub fn format_look(
     let exits = world.exits_from(room_ref);
     if !exits.is_empty() {
         let exit_names: Vec<&str> = exits.iter().map(|e| e.key.as_str()).collect();
-        out.push_str(&format!("{}\r\n", ansi::exit_list(&exit_names.join(", "))));
+        out.push_str(&format!("{}\r\n", ansi::exit_list(&exit_names)));
     }
 
     let offline_tag = Tag { category: "system".into(), key: "offline".into() };

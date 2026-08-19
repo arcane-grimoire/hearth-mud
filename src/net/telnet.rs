@@ -3,7 +3,8 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::engine::EngineMessage;
+use crate::engine::{ClientMessage, EngineMessage};
+use crate::markup;
 
 const IAC: u8 = 255;
 const WILL: u8 = 251;
@@ -55,13 +56,27 @@ async fn handle_connection(
 
     let (write_tx, mut write_rx) = mpsc::unbounded_channel::<WriteCmd>();
 
-    // Engine text channel — wraps into WriteCmd::Text
-    let (engine_out_tx, mut engine_out_rx) = mpsc::unbounded_channel::<String>();
+    let (engine_out_tx, mut engine_out_rx) = mpsc::unbounded_channel::<ClientMessage>();
     let write_tx_for_engine = write_tx.clone();
     tokio::spawn(async move {
         while let Some(msg) = engine_out_rx.recv().await {
-            if write_tx_for_engine.send(WriteCmd::Text(msg)).is_err() {
-                break;
+            match msg {
+                ClientMessage::Text { text } => {
+                    if write_tx_for_engine.send(WriteCmd::Text(text)).is_err() {
+                        break;
+                    }
+                }
+                ClientMessage::Prompt { echo } => {
+                    let bytes = if echo {
+                        vec![IAC, WONT, ECHO]
+                    } else {
+                        vec![IAC, WILL, ECHO]
+                    };
+                    if write_tx_for_engine.send(WriteCmd::Raw(bytes)).is_err() {
+                        break;
+                    }
+                }
+                _ => {}
             }
         }
     });
@@ -75,7 +90,7 @@ async fn handle_connection(
     let write_handle = tokio::spawn(async move {
         while let Some(cmd) = write_rx.recv().await {
             let result = match cmd {
-                WriteCmd::Text(msg) => writer.write_all(msg.as_bytes()).await,
+                WriteCmd::Text(msg) => writer.write_all(markup::to_ansi(&msg).as_bytes()).await,
                 WriteCmd::Raw(bytes) => writer.write_all(&bytes).await,
             };
             if result.is_err() {

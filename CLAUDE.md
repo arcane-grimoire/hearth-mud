@@ -5,19 +5,25 @@ are built on. The game (The Last Stag) lives in `../the-last-stag-mud/`.
 
 ## Quick reference
 
-- Language: Rust (edition 2024), Luau for softcode
+- Language: Rust (edition 2024), Luau for softcode, Svelte 5 for web client
 - Entry: `src/main.rs`
 - Config: `hearth.toml` (or pass path as CLI arg)
 - Ports: Telnet 4000, Web/API 8000
 - Database: SQLite (checkpoint-only — world lives in memory)
 - Softcode: Luau via `mlua` (in-process, single-threaded, bytecode cached)
+- Web client: Vite + Svelte 5, lives in `web/`, built to `web/dist/`
 
 ## Running
 
 ```sh
 cargo run                                    # default config (hearth.toml)
 cargo run -- ../the-last-stag-mud/hearth.toml  # game-specific config
-cargo test                                   # 55 tests
+cargo test                                   # 121 tests
+
+# Web client (Svelte)
+cd web && npm install                        # first time
+cd web && npm run dev                        # dev server (port 5173, proxies to backend)
+cd web && npm run build                      # production build to web/dist/
 ```
 
 First account created gets admin/builder/player scopes.
@@ -45,7 +51,8 @@ validates and applies the batch atomically after the script finishes.
 src/
   main.rs              tokio entrypoint, wires engine + telnet + web
   accounts.rs          Account, Scope (player/builder/admin), AccountStore
-  ansi.rs              ANSI color helpers
+  ansi.rs              BBCode-style markup helpers (room_title, exit_list, etc.)
+  markup.rs            BBCode → ANSI (telnet) and BBCode → HTML (web) converters
   config.rs            hearth.toml deserialization
   db.rs                SQLite persistence (save/load world + accounts)
   grid.rs              Grid2D userdata — spatial grid with A*, LOS, FOV, Dijkstra
@@ -57,24 +64,34 @@ src/
   net/
     mod.rs
     telnet.rs          Async telnet with IAC/SGA/ECHO negotiation
-    web.rs             Axum HTTP server: web client, WebSocket, REST API
-    web_client.html    Browser-based MUD client
+    web.rs             Axum HTTP server: WebSocket (JSON protocol), REST API, static file serving
+    web_client.html    Fallback HTML client (used when web/dist/ not built)
   softcode/
     mod.rs             Intent enum, IntentBatch, Budget, SoftcodeRuntime, bytecode cache
-    api.rs             54 Luau-facing functions (read, write, predicates, utility, noise, rng, math, scheduling)
+    api.rs             55 Luau-facing functions (read, write, predicates, utility, noise, rng, math, scheduling, emit_data)
     hooks.rs           30 known hooks, ProgramRecord with persistent state
   world/
     mod.rs             World struct (objects HashMap, scripts, queries)
     object.rs          GameObject, Kind enum (Room/Item/Npc/Player/Exit)
     script.rs          Script (global tick scripts)
     tag.rs             Tag (category:key)
+web/
+  package.json         Vite + Svelte 5 project
+  vite.config.js       Dev server config (proxies /ws and /api to backend)
+  src/
+    App.svelte         Main layout: topbar, output pane, sidebar, input bar
+    app.css            Theme variables, BBCode markup classes, scrollbar styles
+    components/
+      Output.svelte    Scrolling text output with auto-scroll, clickable [cmd] elements
+      InputBar.svelte  Command input with history (up/down, prev/next buttons)
+      Sidebar.svelte   Structured panels: Who's Here, What's Here, Exits (clickable chips)
 ```
 
 ## Key features
 
 - **Everything is an object** — rooms, items, NPCs, players, exits all share `GameObject`
 - **32 hooks** — can_get, on_get, can_drop, on_drop, can_put, on_put, can_use, on_use, can_traverse, can_enter, on_enter, on_leave, can_look, on_look, can_say, on_say, can_see, on_move, on_destroy, on_connect, on_disconnect, on_whisper, on_emote, on_receive, on_damage, on_death, on_tick, on_startup, on_shutdown, on_reload, on_save, on_create
-- **63 Luau API functions** — read (18), predicates (9), write (18), utility (3), noise (5), seeded RNG (4), coordinate math (6), grid (1)
+- **64 Luau API functions** — read (18), predicates (9), write (19 incl. emit_data), utility (3), noise (5), seeded RNG (4), coordinate math (6), grid (1)
 - **Luau modules** — `require()` loads shared .luau files from `<game_dir>/lib/`
 - **Grid2D userdata** — Rust-backed spatial grid: get/set, A* pathfinding, LOS, FOV, Dijkstra, flood fill
 - **Ownership** — `owner_ref` on every object, auto-set on creation, `@chown` admin command, builder permission enforcement
@@ -88,8 +105,14 @@ src/
 - **File loader** — game_dir config, TOML definitions + .luau files, system:managed tag, @reload-world
 - **Bytecode cache** — compiled Luau chunks cached by source hash, invalidated on @reload-world
 - **Dungeon layout grid** — `generate_dungeon` stores a Grid2D on the entrance room (`dungeon_layout` attr)
+- **BBCode markup** — `[b]`, `[red]`, `[cmd=go north]`, `[/]` etc. — transport-neutral styling, converted to ANSI for telnet, HTML for web
+- **Clickable commands** — `[cmd=COMMAND]text[/cmd]` renders as clickable text in web client, underlined text in telnet
+- **Structured data channel** — `ClientMessage` enum (Text, Prompt, Room, Inventory, Game) sent as JSON to web clients
+- **Auto room data** — engine sends structured Room messages (exits, contents) on look/movement, powers sidebar panels
+- **emit_data()** — softcode can push structured JSON to web clients: `emit_data(player_ref, "channel", data_table)`
 - **REST API** — POST /api with 17 actions (list, create, examine, set, delete, etc.)
-- **Web client** — browser-based at /play with WebSocket
+- **Web client** — Svelte 5 + Vite, multi-panel layout: scrolling output, structured sidebar, command input with history
+- **Game web override** — `game_web_dir` config lets games provide their own web client, framework falls back to default
 - **Player persistence** — players marked offline on disconnect, restored on reconnect
 - **Autosave** — configurable interval (default 5 min)
 - **Accounts** — argon2 password hashing, scoped roles, optional email
@@ -104,6 +127,7 @@ autosave_secs = 300
 tick_secs = 1
 spawn_room = "area/town/room/crossroads"
 game_dir = "../the-last-stag-mud/world"
+game_web_dir = "web/dist"  # optional, relative to game root (parent of game_dir)
 ```
 
 ## Design decisions
@@ -112,9 +136,10 @@ See `docs/adr/` (6 ADRs). See `CONTEXT.md` for domain glossary.
 
 ## Testing
 
-115 tests across: accounts (12), db round-trips (7), engine API (8),
+121 tests across: accounts (12), db round-trips (7), engine API (8),
 locks DSL (9), softcode (37), grid (14), loader (6), dungeon (4),
-theme (1), lock validator (7), map templates (9), game softcode (1 harness).
+theme (1), lock validator (7), map templates (9), markup (6),
+game softcode (1 harness).
 
 Softcode tests also discover and run `*.test.luau` files from the game
 directory (21 Luau tests across str and collections modules).

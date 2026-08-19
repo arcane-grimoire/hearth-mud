@@ -14,16 +14,44 @@ use crate::softcode::hooks::{self, ProgramRecord};
 use crate::softcode::{self, Budget, Effect, SoftcodeRuntime};
 use crate::world::{GameObject, Kind, Script, Tag, World};
 
-const IAC: u8 = 255;
-const WILL: u8 = 251;
-const WONT: u8 = 252;
-const ECHO_OPT: u8 = 1;
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClientMessage {
+    Text { text: String },
+    Prompt { echo: bool },
+    Room {
+        name: String,
+        description: String,
+        exits: Vec<ExitData>,
+        contents: Vec<EntityData>,
+    },
+    Inventory { items: Vec<ItemData> },
+    Game { channel: String, data: serde_json::Value },
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ExitData {
+    pub dir: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EntityData {
+    pub name: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ItemData {
+    pub name: String,
+    pub ref_id: String,
+}
 
 #[derive(Debug)]
 pub enum EngineMessage {
     PlayerConnected {
         session_id: String,
-        tx: mpsc::UnboundedSender<String>,
+        tx: mpsc::UnboundedSender<ClientMessage>,
     },
     PlayerDisconnected {
         session_id: String,
@@ -92,7 +120,7 @@ enum SessionState {
 }
 
 struct Session {
-    tx: mpsc::UnboundedSender<String>,
+    tx: mpsc::UnboundedSender<ClientMessage>,
     state: SessionState,
 }
 
@@ -787,7 +815,7 @@ impl Engine {
         }
     }
 
-    fn handle_connect(&mut self, session_id: String, tx: mpsc::UnboundedSender<String>) {
+    fn handle_connect(&mut self, session_id: String, tx: mpsc::UnboundedSender<ClientMessage>) {
         let session = Session {
             tx,
             state: SessionState::PromptUsername,
@@ -1095,6 +1123,7 @@ impl Engine {
         );
         let look_output = self.look_with_visibility(&player_ref);
         self.send(session_id, &look_output);
+        self.send_room_data(session_id, &player_ref);
 
         self.broadcast_to_all(
             &format!("{} has connected.\r\n", username),
@@ -1168,6 +1197,8 @@ impl Engine {
             Some((c, a)) => (c.to_lowercase(), a.trim().to_string()),
             None => (input.to_lowercase(), String::new()),
         };
+
+        let room_before = self.world.get(&actor_ref).and_then(|a| a.location_ref.clone());
 
         let output = match cmd.as_str() {
             // Player commands
@@ -1252,6 +1283,11 @@ impl Engine {
         };
 
         self.send(session_id, &output);
+
+        let room_after = self.world.get(&actor_ref).and_then(|a| a.location_ref.clone());
+        if matches!(cmd.as_str(), "look" | "l") || room_before != room_after {
+            self.send_room_data(session_id, &actor_ref);
+        }
     }
 
     // -- Builder commands --
@@ -1726,6 +1762,9 @@ impl Engine {
                 Effect::TriggerHook { target, hook } => {
                     triggers.push((target.clone(), hook.clone()));
                 }
+                Effect::EmitData { target, channel, data } => {
+                    self.send_emit_data(target, channel, data);
+                }
             }
         }
         for (target, hook) in triggers {
@@ -1744,7 +1783,20 @@ impl Engine {
             if let SessionState::Playing { actor_ref: ar, .. } = &session.state
                 && ar == actor_ref
             {
-                let _ = session.tx.send(format!("{}\r\n", message));
+                let _ = session.tx.send(ClientMessage::Text { text: format!("{}\r\n", message) });
+            }
+        }
+    }
+
+    fn send_emit_data(&self, actor_ref: &str, channel: &str, data: &serde_json::Value) {
+        for session in self.sessions.values() {
+            if let SessionState::Playing { actor_ref: ar, .. } = &session.state
+                && ar == actor_ref
+            {
+                let _ = session.tx.send(ClientMessage::Game {
+                    channel: channel.to_string(),
+                    data: data.clone(),
+                });
             }
         }
     }
@@ -1758,7 +1810,7 @@ impl Engine {
                 if let Some(actor) = self.world.get(actor_ref)
                     && actor.location_ref.as_deref() == Some(room_ref)
                 {
-                    let _ = session.tx.send(format!("{}\r\n", message));
+                    let _ = session.tx.send(ClientMessage::Text { text: format!("{}\r\n", message) });
                 }
             }
         }
@@ -2126,7 +2178,7 @@ impl Engine {
         if args.is_empty() {
             return "Usage: @wall <message>\r\n".to_string();
         }
-        let msg = format!("\r\n[ADMIN] {}\r\n", args);
+        let msg = ClientMessage::Text { text: format!("\r\n[ADMIN] {}\r\n", args) };
         for (_, session) in &self.sessions {
             if matches!(&session.state, SessionState::Playing { .. }) {
                 let _ = session.tx.send(msg.clone());
@@ -2249,23 +2301,64 @@ impl Engine {
                 continue;
             }
             if matches!(&session.state, SessionState::Playing { .. }) {
-                let _ = session.tx.send(msg.to_string());
+                let _ = session.tx.send(ClientMessage::Text { text: msg.to_string() });
             }
         }
     }
 
     fn send(&self, session_id: &str, msg: &str) {
         if let Some(session) = self.sessions.get(session_id) {
-            let _ = session.tx.send(msg.to_string());
+            let _ = session.tx.send(ClientMessage::Text { text: msg.to_string() });
         }
     }
 
     fn send_echo_off(&self, session_id: &str) {
-        self.send(session_id, &String::from_utf8_lossy(&[IAC, WILL, ECHO_OPT]).to_string());
+        if let Some(session) = self.sessions.get(session_id) {
+            let _ = session.tx.send(ClientMessage::Prompt { echo: false });
+        }
     }
 
     fn send_echo_on(&self, session_id: &str) {
-        self.send(session_id, &String::from_utf8_lossy(&[IAC, WONT, ECHO_OPT]).to_string());
+        if let Some(session) = self.sessions.get(session_id) {
+            let _ = session.tx.send(ClientMessage::Prompt { echo: true });
+        }
+    }
+
+    fn send_room_data(&self, session_id: &str, actor_ref: &str) {
+        let room_ref = match self.world.get(actor_ref).and_then(|a| a.location_ref.clone()) {
+            Some(r) => r,
+            None => return,
+        };
+        let room = match self.world.get(&room_ref) {
+            Some(r) => r,
+            None => return,
+        };
+
+        let exits: Vec<ExitData> = self.world.exits_from(&room_ref).iter().map(|e| {
+            let dest_name = e.target_ref.as_ref()
+                .and_then(|t| self.world.get(t))
+                .map(|r| r.display_name().to_string())
+                .unwrap_or_default();
+            ExitData { dir: e.key.clone(), name: dest_name }
+        }).collect();
+
+        let offline_tag = Tag { category: "system".into(), key: "offline".into() };
+        let contents: Vec<EntityData> = self.world.objects_in(&room_ref).into_iter()
+            .filter(|o| o.ref_id != actor_ref && !o.tags.contains(&offline_tag))
+            .map(|o| EntityData {
+                name: o.display_name().to_string(),
+                kind: format!("{}", o.kind),
+            })
+            .collect();
+
+        if let Some(session) = self.sessions.get(session_id) {
+            let _ = session.tx.send(ClientMessage::Room {
+                name: room.display_name().to_string(),
+                description: room.description.clone(),
+                exits,
+                contents,
+            });
+        }
     }
 
     fn cmd_whisper(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
@@ -2309,7 +2402,7 @@ impl Engine {
             Some((_, session)) => {
                 let _ = session
                     .tx
-                    .send(format!("{} whispers, \"{}\"\r\n", sender_name, message));
+                    .send(ClientMessage::Text { text: format!("{} whispers, \"{}\"\r\n", sender_name, message) });
 
                 // Fire on_whisper on the room
                 let _ = self.fire_hook(&room_ref, "on_whisper", actor_ref, Some(&room_ref), None);
@@ -2337,7 +2430,7 @@ impl Engine {
 
         let name = actor.display_name().to_string();
 
-        let others_msg = format!("{} {}\r\n", name, message);
+        let others_msg = ClientMessage::Text { text: format!("{} {}\r\n", name, message) };
         for (sid, session) in &self.sessions {
             if sid == speaker_session {
                 continue;
@@ -3016,7 +3109,7 @@ impl Engine {
             .map(|a| a.display_name().to_string())
             .unwrap_or_default();
 
-        let others_msg = format!("{} says, \"{}\"\r\n", speaker_name, message);
+        let others_msg = ClientMessage::Text { text: format!("{} says, \"{}\"\r\n", speaker_name, message) };
         for (sid, session) in &self.sessions {
             if sid == speaker_session {
                 continue;

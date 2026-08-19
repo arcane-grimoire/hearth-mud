@@ -15,7 +15,7 @@ password-hash = { version = "0.5", features = ["getrandom"] }
 rusqlite = { version = "0.35", features = ["bundled"] }
 mlua = { version = "0.10", features = ["luau", "serialize", "send"] }
 axum = { version = "0.8", features = ["ws"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
 futures-util = "0.3"
 toml = "0.8"
 mapgen = "0.6.0"

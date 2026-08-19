@@ -125,6 +125,11 @@ pub enum Intent {
         target: String,
         hook: String,
     },
+    EmitData {
+        target: String,
+        channel: String,
+        data: serde_json::Value,
+    },
 }
 
 /// The intents a Program has queued during a single run. Collected while the
@@ -173,6 +178,11 @@ pub enum Effect {
     TriggerHook {
         target: String,
         hook: String,
+    },
+    EmitData {
+        target: String,
+        channel: String,
+        data: serde_json::Value,
     },
 }
 
@@ -398,6 +408,16 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 effects.push(Effect::CancelScheduledHook {
                     target: target.clone(),
                     hook: hook.clone(),
+                });
+            }
+            Intent::EmitData { target, channel, data } => {
+                if world.get(target).is_none() {
+                    return Err(format!("emit_data: no object '{}'", target));
+                }
+                effects.push(Effect::EmitData {
+                    target: target.clone(),
+                    channel: channel.clone(),
+                    data: data.clone(),
                 });
             }
         }

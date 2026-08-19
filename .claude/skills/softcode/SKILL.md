@@ -259,8 +259,9 @@ All queue Intents — nothing happens until the script returns and the batch app
 |---|---|
 | `set_attr(ref, key, value)` | Set attribute |
 | `unset_attr(ref, key)` | Remove attribute |
-| `emit(ref, message)` | Send message to a player |
-| `emit_room(room, message, {exclude...})` | Send to all in room |
+| `emit(ref, message)` | Send text message to a player |
+| `emit_room(room, message, {exclude...})` | Send text to all in room |
+| `emit_data(ref, channel, data)` | Send structured JSON to player's web client |
 | `move_object(ref, destination)` | Move object to new location |
 | `set_tag(ref, "cat:key")` | Add tag |
 | `unset_tag(ref, "cat:key")` | Remove tag |
@@ -272,6 +273,54 @@ All queue Intents — nothing happens until the script returns and the batch app
 | `set_program(ref, hook, source)` | Attach a Luau program to an object |
 | `prompt(actor, obj, hook)` | Set up interactive prompt |
 | `after(ticks, ref, hook)` | Schedule a hook to fire after N engine ticks |
+
+## BBCode markup
+
+Text output uses BBCode-style tags that render differently per transport:
+- **Telnet**: converted to ANSI escape sequences
+- **Web**: converted to HTML with CSS classes
+
+### Formatting tags
+
+| Tag | Telnet | Web |
+|-----|--------|-----|
+| `[b]...[/b]` | Bold | `<span class="b">` |
+| `[dim]...[/dim]` | Dim | `<span class="dim">` |
+| `[i]...[/i]` | Italic | `<span class="i">` |
+| `[u]...[/u]` | Underline | `<span class="u">` |
+| `[red]...[/red]` | Red text | `<span class="c-red">` |
+| `[green]`, `[yellow]`, `[blue]`, `[magenta]`, `[cyan]`, `[white]` | Corresponding color | CSS class |
+| `[/]` | Reset all | Close all open spans |
+| `[cmd=COMMAND]...[/cmd]` | Underlined text | Clickable — sends COMMAND on click |
+
+### Clickable commands
+
+Use `[cmd=...]` to make text interactive in the web client:
+
+```lua
+emit(actor, "[cmd=look sword]Rusty Sword[/cmd]")
+emit(actor, "[cmd=attack]Attack[/cmd]  [cmd=defend]Defend[/cmd]  [cmd=flee]Flee[/cmd]")
+```
+
+On telnet, these render as underlined text. On web, they're clickable elements that send the command.
+
+### Structured data (emit_data)
+
+Push structured JSON to the web client for game-specific UI panels:
+
+```lua
+emit_data(actor, "combat", {
+    target = "Goblin Scout",
+    hp = 15, max_hp = 30,
+    turn = 3
+})
+
+emit_data(actor, "quests", {
+    active = {"Find the lost sword", "Speak to the innkeeper"}
+})
+```
+
+The web client receives `{"type":"game","channel":"combat","data":{...}}`. The default client has a handler stub; game-specific clients can render custom panels for each channel.
 
 ## Noise (procedural generation)
 

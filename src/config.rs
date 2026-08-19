@@ -12,6 +12,7 @@ pub struct Config {
     pub tick_secs: u64,
     pub spawn_room: String,
     pub game_dir: Option<String>,
+    pub game_web_dir: Option<String>,
 }
 
 impl Default for Config {
@@ -24,6 +25,7 @@ impl Default for Config {
             tick_secs: 1,
             spawn_room: "starter/town_square".into(),
             game_dir: None,
+            game_web_dir: None,
         }
     }
 }
