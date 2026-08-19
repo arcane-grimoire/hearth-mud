@@ -7,6 +7,10 @@
     "build": "vite build",
     "preview": "vite preview"
   },
+  "dependencies": {
+    "@kenn-io/kit-ui": "file:kit-ui",
+    "@lucide/svelte": "^1.0.0"
+  },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
     "svelte": "^5.0.0",

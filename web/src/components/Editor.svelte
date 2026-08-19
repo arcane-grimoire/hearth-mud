@@ -1,4 +1,7 @@
 <script>
+  import { Button, IconButton, TextInput, showFlash } from '@kenn-io/kit-ui';
+  import ArrowLeft from '@lucide/svelte/icons/arrow-left';
+  import Plus from '@lucide/svelte/icons/plus';
   import { api } from '../lib/api.js';
 
   let { entity = null, onclose = () => {} } = $props();
@@ -49,14 +52,22 @@
 
   async function saveTitle() {
     const res = await api('set_title', { ref_id: obj.ref_id, title });
-    if (res.ok) titleDirty = false;
-    else alert(res.error || 'Failed to save');
+    if (res.ok) {
+      titleDirty = false;
+      showFlash('Title saved', { tone: 'success' });
+    } else {
+      showFlash(res.error || 'Failed to save', { tone: 'danger' });
+    }
   }
 
   async function saveDescription() {
     const res = await api('set_description', { ref_id: obj.ref_id, description });
-    if (res.ok) descDirty = false;
-    else alert(res.error || 'Failed to save');
+    if (res.ok) {
+      descDirty = false;
+      showFlash('Description saved', { tone: 'success' });
+    } else {
+      showFlash(res.error || 'Failed to save', { tone: 'danger' });
+    }
   }
 
   async function saveProgram(idx) {
@@ -70,8 +81,9 @@
     saving = { ...saving, [p.hook]: false };
     if (res.ok) {
       programs[idx] = { ...p, original: p.source, dirty: false };
+      showFlash(`${p.hook} saved`, { tone: 'success' });
     } else {
-      alert(res.error || 'Failed to save');
+      showFlash(res.error || 'Failed to save', { tone: 'danger' });
     }
   }
 
@@ -83,8 +95,9 @@
     });
     if (res.ok) {
       programs = programs.filter((_, i) => i !== idx);
+      showFlash(`${p.hook} removed`, { tone: 'info' });
     } else {
-      alert(res.error || 'Failed to remove');
+      showFlash(res.error || 'Failed to remove', { tone: 'danger' });
     }
   }
 
@@ -117,7 +130,9 @@
 
 <div class="editor">
   <div class="editor-header">
-    <button class="back-btn" onclick={onclose}>&larr;</button>
+    <IconButton ariaLabel="Back" size="sm" onclick={onclose}>
+      <ArrowLeft size={14} />
+    </IconButton>
     {#if obj}
       <span class="editor-title">{obj.title || obj.key}</span>
       <span class="editor-ref">{obj.ref_id}</span>
@@ -128,47 +143,51 @@
   {#if loading}
     <div class="editor-body"><span class="muted">Loading...</span></div>
   {:else if error}
-    <div class="editor-body"><span class="error">{error}</span></div>
+    <div class="editor-body"><span class="err">{error}</span></div>
   {:else if obj}
     <div class="editor-body">
       <div class="field">
-        <label>Title</label>
+        <span class="field-label">Title</span>
         <div class="field-row">
-          <input
-            type="text"
-            value={title}
-            oninput={(e) => { title = e.target.value; titleDirty = title !== (obj.title || obj.key || ''); }}
+          <TextInput
+            bind:value={title}
+            block
+            size="sm"
+            oninput={(v) => { title = v; titleDirty = title !== (obj.title || obj.key || ''); }}
           />
           {#if titleDirty}
-            <button class="save-btn" onclick={saveTitle}>Save</button>
+            <Button size="sm" tone="success" surface="soft" onclick={saveTitle} label="Save" />
           {/if}
         </div>
       </div>
 
       <div class="field">
-        <label>Description</label>
+        <span class="field-label">Description</span>
         <div class="field-row">
           <textarea
+            class="desc-area"
             rows="3"
             value={description}
             oninput={(e) => { description = e.target.value; descDirty = description !== (obj.description || ''); }}
           ></textarea>
           {#if descDirty}
-            <button class="save-btn" onclick={saveDescription}>Save</button>
+            <Button size="sm" tone="success" surface="soft" onclick={saveDescription} label="Save" />
           {/if}
         </div>
       </div>
 
       <div class="programs-header">
-        <label>Programs</label>
+        <span class="field-label">Programs</span>
         <div class="add-program">
-          <input
-            type="text"
+          <TextInput
             bind:value={newHook}
+            size="sm"
             placeholder="hook name..."
             onkeydown={(e) => e.key === 'Enter' && addProgram()}
           />
-          <button onclick={addProgram}>+</button>
+          <IconButton ariaLabel="Add program" size="sm" onclick={addProgram}>
+            <Plus size={14} />
+          </IconButton>
         </div>
       </div>
 
@@ -178,12 +197,15 @@
             <span class="hook-name">{prog.hook}</span>
             <div class="program-actions">
               {#if prog.dirty}
-                <button class="save-btn" onclick={() => saveProgram(idx)} disabled={saving[prog.hook]}>
-                  {saving[prog.hook] ? '...' : 'Save'}
-                </button>
-                <button class="revert-btn" onclick={() => revertProgram(idx)}>Revert</button>
+                <Button
+                  size="sm" tone="success" surface="soft"
+                  onclick={() => saveProgram(idx)}
+                  disabled={saving[prog.hook]}
+                  label={saving[prog.hook] ? '...' : 'Save'}
+                />
+                <Button size="sm" onclick={() => revertProgram(idx)} label="Revert" />
               {/if}
-              <button class="delete-btn" onclick={() => removeProgram(idx)}>Delete</button>
+              <Button size="sm" tone="danger" onclick={() => removeProgram(idx)} label="Delete" />
             </div>
           </div>
           <textarea
@@ -208,7 +230,7 @@
     width: 340px;
     min-width: 340px;
     background: var(--bg-surface);
-    border-left: 1px solid var(--border);
+    border-left: 1px solid var(--border-default);
     display: flex;
     flex-direction: column;
     overflow-y: auto;
@@ -219,42 +241,23 @@
     align-items: center;
     gap: 8px;
     padding: 10px 12px;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--border-default);
     flex-shrink: 0;
   }
 
-  .back-btn {
-    background: none;
-    border: 1px solid var(--border);
-    color: var(--text-secondary);
-    width: 26px;
-    height: 26px;
-    border-radius: var(--radius);
-    cursor: pointer;
-    font-size: 14px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .back-btn:hover {
-    color: var(--text-primary);
-    border-color: var(--border-focus);
-  }
-
   .editor-title {
-    font-size: 13px;
+    font-size: var(--font-size-sm);
     font-weight: 600;
     color: var(--text-primary);
   }
 
   .editor-ref {
-    font-size: 11px;
+    font-size: var(--font-size-xs);
     color: var(--text-muted);
   }
 
   .editor-kind {
-    font-size: 10px;
+    font-size: var(--font-size-2xs);
     text-transform: uppercase;
     color: var(--text-muted);
     letter-spacing: 0.05em;
@@ -267,9 +270,9 @@
     gap: 12px;
   }
 
-  .field label {
+  .field-label {
     display: block;
-    font-size: 10px;
+    font-size: var(--font-size-2xs, 10px);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.08em;
@@ -280,23 +283,24 @@
   .field-row {
     display: flex;
     gap: 4px;
+    align-items: flex-start;
   }
 
-  .field input, .field textarea {
+  .desc-area {
     flex: 1;
-    background: var(--bg-input);
+    background: var(--bg-inset, #0d0f14);
     color: var(--text-primary);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md, 4px);
     padding: 6px 8px;
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--font-size-xs, 12px);
     outline: none;
     resize: vertical;
   }
 
-  .field input:focus, .field textarea:focus {
-    border-color: var(--border-focus);
+  .desc-area:focus {
+    border-color: var(--accent-blue);
   }
 
   .programs-header {
@@ -306,45 +310,15 @@
     gap: 8px;
   }
 
-  .programs-header label {
-    font-size: 10px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-muted);
-  }
-
   .add-program {
     display: flex;
     gap: 3px;
-  }
-
-  .add-program input {
-    width: 110px;
-    background: var(--bg-input);
-    color: var(--text-primary);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 3px 6px;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    outline: none;
-  }
-
-  .add-program button {
-    background: var(--bg-elevated);
-    color: var(--accent);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 3px 8px;
-    cursor: pointer;
-    font-family: var(--font-mono);
-    font-size: 12px;
+    align-items: center;
   }
 
   .program {
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md, 4px);
     overflow: hidden;
   }
 
@@ -353,14 +327,14 @@
     align-items: center;
     justify-content: space-between;
     padding: 6px 8px;
-    background: var(--bg-elevated);
-    border-bottom: 1px solid var(--border);
+    background: var(--bg-inset);
+    border-bottom: 1px solid var(--border-default);
   }
 
   .hook-name {
-    font-size: 12px;
+    font-size: var(--font-size-xs, 12px);
     font-weight: 600;
-    color: var(--cyan);
+    color: var(--accent-teal, #56b6c2);
   }
 
   .program-actions {
@@ -370,61 +344,25 @@
 
   .code {
     width: 100%;
-    background: var(--bg-input);
+    background: var(--bg-inset, #0d0f14);
     color: var(--text-primary);
     border: none;
     padding: 8px;
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: var(--font-size-xs, 12px);
     line-height: 1.5;
     outline: none;
     resize: vertical;
     tab-size: 2;
   }
 
-  button {
-    font-family: var(--font-mono);
-  }
-
-  .save-btn {
-    background: var(--accent-dim);
-    color: var(--accent);
-    border: 1px solid var(--accent);
-    border-radius: var(--radius);
-    padding: 2px 8px;
-    cursor: pointer;
-    font-size: 11px;
-  }
-
-  .save-btn:hover { opacity: 0.9; }
-  .save-btn:disabled { opacity: 0.5; cursor: default; }
-
-  .revert-btn, .delete-btn {
-    background: var(--bg-elevated);
-    color: var(--text-secondary);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 2px 8px;
-    cursor: pointer;
-    font-size: 11px;
-  }
-
-  .delete-btn:hover {
-    color: var(--red);
-    border-color: var(--red);
-  }
-
-  .revert-btn:hover {
-    color: var(--text-primary);
-  }
-
   .no-programs {
-    font-size: 12px;
+    font-size: var(--font-size-xs, 12px);
     color: var(--text-muted);
     font-style: italic;
     padding: 8px 0;
   }
 
   .muted { color: var(--text-muted); }
-  .error { color: var(--red); }
+  .err { color: var(--accent-red); }
 </style>

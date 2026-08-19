@@ -41,6 +41,7 @@
 </script>
 
 <div class="output-wrap">
+  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div class="output" bind:this={container} onscroll={handleScroll} onclick={handleClick}></div>
   {#if showJump}
     <button class="jump" onclick={jumpToBottom}>&#8595; new output</button>
@@ -62,6 +63,7 @@
     white-space: pre-wrap;
     word-wrap: break-word;
     line-height: 1.6;
+    font-size: var(--font-size-output, 14px);
   }
 
   .jump {

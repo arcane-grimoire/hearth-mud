@@ -1,10 +1,19 @@
 <script>
+  import { Chip, StatusDot } from '@kenn-io/kit-ui';
+
   let { status = 'disconnected', room = null, sendCommand = () => {}, isBuilder = false, onedit = () => {} } = $props();
 
   let players = $derived(room?.contents?.filter(e => e.kind === 'player') ?? []);
   let npcs = $derived(room?.contents?.filter(e => e.kind === 'npc') ?? []);
   let items = $derived(room?.contents?.filter(e => e.kind === 'item') ?? []);
   let exits = $derived(room?.exits ?? []);
+
+  const statusDotMap = {
+    connected: 'working',
+    connecting: 'idle',
+    disconnected: 'stale',
+    error: 'unclean',
+  };
 </script>
 
 <aside class="sidebar">
@@ -52,9 +61,16 @@
     <div class="panel-body exits">
       {#if exits.length}
         {#each exits as exit}
-          <button class="exit-chip" onclick={() => sendCommand(exit.dir)} title={exit.name}>
+          <Chip
+            interactive
+            uppercase={false}
+            tone="neutral"
+            size="sm"
+            onclick={() => sendCommand(exit.dir)}
+            title={exit.name}
+          >
             {exit.dir} &rarr; {exit.name}
-          </button>
+          </Chip>
         {/each}
       {:else}
         <span class="empty">None</span>
@@ -65,8 +81,8 @@
   <div class="spacer"></div>
 
   <div class="footer">
-    <span class="brand">Hearth</span>
-    <span class="dot" class:connected={status === 'connected'} class:error={status === 'error' || status === 'disconnected'}></span>
+    <span class="footer-brand">Hearth</span>
+    <StatusDot status={statusDotMap[status] || 'stale'} label={status} />
   </div>
 </aside>
 
@@ -75,18 +91,18 @@
     width: 260px;
     min-width: 260px;
     background: var(--bg-surface);
-    border-left: 1px solid var(--border);
+    border-left: 1px solid var(--border-default);
     display: flex;
     flex-direction: column;
     overflow-y: auto;
   }
 
   .panel {
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--border-default);
   }
 
   .panel-label {
-    font-size: 10px;
+    font-size: var(--font-size-2xs, 10px);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.08em;
@@ -97,7 +113,7 @@
 
   .panel-body {
     padding: 4px 16px 12px;
-    font-size: 13px;
+    font-size: var(--font-size-sm, 13px);
     color: var(--text-primary);
     line-height: 1.6;
   }
@@ -110,25 +126,16 @@
     gap: 6px;
   }
 
-  .player {
-    color: var(--cyan);
-    font-weight: 600;
-  }
-
-  .npc {
-    color: var(--text-primary);
-  }
-
-  .item {
-    color: var(--text-secondary);
-  }
+  .player { color: var(--accent-teal, #56b6c2); font-weight: 600; }
+  .npc { color: var(--text-primary); }
+  .item { color: var(--text-secondary); }
 
   .edit-btn {
     background: none;
     border: none;
     color: var(--text-muted);
-    font-family: var(--font-mono);
-    font-size: 10px;
+    font-family: inherit;
+    font-size: var(--font-size-2xs, 10px);
     cursor: pointer;
     padding: 0 4px;
     text-decoration: underline;
@@ -136,9 +143,7 @@
     flex-shrink: 0;
   }
 
-  .edit-btn:hover {
-    color: var(--accent);
-  }
+  .edit-btn:hover { color: var(--accent-amber, #c9956b); }
 
   .exits {
     display: flex;
@@ -146,59 +151,21 @@
     gap: 4px;
   }
 
-  .exit-chip {
-    background: var(--bg-elevated);
-    color: var(--text-primary);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 3px 10px;
-    font-family: var(--font-mono);
-    font-size: 12px;
-    cursor: pointer;
-    line-height: 1.4;
-  }
-
-  .exit-chip:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
-  .empty {
-    color: var(--text-muted);
-    font-size: 12px;
-  }
-
-  .spacer {
-    flex: 1;
-  }
+  .empty { color: var(--text-muted); font-size: var(--font-size-xs, 12px); }
+  .spacer { flex: 1; }
 
   .footer {
     padding: 12px 16px;
-    border-top: 1px solid var(--border);
+    border-top: 1px solid var(--border-default);
     display: flex;
     align-items: center;
     justify-content: space-between;
   }
 
-  .brand {
-    font-size: 12px;
+  .footer-brand {
+    font-size: var(--font-size-xs, 12px);
     font-weight: 700;
-    color: var(--accent);
+    color: var(--accent-amber, #c9956b);
     letter-spacing: 0.04em;
-  }
-
-  .dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--text-muted);
-  }
-
-  .dot.connected {
-    background: var(--green);
-  }
-
-  .dot.error {
-    background: var(--red);
   }
 </style>
