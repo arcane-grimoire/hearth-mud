@@ -235,6 +235,22 @@ pub fn install<'scope, 'env>(
     )?;
 
     env.set(
+        "find_by_attr",
+        scope.create_function(move |lua, (key, value): (String, Value)| {
+            let target: serde_json::Value = lua.from_value(value)?;
+            let out = lua.create_table()?;
+            let mut i = 1;
+            for obj in world.objects.values() {
+                if obj.attrs.get(&key).is_some_and(|v| *v == target) {
+                    out.set(i, object_to_table(lua, obj)?)?;
+                    i += 1;
+                }
+            }
+            Ok(out)
+        })?,
+    )?;
+
+    env.set(
         "find_in_room",
         scope.create_function(move |lua, (r, name): (Value, String)| {
             let room = ref_of(&r)?;
@@ -468,8 +484,12 @@ pub fn install<'scope, 'env>(
         "set_attr",
         scope.create_function(move |lua, (r, key, value): (Value, String, Value)| {
             let target = ref_of(&r)?;
-            let value: serde_json::Value = lua.from_value(value)?;
-            b.borrow_mut().push(Intent::SetAttr { target, key, value });
+            if matches!(value, Value::Nil) {
+                b.borrow_mut().push(Intent::UnsetAttr { target, key });
+            } else {
+                let value: serde_json::Value = lua.from_value(value)?;
+                b.borrow_mut().push(Intent::SetAttr { target, key, value });
+            }
             Ok(())
         })?,
     )?;

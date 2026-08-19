@@ -432,6 +432,7 @@ const STDLIB_MODULES: &[(&str, &str)] = &[
     ("random", include_str!("../lib/random.luau")),
     ("signal", include_str!("../lib/signal.luau")),
     ("state_machine", include_str!("../lib/state_machine.luau")),
+    ("text", include_str!("../lib/text.luau")),
     ("Grid3D", include_str!("../lib/Grid3D.luau")),
     ("grids", include_str!("../lib/grids.luau")),
 ];

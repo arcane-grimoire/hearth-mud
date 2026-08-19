@@ -790,7 +790,11 @@ impl Engine {
             ApiRequest::SetAttribute { ref_id, key, value } => {
                 match self.world.get_mut(&ref_id) {
                     Some(obj) => {
-                        obj.attrs.insert(key.clone(), value);
+                        if value.is_null() {
+                            obj.attrs.remove(&key);
+                        } else {
+                            obj.attrs.insert(key.clone(), value);
+                        }
                         ApiResponse::ok()
                     }
                     None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
