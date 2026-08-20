@@ -82,22 +82,54 @@ internal working memory that shouldn't be visible as object attributes.
 | `on_get` | After an actor picks up this object | `(this, actor, room)` |
 | `can_drop` | Before an actor drops this object | `(this, actor, room)` |
 | `on_drop` | After an actor drops this object | `(this, actor, room)` |
+| `can_put` | Before an actor puts an item into this container | `(this, actor, room)` |
+| `on_put` | After an actor puts an item into this container | `(this, actor, room)` |
 | `can_use` | Before an actor uses this object | `(this, actor, room)` |
 | `on_use` | After an actor uses this object | `(this, actor, room)` |
-| `can_traverse` | Before an actor enters this room via an exit | `(this, actor, room)` |
+| `can_traverse` | Before an actor uses this exit | `(this, actor, room)` |
+| `can_enter` | Before an actor enters this room | `(this, actor, room)` |
 | `on_enter` | After an actor enters this room | `(this, actor, room)` |
 | `on_leave` | After an actor leaves this room | `(this, actor, room)` |
 | `can_look` | Before an actor looks at this object | `(this, actor, room)` |
-| `on_look` | After an actor looks at this object | `(this, actor, room)` |
+| `on_look` | After an actor looks at this object. **On rooms: suppresses default look output** — the hook handles all rendering. | `(this, actor, room)` |
 | `can_say` | Before an actor speaks in this room | `(this, actor, room)` |
-| `on_say` | After an actor speaks in this room | `(this, actor, room)` |
+| `on_say` | After an actor speaks in this room. **On rooms: suppresses default say broadcast** — the hook handles distribution. Message available via `_say_message` attr. | `(this, actor, room)` |
+| `can_see` | Controls visibility of this hidden object | `(this, actor, room)` |
+| `on_move` | When this object is moved to a new location | `(this, actor, room)` |
+| `on_receive` | When an item is placed in this object | `(this, actor, room)` |
+| `on_damage` | When this object takes damage | `(this, actor, room)` |
+| `on_death` | When this object dies | `(this, actor, room)` |
+| `on_connect` | When a player connects (fires on player and room) | `(this, actor, room)` |
+| `on_disconnect` | When a player disconnects (fires on player and room) | `(this, actor, room)` |
+| `on_whisper` | When an actor whispers in this room | `(this, actor, room)` |
+| `on_emote` | When an actor emotes in this room | `(this, actor, room)` |
 | `on_tick` | Every N ticks (set `tick_interval` attr) | `(this, state, room)` |
 | `on_startup` | Engine starts, after world loads | `(this, state, room)` |
 | `on_shutdown` | Engine is shutting down, before final save | `(this, state, room)` |
 | `on_reload` | After `@reload-world` completes | `(this, state, room)` |
 | `on_save` | Before each world save (autosave or `@save`) | `(this, state, room)` |
 | `on_create` | When this object is first created at runtime | `(this, state, room)` |
+| `on_destroy` | Before this object is destroyed | `(this, actor, room)` |
 | `cmd_*` | Any name — becomes a player command | `(this, actor, room, args)` |
+
+### Global hooks
+
+Objects tagged `system:global` receive lifecycle hooks from all rooms, not just
+the room they're in. This includes `on_enter`, `on_leave`, `on_connect`, and
+`on_disconnect`, in addition to `cmd_*` hooks (which were always global).
+
+This lets a single global rules object handle game-wide events:
+
+```toml
+[[objects]]
+key = "rules"
+kind = "item"
+tags = ["system:global", "system:hidden"]
+
+[objects.programs]
+on_enter = { file = "on_enter_map.luau" }
+on_connect = { file = "on_enter_map.luau" }
+```
 
 ## Hook parameters
 
@@ -133,23 +165,46 @@ API functions to actually change the world.
 ## Read API
 
 These functions read from the world. They're safe to call anytime.
+`get_attr`, `has_attr`, and `pick` support **read-your-writes** — they
+check the pending intent batch first, so you see your own `set_attr`/`set_val`
+changes immediately within the same script.
 
 | Function | Returns | Description |
 |----------|---------|-------------|
 | `get_object(ref)` | table or nil | Get an object by ref |
-| `get_attr(ref, key)` | value or nil | Get a single attribute |
-| `has_attr(ref, key)` | boolean | Check if an attribute exists |
+| `get_attr(ref, key)` | value or nil | Get a single attribute. Sees pending writes. |
+| `has_attr(ref, key)` | boolean | Check if an attribute exists. Sees pending writes. |
+| `pick(ref, attr, ...)` | value or nil | Walk into nested attrs: `pick(ref, "combat", 1, "hp")`. Sees pending writes. |
 | `has_tag(ref, spec)` | boolean | Check if a tag exists (e.g., `"quest:worthy"`) |
 | `get_tags(ref)` | table | List all tags as spec strings |
 | `get_room_contents(ref)` | table | List objects in a room (excludes exits) |
 | `get_exits(ref)` | table | List exits from a room |
 | `get_location(ref)` | table or nil | Get the object's container |
 | `kind_of(ref)` | string or nil | Get the object's kind |
+| `get_owner(ref)` | string or nil | Get the owner's ref_id |
+| `get_contents(ref)` | table | Objects inside a container |
+| `get_timers(ref)` | table | Active timers on this object |
+| `get_tick` | number | Current engine tick count (a value, not a function). Use for cooldowns, time-based logic. |
+| `resolve_key(file_key)` | string or nil | Returns the ref_id for a TOML-defined object by file key (e.g., `"town/crossroads"`) |
+
+### Search
+
+| Function | Returns | Description |
+|----------|---------|-------------|
 | `find_by_tag(spec)` | table | Find all objects with a tag |
+| `find_by_attr(key, value)` | table | Find all objects where `attrs[key] == value` |
 | `find_in_room(room, name)` | table or nil | Fuzzy-match an object by name in a room |
 | `get_inventory(ref)` | table | List items carried by an object |
 | `get_players_in_room(room)` | table | Online players in a room |
 | `get_all_by_kind(kind)` | table | All objects of a kind (`"room"`, `"npc"`, etc.) |
+| `match_name(name, input)` | boolean | Partial name matching — `match_name("iron sword", "ir")` returns `true`. Matches start of full name or any word. |
+
+### Spatial queries
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `get_nearby(room, x, y, radius)` | table | All objects in `room` whose `_x`/`_y` attrs are within `radius` |
+| `get_rooms_in_radius(room, distance)` | table | BFS walk through exits, returns `{ {ref, distance, name}, ... }`. Respects `muffle` and `blocked_sound` exit attrs. |
 
 The `ref` argument can be either a ref string (`"area/starter/item/sword"`) or
 an object table (like `this` or `actor`). Both work everywhere.
@@ -167,6 +222,7 @@ Boolean checks for common conditions.
 | `is_exit(ref)` | boolean | Is this an exit? |
 | `exists(ref)` | boolean | Does this ref point to a real object? |
 | `is_carrying(actor, tag)` | boolean | Is the actor carrying an item with this tag? |
+| `is_container(ref)` | boolean | Object has the `item:container` tag? |
 | `same_room(a, b)` | boolean | Are two objects in the same room? |
 
 Example:
@@ -192,19 +248,24 @@ invalid, the entire batch is rolled back.
 
 | Function | Description |
 |----------|-------------|
-| `set_attr(ref, key, value)` | Set an attribute (JSON-compatible values) |
+| `set_attr(ref, key, value)` | Set an attribute (JSON-compatible values). Pass `nil` to remove it. |
+| `set_val(ref, attr, ..., value)` | Set a value deep inside a nested attr: `set_val(ref, "combat", 1, "hp", 5)` |
 | `unset_attr(ref, key)` | Remove an attribute |
-| `emit(ref, message)` | Send a message to a player |
-| `emit_room(ref, message, exclude?)` | Send to everyone in a room. `exclude` is an optional list of refs to skip |
-| `move_object(ref, destination)` | Move an object to a new location |
+| `transfer_attr(from, to, key, amount)` | Atomic numeric transfer between objects. Validates sufficient balance; rolls back on failure. |
 | `set_tag(ref, spec)` | Add a tag (e.g., `"quest:completed"`) |
 | `unset_tag(ref, spec)` | Remove a tag |
 | `set_title(ref, title)` | Change an object's display name |
 | `set_description(ref, desc)` | Change an object's description |
-| `destroy(ref)` | Remove an object from the world (not players) |
-| `trigger(ref, hook)` | Fire a hook on another object (see below) |
+| `set_owner(ref, owner_ref)` | Set the object's owner |
+| `set_program(ref, hook, source)` | Attach a Luau program to an object |
+| `apply_template(ref, table)` | Install multiple programs from a `{ hook = source }` table |
+| `move_object(ref, destination)` | Move an object to a new location |
 | `spawn(opts)` | Create a new object (see below) |
-| `after(ticks, ref, hook)` | Schedule a hook to fire after N ticks (see below) |
+| `create_exit(opts)` | Create a new exit (`{ source, direction, target, aliases }`) |
+| `destroy(ref)` | Remove an object from the world (not players) |
+| `trigger(ref, hook, data?)` | Fire a hook on another object (see below) |
+| `after(ticks, ref, hook, data?)` | Schedule a hook to fire after N ticks (see below) |
+| `cancel_after(ref, hook)` | Cancel a pending timer |
 
 ### spawn
 
@@ -238,19 +299,41 @@ function cmd_pull(this, actor, room, args)
 end
 ```
 
-The gate's `on_activate` program could then emit to its own room:
+The optional third argument passes data to the triggered hook. The data is
+available as the `_trigger_data` attr on the target during execution:
 
 ```lua
-function on_activate(this, actor, room)
-  if get_attr(this, "open") then
-    emit_room(room, "The iron gate grinds open!")
-    set_description(this, "An iron gate, standing open.")
+-- Alert nearby NPCs about combat
+trigger(npc, "on_alert", { threat = actor.ref_id, type = "combat" })
+
+-- In the NPC's on_alert hook:
+function on_alert(this, actor, room)
+  local data = get_attr(this, "_trigger_data")
+  if data and data.type == "combat" then
+    emit_room(room, this.display_name .. " rushes toward the sound of fighting!")
   end
 end
 ```
 
 Triggers don't recurse — if the triggered hook also calls `trigger`, the
 second trigger fires after the first finishes. This prevents infinite loops.
+
+### apply_template
+
+Install multiple programs on an object from a table. Works naturally with
+`require()` for reusable behavior bundles:
+
+```lua
+-- lib/template_wilderness.luau
+return {
+  on_enter = 'function on_enter(this, actor, room) ... end',
+  can_look = 'function can_look(this, actor, room) ... end',
+}
+
+-- in a hook:
+local tmpl = require("template_wilderness")
+apply_template(room_ref, tmpl)
+```
 
 ### after
 
@@ -267,8 +350,92 @@ end
 ```
 
 The target object needs a program on the specified hook for anything to happen.
-Scheduled hooks are not persisted — they're lost on server restart. Use
-`on_tick` with state for timers that must survive restarts.
+Timers are persisted to the database and survive server restarts. Use
+`cancel_after(ref, hook)` to cancel a pending timer.
+
+## Communication
+
+| Function | Description |
+|----------|-------------|
+| `emit(ref, message)` | Send a message to one player |
+| `emit_room(room, message, exclude?)` | Send to everyone in a room. `exclude` is an optional list of refs to skip. |
+| `emit_nearby(room, x, y, radius, message, exclude?)` | Send to players in `room` whose `_x`/`_y` attrs are within `radius`. For coordinate-based shared rooms. |
+| `emit_radius(room, distance, messages, exclude?)` | BFS walk through exits, delivers distance-keyed messages to players in reached rooms. |
+| `emit_data(ref, channel, data)` | Send structured JSON to a player's web client (see Widgets below). |
+| `prompt(ref, message)` | Prompt a player for input (fires `on_reply` with their response). |
+| `log(message)` | Write to the server log. |
+
+### emit_radius — multi-room propagation
+
+Walk the exit graph from a source room and deliver different messages at
+each distance:
+
+```lua
+emit_radius(room, 3, {
+  [0] = 'You shout, "Guards!"\r\n',
+  [1] = 'Someone shouts, "Guards!" nearby.\r\n',
+  [2] = "You hear a distant shout.\r\n",
+  [3] = "You hear a faint commotion.\r\n",
+})
+```
+
+Exit attrs control propagation:
+
+| Attr | Type | Effect |
+|------|------|--------|
+| `muffle` | integer | Adds to perceived distance when crossing this exit |
+| `blocked_sound` | boolean | Prevents propagation through this exit entirely |
+
+A heavy door with `muffle = 1` makes a shout from the next room sound
+two rooms away. A sealed vault with `blocked_sound = true` blocks all
+propagation. These same attrs are respected by `get_rooms_in_radius`.
+
+## Widgets (web client)
+
+Games can push custom UI panels to the web client sidebar without forking
+the client. Use `emit_data()` with a `widget` field:
+
+```lua
+emit_data(actor, "map", {
+  widget = "map",
+  title = "Map",
+  current = room_ref,
+  rooms = { { ref = "town/square", name = "Square", short = "Sq", x = 0, y = 0 } },
+  edges = { { from = "town/crossroads", to = "town/square", dir = "north" } },
+})
+```
+
+Built-in widget types:
+
+| Widget | Data shape |
+|--------|-----------|
+| `map` | `{ current, rooms: [{ref, name, short, x, y}], edges: [{from, to, dir}] }` |
+| `list` | `{ items: [{label, value?, command?, color?}], empty? }` |
+| `meter` | `{ bars: [{label, value, max, color?}] }` |
+| `text` | `{ text }` or `{ lines: [{text, color?}] }` or `{ html }` |
+
+Panels appear at the top of the sidebar, above the built-in Who's Here /
+What's Here / Exits sections.
+
+## Maps & Dungeons
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `get_map_template(name)` | table | Parsed map template data (grid, terrain, cells) as a read-only table |
+| `instantiate_map(name)` | table | Spawn rooms/exits from a map template, returns `{ entrance_ref, room_count }` |
+| `generate_dungeon(opts)` | string | Procedurally generate a dungeon layout, returns entrance ref |
+| `destroy_dungeon(seed)` | nil | Destroy all rooms generated by a dungeon seed |
+
+### get_map_template
+
+Read the parsed TOML map data without instantiating rooms:
+
+```lua
+local map = get_map_template("iron_hills")
+-- map.name, map.width, map.height
+-- map.cells["3,2"].terrain, .theme, .passable, .title, .description
+-- map.terrain["f"].theme, .passable, .title_prefix
+```
 
 ## Noise (procedural generation)
 
@@ -336,6 +503,8 @@ Utility functions for spatial calculations — distance, direction, interpolatio
 | Function | Description |
 |----------|-------------|
 | `log(message)` | Print a debug message to the server console |
+| `json_encode(value)` | Convert a Lua value to a JSON string |
+| `json_decode(string)` | Parse a JSON string into a Lua value |
 
 Use `log()` to debug scripts during development. Messages appear in the
 server's log output with a `softcode=true` marker.
@@ -485,7 +654,7 @@ game write API (emit, set_attr, etc.). They're for pure utility code.
 | `collections` | `Set` class (add/remove/has/union/intersection/difference), `Array` helpers (map/filter/find/reduce/flat/contains/reverse/slice) |
 | `state_machine` | Synchronous FSM: `new({initial, transitions, on_enter, on_exit})`, `:send(event)`, `:can(event)`, `:is(state)` |
 | `signal` | Pub/sub: `new()` → Signal with `:fire(...)`, `:connect(fn)` → Connection with `:disconnect()`. Also `newSubject(...)` for replay-last-value signals. |
-| `text` | Rich formatting with accessible/visual modes. `for_mode(mode)` returns a formatter with `bar`, `header`, `table`, `box`, `stat`, `divider`, `color`, `bold`, `dim`. |
+| `text` | Rich formatting with accessible/visual modes using BBCode markup (works on both telnet and web). `for_mode(mode)` returns a formatter with `bar`, `header`, `table`, `box`, `stat`, `divider`, `color`, `bold`, `dim`. |
 | `str` | String utilities: `split`, `trim`, `starts_with`, `ends_with`, `title_case`, `pad_right`, `pad_left`, `center`, `truncate`, `pluralize`, `wrap` |
 | `Grid3D` | 3D grid data structure (from luau-grids). See also Rust-side Grid2D below. |
 
@@ -494,8 +663,8 @@ game write API (emit, set_attr, etc.). They're for pure utility code.
 Players can toggle their display mode:
 
 ```
-@display visual        -- full formatting (ANSI colors, Unicode box-drawing, progress bars)
-@display accessible    -- plain text (screen-reader friendly, no ANSI, descriptive labels)
+@display visual        -- full formatting (BBCode colors, Unicode box-drawing, progress bars)
+@display accessible    -- plain text (screen-reader friendly, no formatting, descriptive labels)
 ```
 
 The mode is stored as the `_display_mode` attr on the player object. Scripts
