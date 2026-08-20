@@ -454,9 +454,9 @@ pub fn generate(
             } else {
                 rng.gen_range(0..100u32) < 60
             };
-            if roll_encounter {
-                if let Some(entries) = encounters_for_depth(theme, depth) {
-                    if let Some(entry) = pick_weighted_encounter(entries, &mut rng) {
+            if roll_encounter
+                && let Some(entries) = encounters_for_depth(theme, depth)
+                    && let Some(entry) = pick_weighted_encounter(entries, &mut rng) {
                         let count = if entry.count[0] >= entry.count[1] {
                             entry.count[0]
                         } else {
@@ -468,13 +468,11 @@ pub fn generate(
                             value: serde_json::json!([{ "monster": entry.monster, "count": count }]),
                         });
                     }
-                }
-            }
 
             // Loot roll — skip the entrance, favor non-corridors.
-            if !is_global_entrance && !is_corridor && rng.gen_range(0..100u32) < 25 {
-                if let Some(items) = loot_for_depth(theme, depth) {
-                    if !items.is_empty() {
+            if !is_global_entrance && !is_corridor && rng.gen_range(0..100u32) < 25
+                && let Some(items) = loot_for_depth(theme, depth)
+                    && !items.is_empty() {
                         let pick = &items[rng.gen_range(0..items.len())];
                         intents.push(Intent::SetTag {
                             target: room_ref.clone(),
@@ -486,8 +484,6 @@ pub fn generate(
                             value: serde_json::json!([pick]),
                         });
                     }
-                }
-            }
 
             intents.push(Intent::SetProgram {
                 target: room_ref.clone(),

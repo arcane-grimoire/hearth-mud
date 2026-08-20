@@ -48,13 +48,12 @@ pub fn to_ansi(text: &str) -> String {
                 advance(&mut chars, end + 1);
                 continue;
             }
-            if let Some(name) = tag.strip_prefix('/') {
-                if let Some(def) = find_tag(name) {
+            if let Some(name) = tag.strip_prefix('/')
+                && let Some(def) = find_tag(name) {
                     out.push_str(def.ansi_off);
                     advance(&mut chars, end + 1);
                     continue;
                 }
-            }
             if let Some(def) = find_tag(tag) {
                 out.push_str(def.ansi_on);
                 advance(&mut chars, end + 1);
@@ -114,8 +113,8 @@ fn ansi_to_bbcode(text: &str) -> String {
     out.push_str(parts[0]);
 
     for part in &parts[1..] {
-        if let Some(rest) = part.strip_prefix('[') {
-            if let Some(m_end) = rest.find('m') {
+        if let Some(rest) = part.strip_prefix('[')
+            && let Some(m_end) = rest.find('m') {
                 let codes_str = &rest[..m_end];
                 let after = &rest[m_end + 1..];
                 let codes: Vec<u16> = codes_str
@@ -148,7 +147,6 @@ fn ansi_to_bbcode(text: &str) -> String {
                 out.push_str(after);
                 continue;
             }
-        }
         out.push('\x1b');
         out.push_str(part);
     }
@@ -173,14 +171,13 @@ fn bbcode_to_html(text: &str) -> String {
                     advance(&mut chars, end + 1);
                     continue;
                 }
-                if let Some(name) = tag.strip_prefix('/') {
-                    if find_tag(name).is_some() && open > 0 {
+                if let Some(name) = tag.strip_prefix('/')
+                    && find_tag(name).is_some() && open > 0 {
                         out.push_str("</span>");
                         open -= 1;
                         advance(&mut chars, end + 1);
                         continue;
                     }
-                }
                 if let Some(def) = find_tag(tag) {
                     out.push_str("<span class=\"");
                     out.push_str(def.html_class);

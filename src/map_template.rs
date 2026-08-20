@@ -267,13 +267,13 @@ pub fn instantiate(
             let theme = themes.get(&terrain.theme);
 
             let room_ref = if let Some(fixed_room) = cell_override.and_then(|ov| ov.fixed_room.as_deref()) {
-                let existing_ref = crate::loader::resolve_file_key(world, fixed_room).ok_or_else(|| {
+                
+                crate::loader::resolve_file_key(world, fixed_room).ok_or_else(|| {
                     format!(
                         "map_template '{}': fixed_room '{}' at ({},{}) not found",
                         name, fixed_room, x, y
                     )
-                })?;
-                existing_ref
+                })?
             } else {
                 let ref_id = alloc(&mut next_ref);
                 let location = prev_room.clone().unwrap_or_else(|| anchor_ref.to_string());

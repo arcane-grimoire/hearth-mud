@@ -701,11 +701,10 @@ impl SoftcodeRuntime {
     fn get_or_compile(&self, source: &str, name: &str) -> mlua::Result<mlua::Function> {
         let hash = Self::source_hash(source);
         let cache = self.chunk_cache.borrow();
-        if let Some(key) = cache.get(&hash) {
-            if let Ok(func) = self.lua.registry_value::<mlua::Function>(key) {
+        if let Some(key) = cache.get(&hash)
+            && let Ok(func) = self.lua.registry_value::<mlua::Function>(key) {
                 return Ok(func);
             }
-        }
         drop(cache);
 
         let func = self.lua.load(source).set_name(name).into_function()?;
@@ -826,11 +825,10 @@ impl SoftcodeRuntime {
                 // Read state back before scope ends
                 let mut map = state_writer.borrow_mut();
                 for pair in state_tbl.pairs::<String, LuaValue>() {
-                    if let Ok((k, v)) = pair {
-                        if let Ok(json_val) = self.lua.from_value::<serde_json::Value>(v) {
+                    if let Ok((k, v)) = pair
+                        && let Ok(json_val) = self.lua.from_value::<serde_json::Value>(v) {
                             map.insert(k, json_val);
                         }
-                    }
                 }
                 Ok(ret)
             } else {
@@ -926,11 +924,10 @@ impl SoftcodeRuntime {
             // Read state back before scope ends
             let mut map = state_writer.borrow_mut();
             for pair in state_tbl.pairs::<String, LuaValue>() {
-                if let Ok((k, v)) = pair {
-                    if let Ok(json_val) = self.lua.from_value::<serde_json::Value>(v) {
+                if let Ok((k, v)) = pair
+                    && let Ok(json_val) = self.lua.from_value::<serde_json::Value>(v) {
                         map.insert(k, json_val);
                     }
-                }
             }
             Ok(ret)
         });
@@ -1036,32 +1033,24 @@ fn lua_value_display(v: &LuaValue, depth: u32) -> String {
         LuaValue::String(s) => format!("\"{}\"", s.to_string_lossy()),
         LuaValue::Table(t) => {
             let mut parts = Vec::new();
-            let mut is_seq = true;
             let mut i = 1i32;
-            for pair in t.pairs::<LuaValue, LuaValue>() {
-                if let Ok((k, v)) = pair {
-                    if matches!(&k, LuaValue::Integer(n) if *n == i) {
-                        parts.push(lua_value_display(&v, depth + 1));
-                        i += 1;
-                    } else {
-                        is_seq = false;
-                        let ks = match &k {
-                            LuaValue::String(s) => s.to_string_lossy().to_string(),
-                            _ => lua_value_display(&k, depth + 1),
-                        };
-                        parts.push(format!("{} = {}", ks, lua_value_display(&v, depth + 1)));
-                    }
-                    if parts.len() > 10 {
-                        parts.push("...".to_string());
-                        break;
-                    }
+            for (k, v) in t.pairs::<LuaValue, LuaValue>().flatten() {
+                if matches!(&k, LuaValue::Integer(n) if *n == i) {
+                    parts.push(lua_value_display(&v, depth + 1));
+                    i += 1;
+                } else {
+                    let ks = match &k {
+                        LuaValue::String(s) => s.to_string_lossy().to_string(),
+                        _ => lua_value_display(&k, depth + 1),
+                    };
+                    parts.push(format!("{} = {}", ks, lua_value_display(&v, depth + 1)));
+                }
+                if parts.len() > 10 {
+                    parts.push("...".to_string());
+                    break;
                 }
             }
-            if is_seq && !parts.is_empty() {
-                format!("{{{}}}", parts.join(", "))
-            } else {
-                format!("{{{}}}", parts.join(", "))
-            }
+            format!("{{{}}}", parts.join(", "))
         }
         _ => format!("<{}>", v.type_name()),
     }
@@ -1203,11 +1192,10 @@ impl SoftcodeRuntime {
 
             let mut test_names = Vec::new();
             for pair in env.pairs::<String, LuaValue>() {
-                if let Ok((key, LuaValue::Function(_))) = pair {
-                    if key.starts_with("test_") {
+                if let Ok((key, LuaValue::Function(_))) = pair
+                    && key.starts_with("test_") {
                         test_names.push(key);
                     }
-                }
             }
             test_names.sort();
             Ok(test_names)

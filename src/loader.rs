@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -233,11 +232,10 @@ pub fn load_game_dir(
     //    reload doesn't hand out new dbrefs for content that already has one.
     let mut key_map: HashMap<String, String> = HashMap::new();
     for obj in world.objects.values() {
-        if obj.tags.contains(&managed) {
-            if let Some(fk) = obj.attrs.get(FILE_KEY_ATTR).and_then(|v| v.as_str()) {
+        if obj.tags.contains(&managed)
+            && let Some(fk) = obj.attrs.get(FILE_KEY_ATTR).and_then(|v| v.as_str()) {
                 key_map.insert(fk.to_string(), obj.ref_id.clone());
             }
-        }
     }
 
     // -- Pass 1: assign dbrefs to every room and object across all files
@@ -355,8 +353,8 @@ pub fn load_game_dir(
             let to = resolve_key(area_name, &exit.to, &key_map)?;
             let file_key = format!("{}/exit/{}/{}", area_name, exit.from, exit.direction);
 
-            if let Some(existing_ref) = key_map.get(&file_key).cloned() {
-                if let Some(existing) = world.get_mut(&existing_ref) {
+            if let Some(existing_ref) = key_map.get(&file_key).cloned()
+                && let Some(existing) = world.get_mut(&existing_ref) {
                     if existing.tags.contains(&managed) {
                         existing.location_ref = Some(from.clone());
                         existing.target_ref = Some(to.clone());
@@ -368,7 +366,6 @@ pub fn load_game_dir(
                 }
                 // key_map had a stale entry (object was deleted) — fall
                 // through and recreate it with a fresh dbref.
-            }
 
             let ref_id = world.next_dbref();
             key_map.insert(file_key.clone(), ref_id.clone());
@@ -408,8 +405,8 @@ pub fn load_game_dir(
             for source in programs.values() {
                 if let ProgramSource::File { file } = source {
                     let path = area.base_dir.join(file);
-                    if path.exists() {
-                        if let Ok(contents) = std::fs::read_to_string(&path) {
+                    if path.exists()
+                        && let Ok(contents) = std::fs::read_to_string(&path) {
                             let hash = hash_content(&contents);
                             if prev_hashes.get(&path) != Some(&hash) {
                                 let relative = path.strip_prefix(game_dir).unwrap_or(&path);
@@ -420,7 +417,6 @@ pub fn load_game_dir(
                             }
                             new_hashes.insert(path, hash);
                         }
-                    }
                 }
             }
         }
@@ -535,8 +531,8 @@ pub fn load_modules(game_dir: &Path) -> HashMap<String, String> {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("luau") {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+        if path.extension().and_then(|e| e.to_str()) == Some("luau")
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                 if stem.ends_with(".test") {
                     continue;
                 }
@@ -544,7 +540,6 @@ pub fn load_modules(game_dir: &Path) -> HashMap<String, String> {
                     modules.insert(stem.to_string(), source);
                 }
             }
-        }
     }
     tracing::info!(count = modules.len(), "Loaded lib modules");
     modules
@@ -590,10 +585,10 @@ fn collect_test_files(base: &Path, dir: &Path, out: &mut Vec<TestFile>) {
         let path = entry.path();
         if path.is_dir() {
             collect_test_files(base, &path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("luau") {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if stem.ends_with(".test") {
-                    if let Ok(source) = std::fs::read_to_string(&path) {
+        } else if path.extension().and_then(|e| e.to_str()) == Some("luau")
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                && stem.ends_with(".test")
+                    && let Ok(source) = std::fs::read_to_string(&path) {
                         let relative = path
                             .strip_prefix(base)
                             .unwrap_or(&path)
@@ -607,9 +602,6 @@ fn collect_test_files(base: &Path, dir: &Path, out: &mut Vec<TestFile>) {
                             is_lib,
                         });
                     }
-                }
-            }
-        }
     }
 }
 

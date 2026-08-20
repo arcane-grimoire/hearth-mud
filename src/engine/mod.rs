@@ -351,7 +351,7 @@ impl Engine {
                 tracing::warn!(tick, ran, "Tick budget exceeded");
                 break;
             }
-            if *interval == 0 || tick % interval != 0 {
+            if *interval == 0 || !tick.is_multiple_of(*interval) {
                 continue;
             }
             match self.fire_tick_hook(ref_id) {
@@ -377,7 +377,7 @@ impl Engine {
                 tracing::warn!(tick, ran, "Tick budget exceeded (global scripts)");
                 break;
             }
-            if *interval == 0 || tick % interval != 0 {
+            if *interval == 0 || !tick.is_multiple_of(*interval) {
                 continue;
             }
             match self.fire_global_script(name) {
@@ -419,7 +419,7 @@ impl Engine {
         }
 
         // Clean up expired tokens every 60 ticks (~1 minute)
-        if tick % 60 == 0 {
+        if tick.is_multiple_of(60) {
             let before = self.api_tokens.len();
             self.api_tokens.retain(|_, t| !Self::is_token_expired(t));
             if self.api_tokens.len() < before {
@@ -550,13 +550,11 @@ impl Engine {
         self.world.next_id = dbref_counter.get();
         self.deliver_effects(&effects, this_ref);
 
-        if !result.state.is_empty() {
-            if let Some(obj) = self.world.get_mut(this_ref) {
-                if let Some(prog) = obj.programs.get_mut(hook_name) {
+        if !result.state.is_empty()
+            && let Some(obj) = self.world.get_mut(this_ref)
+                && let Some(prog) = obj.programs.get_mut(hook_name) {
                     prog.state = result.state;
                 }
-            }
-        }
 
         Ok(())
     }
@@ -599,13 +597,11 @@ impl Engine {
         self.world.next_id = dbref_counter.get();
         self.deliver_effects(&effects, this_ref);
 
-        if !result.state.is_empty() {
-            if let Some(obj) = self.world.get_mut(this_ref) {
-                if let Some(prog) = obj.programs.get_mut(hook_name) {
+        if !result.state.is_empty()
+            && let Some(obj) = self.world.get_mut(this_ref)
+                && let Some(prog) = obj.programs.get_mut(hook_name) {
                     prog.state = result.state;
                 }
-            }
-        }
 
         Ok(())
     }
@@ -647,7 +643,7 @@ impl Engine {
     }
 
     fn is_token_expired(info: &TokenInfo) -> bool {
-        info.expires_at.map_or(false, |exp| Self::now_secs() > exp)
+        info.expires_at.is_some_and(|exp| Self::now_secs() > exp)
     }
 
     fn handle_api_request(&mut self, req: ApiRequest, token: Option<String>) -> ApiResponse {
@@ -1976,7 +1972,7 @@ impl Engine {
                 }
                 Effect::EmitNearby { room, x, y, radius, message, exclude } => {
                     let r2 = radius * radius;
-                    for (_, session) in &self.sessions {
+                    for session in self.sessions.values() {
                         if let SessionState::Playing { actor_ref: ar, .. } = &session.state {
                             if exclude.contains(ar) {
                                 continue;
@@ -2005,18 +2001,17 @@ impl Engine {
 
                     while let Some((current_room, dist)) = queue.pop_front() {
                         if let Some(msg) = messages.get(&dist) {
-                            for (_, session) in &self.sessions {
+                            for session in self.sessions.values() {
                                 if let SessionState::Playing { actor_ref: ar, .. } = &session.state {
                                     if exclude.contains(ar) {
                                         continue;
                                     }
-                                    if let Some(actor) = self.world.get(ar) {
-                                        if actor.location_ref.as_deref() == Some(&current_room) {
+                                    if let Some(actor) = self.world.get(ar)
+                                        && actor.location_ref.as_deref() == Some(&current_room) {
                                             let _ = session.tx.send(ClientMessage::Text {
                                                 text: msg.clone(),
                                             });
                                         }
-                                    }
                                 }
                             }
                         }
@@ -2057,19 +2052,17 @@ impl Engine {
                 .world
                 .get(&target)
                 .and_then(|o| o.location_ref.clone());
-            if data.is_some() {
-                if let Some(obj) = self.world.get_mut(&target) {
+            if data.is_some()
+                && let Some(obj) = self.world.get_mut(&target) {
                     obj.attrs.insert("_trigger_data".into(), data.clone().unwrap());
                 }
-            }
             if let Err(e) = self.fire_hook(&target, &hook, actor_ref, room_ref.as_deref(), None) {
                 tracing::warn!(hook = %hook, target = %target, error = %e, "Triggered hook error");
             }
-            if data.is_some() {
-                if let Some(obj) = self.world.get_mut(&target) {
+            if data.is_some()
+                && let Some(obj) = self.world.get_mut(&target) {
                     obj.attrs.remove("_trigger_data");
                 }
-            }
         }
     }
 
@@ -2538,11 +2531,10 @@ impl Engine {
         let username = args.trim();
         if username.is_empty() {
             // Show own scopes
-            if let Some(account_id) = self.session_account_id(session_id) {
-                if let Some(acct) = self.accounts.get(&account_id) {
+            if let Some(account_id) = self.session_account_id(session_id)
+                && let Some(acct) = self.accounts.get(&account_id) {
                     return format!("Your scopes: {}\r\n", acct.scope_labels().join(", "));
                 }
-            }
             return "Could not find your account.\r\n".to_string();
         }
         match self.accounts.get_by_username(username) {
@@ -2559,7 +2551,7 @@ impl Engine {
             return "Usage: @wall <message>\r\n".to_string();
         }
         let msg = ClientMessage::Text { text: format!("\r\n[ADMIN] {}\r\n", args) };
-        for (_, session) in &self.sessions {
+        for session in self.sessions.values() {
             if matches!(&session.state, SessionState::Playing { .. }) {
                 let _ = session.tx.send(msg.clone());
             }
@@ -2664,12 +2656,11 @@ impl Engine {
         let mut out = "\r\nOnline players:\r\n".to_string();
         let mut count = 0;
         for session in self.sessions.values() {
-            if let SessionState::Playing { actor_ref, .. } = &session.state {
-                if let Some(actor) = self.world.get(actor_ref) {
+            if let SessionState::Playing { actor_ref, .. } = &session.state
+                && let Some(actor) = self.world.get(actor_ref) {
                     out.push_str(&format!("  {}\r\n", actor.display_name()));
                     count += 1;
                 }
-            }
         }
         out.push_str(&format!("{} player(s) online.\r\n", count));
         out
@@ -2844,13 +2835,11 @@ impl Engine {
             if sid == speaker_session {
                 continue;
             }
-            if let SessionState::Playing { actor_ref: ar, .. } = &session.state {
-                if let Some(other_actor) = self.world.get(ar) {
-                    if other_actor.location_ref.as_deref() == Some(&room_ref) {
+            if let SessionState::Playing { actor_ref: ar, .. } = &session.state
+                && let Some(other_actor) = self.world.get(ar)
+                    && other_actor.location_ref.as_deref() == Some(&room_ref) {
                         let _ = session.tx.send(others_msg.clone());
                     }
-                }
-            }
         }
 
         let _ = self.fire_hook(&room_ref, "on_emote", actor_ref, Some(&room_ref), None);
@@ -3133,13 +3122,10 @@ impl Engine {
                 account_id,
                 ..
             } = &session.state
-            {
-                if ar == actor_ref {
-                    if let Some(acct) = self.accounts.get(account_id) {
+                && ar == actor_ref
+                    && let Some(acct) = self.accounts.get(account_id) {
                         return acct.scope_labels().iter().map(|s| s.to_string()).collect();
                     }
-                }
-            }
         }
         vec![]
     }
@@ -3242,15 +3228,14 @@ impl Engine {
                 if let Some(false) = self.check_lock("look", &locks, actor_ref, Some(target_ref)) {
                     return "You can't see that.\r\n".to_string();
                 }
-                if let Ok(run) = self.fire_hook(target_ref, "can_look", actor_ref, Some(&room_ref), None) {
-                    if run.denied {
+                if let Ok(run) = self.fire_hook(target_ref, "can_look", actor_ref, Some(&room_ref), None)
+                    && run.denied {
                         return if run.emitted_to_actor {
                             String::new()
                         } else {
                             "You can't see that.\r\n".to_string()
                         };
                     }
-                }
                 let _ = self.fire_hook(target_ref, "on_look", actor_ref, Some(&room_ref), None);
             }
             return commands::do_examine(&self.world, actor_ref, args);
@@ -3567,13 +3552,11 @@ impl Engine {
             if sid == speaker_session {
                 continue;
             }
-            if let SessionState::Playing { actor_ref: ar, .. } = &session.state {
-                if let Some(other_actor) = self.world.get(ar) {
-                    if other_actor.location_ref.as_deref() == Some(&room_ref) {
+            if let SessionState::Playing { actor_ref: ar, .. } = &session.state
+                && let Some(other_actor) = self.world.get(ar)
+                    && other_actor.location_ref.as_deref() == Some(&room_ref) {
                         let _ = session.tx.send(others_msg.clone());
                     }
-                }
-            }
         }
 
         format!("You say, \"{}\"\r\n", message)

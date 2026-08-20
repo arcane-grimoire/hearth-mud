@@ -1,3 +1,7 @@
+#![allow(dead_code)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
+
 mod accounts;
 mod ansi;
 mod config;

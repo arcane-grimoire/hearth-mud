@@ -96,7 +96,7 @@ impl Grid2D {
             let iy = i / self.width;
             let gx = (goal.0 - 1) as i32;
             let gy = (goal.1 - 1) as i32;
-            ((ix as i32 - gx).unsigned_abs() + (iy as i32 - gy).unsigned_abs()) as u32
+            (ix as i32 - gx).unsigned_abs() + (iy as i32 - gy).unsigned_abs() 
         };
 
         let mut open = BinaryHeap::new();
@@ -312,7 +312,7 @@ impl Grid2D {
     }
 
     fn dijkstra_map(&self, ox: usize, oy: usize, walkable: &serde_json::Value) -> Grid2D {
-        let total = self.width * self.height;
+        let _total = self.width * self.height;
         let max_dist = serde_json::json!(-1);
         let mut dist_grid = Grid2D::new(self.width, self.height, max_dist);
 
@@ -539,8 +539,8 @@ impl UserData for Grid2D {
             for (dx, dy) in dirs {
                 let nx = x as i64 + dx;
                 let ny = y as i64 + dy;
-                if nx >= 1 && ny >= 1 {
-                    if let Some(i) = this.index(nx as usize, ny as usize) {
+                if nx >= 1 && ny >= 1
+                    && let Some(i) = this.index(nx as usize, ny as usize) {
                         n += 1;
                         let entry = lua.create_table()?;
                         entry.set("x", nx)?;
@@ -548,7 +548,6 @@ impl UserData for Grid2D {
                         entry.set("value", lua.to_value(&this.cells[i])?)?;
                         results.set(n, entry)?;
                     }
-                }
             }
             Ok(LuaValue::Table(results))
         });

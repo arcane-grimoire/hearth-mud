@@ -190,7 +190,7 @@ fn parse_atom(tokens: &[String], pos: &mut usize) -> Result<LockExpr, String> {
                 if args.len() != 1 {
                     return Err("has_tag() takes 1 argument".into());
                 }
-                let tag = Tag::parse(&args[0]).map_err(|e| e)?;
+                let tag = Tag::parse(&args[0])?;
                 Ok(LockExpr::HasTag(tag))
             }
             "has_attr" => {
@@ -208,7 +208,7 @@ fn parse_atom(tokens: &[String], pos: &mut usize) -> Result<LockExpr, String> {
                 if args.len() != 1 {
                     return Err("in_inventory() takes 1 argument".into());
                 }
-                let tag = Tag::parse(&args[0]).map_err(|e| e)?;
+                let tag = Tag::parse(&args[0])?;
                 Ok(LockExpr::InInventory(tag))
             }
             "is_kind" => {
@@ -302,11 +302,10 @@ fn parse_json_value(s: &str) -> serde_json::Value {
     if let Ok(n) = trimmed.parse::<i64>() {
         return serde_json::Value::Number(n.into());
     }
-    if let Ok(n) = trimmed.parse::<f64>() {
-        if let Some(n) = serde_json::Number::from_f64(n) {
+    if let Ok(n) = trimmed.parse::<f64>()
+        && let Some(n) = serde_json::Number::from_f64(n) {
             return serde_json::Value::Number(n);
         }
-    }
     serde_json::Value::String(trimmed.to_string())
 }
 

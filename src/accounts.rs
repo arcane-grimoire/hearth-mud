@@ -196,11 +196,10 @@ impl AccountStore {
             .accounts
             .get_mut(account_id)
             .ok_or("Account not found.")?;
-        if let Some(ref e) = email {
-            if !e.contains('@') || !e.contains('.') {
+        if let Some(ref e) = email
+            && (!e.contains('@') || !e.contains('.')) {
                 return Err("That doesn't look like a valid email address.".into());
             }
-        }
         account.email = email;
         Ok(())
     }

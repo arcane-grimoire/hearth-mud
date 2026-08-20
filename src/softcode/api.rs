@@ -734,10 +734,8 @@ pub fn install<'scope, 'env>(
             move |_, (r, radius, messages, exclude): (Value, u32, Table, Option<Table>)| {
                 let room = ref_of(&r)?;
                 let mut msg_map = HashMap::new();
-                for pair in messages.pairs::<u32, String>() {
-                    if let Ok((dist, msg)) = pair {
-                        msg_map.insert(dist, msg);
-                    }
+                for (dist, msg) in messages.pairs::<u32, String>().flatten() {
+                    msg_map.insert(dist, msg);
                 }
                 let mut exclude_refs = Vec::new();
                 if let Some(t) = exclude {
@@ -818,16 +816,14 @@ pub fn install<'scope, 'env>(
             }
 
             let out = lua.create_table()?;
-            let mut i = 1;
-            for (ref_id, dist) in &visited {
+            for (i, (ref_id, dist)) in visited.iter().enumerate() {
                 let entry = lua.create_table()?;
                 entry.set("ref", ref_id.clone())?;
                 entry.set("distance", *dist)?;
                 if let Some(obj) = world.get(ref_id) {
                     entry.set("name", obj.display_name().to_string())?;
                 }
-                out.set(i, entry)?;
-                i += 1;
+                out.set(i + 1, entry)?;
             }
             Ok(out)
         })?,
@@ -1347,14 +1343,12 @@ pub fn install<'scope, 'env>(
         "apply_template",
         scope.create_function(move |_, (r, template): (Value, Table)| {
             let target = ref_of(&r)?;
-            for pair in template.pairs::<String, String>() {
-                if let Ok((hook, source)) = pair {
-                    b.borrow_mut().push(Intent::SetProgram {
-                        target: target.clone(),
-                        hook,
-                        source,
-                    });
-                }
+            for (hook, source) in template.pairs::<String, String>().flatten() {
+                b.borrow_mut().push(Intent::SetProgram {
+                    target: target.clone(),
+                    hook,
+                    source,
+                });
             }
             Ok(())
         })?,
