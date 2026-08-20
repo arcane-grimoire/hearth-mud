@@ -12,7 +12,7 @@ COPY lib/ lib/
 COPY --from=web /build/web/dist/ web/dist/
 RUN cargo build --release --features bundle-web
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/hearth-mud /usr/local/bin/hearth-mud
 WORKDIR /data
