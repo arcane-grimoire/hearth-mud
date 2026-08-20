@@ -162,8 +162,11 @@ pub fn install<'scope, 'env>(
     themes: &'env std::collections::HashMap<String, Theme>,
     map_templates: &'env std::collections::HashMap<String, MapTemplateFile>,
     scheduled_hooks: &'env [crate::softcode::ScheduledHook],
+    tick_count: u64,
 ) -> mlua::Result<()> {
     // -- Read API --
+
+    env.set("get_tick", tick_count)?;
 
     env.set(
         "get_object",
@@ -774,6 +777,70 @@ pub fn install<'scope, 'env>(
                 }
             }
             Ok(out)
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
+        "transfer_attr",
+        scope.create_function(move |_, (from, to, key, amount): (Value, Value, String, f64)| {
+            let from = ref_of(&from)?;
+            let to = ref_of(&to)?;
+            b.borrow_mut().push(Intent::TransferAttr { from, to, key, amount });
+            Ok(())
+        })?,
+    )?;
+
+    env.set(
+        "get_rooms_in_radius",
+        scope.create_function(move |lua, (r, radius): (Value, u32)| {
+            let room = ref_of(&r)?;
+            let mut visited: HashMap<String, u32> = HashMap::new();
+            let mut queue: std::collections::VecDeque<(String, u32)> = std::collections::VecDeque::new();
+            visited.insert(room.clone(), 0);
+            queue.push_back((room.clone(), 0));
+
+            while let Some((current, dist)) = queue.pop_front() {
+                if dist < radius {
+                    for exit in world.exits_from(&current) {
+                        if let Some(target_ref) = &exit.target_ref {
+                            let muffle = exit.attrs.get("muffle").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                            let blocked = exit.attrs.get("blocked_sound").and_then(|v| v.as_bool()).unwrap_or(false);
+                            if blocked { continue; }
+                            let next_dist = dist + 1 + muffle;
+                            if next_dist <= radius && !visited.contains_key(target_ref) {
+                                visited.insert(target_ref.clone(), next_dist);
+                                queue.push_back((target_ref.clone(), next_dist));
+                            }
+                        }
+                    }
+                }
+            }
+
+            let out = lua.create_table()?;
+            let mut i = 1;
+            for (ref_id, dist) in &visited {
+                let entry = lua.create_table()?;
+                entry.set("ref", ref_id.clone())?;
+                entry.set("distance", *dist)?;
+                if let Some(obj) = world.get(ref_id) {
+                    entry.set("name", obj.display_name().to_string())?;
+                }
+                out.set(i, entry)?;
+                i += 1;
+            }
+            Ok(out)
+        })?,
+    )?;
+
+    env.set(
+        "match_name",
+        scope.create_function(move |_, (name, input): (String, String)| {
+            let name_lower = name.to_lowercase();
+            let input_lower = input.to_lowercase();
+            Ok(name_lower == input_lower
+                || name_lower.starts_with(&input_lower)
+                || name_lower.split_whitespace().any(|w| w.starts_with(&input_lower)))
         })?,
     )?;
 

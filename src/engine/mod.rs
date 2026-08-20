@@ -455,6 +455,7 @@ impl Engine {
                 &self.themes,
                 &self.map_templates,
                 &self.scheduled_hooks,
+                self.tick_count,
             )
             .map_err(|e| e.to_string())?;
 
@@ -541,6 +542,7 @@ impl Engine {
                 &self.themes,
                 &self.map_templates,
                 &self.scheduled_hooks,
+                self.tick_count,
             )
             .map_err(|e| e.to_string())?;
 
@@ -589,6 +591,7 @@ impl Engine {
                 &self.themes,
                 &self.map_templates,
                 &self.scheduled_hooks,
+                self.tick_count,
             )
             .map_err(|e| e.to_string())?;
 
@@ -1904,6 +1907,7 @@ impl Engine {
                 &self.themes,
                 &self.map_templates,
                 &self.scheduled_hooks,
+                self.tick_count,
             )
             .map_err(|e| e.to_string())?;
 

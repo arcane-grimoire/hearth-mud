@@ -145,6 +145,12 @@ pub enum Intent {
         messages: HashMap<u32, String>,
         exclude: Vec<String>,
     },
+    TransferAttr {
+        from: String,
+        to: String,
+        key: String,
+        amount: f64,
+    },
 }
 
 /// The intents a Program has queued during a single run. Collected while the
@@ -491,6 +497,31 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                     exclude: exclude.clone(),
                 });
             }
+            Intent::TransferAttr { from, to, key, amount } => {
+                let from_val = world
+                    .get(from)
+                    .and_then(|o| o.attrs.get(key))
+                    .and_then(|v| v.as_f64())
+                    .ok_or_else(|| format!("transfer_attr: '{}' has no numeric attr '{}'", from, key))?;
+                if from_val < *amount {
+                    return Err(format!(
+                        "transfer_attr: '{}' has {} but needs {} for '{}'",
+                        from, from_val, amount, key
+                    ));
+                }
+                let to_val = world
+                    .get(to)
+                    .ok_or_else(|| format!("transfer_attr: no object '{}'", to))?
+                    .attrs
+                    .get(key)
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+
+                let from_obj = world.get_mut(from).unwrap();
+                from_obj.attrs.insert(key.clone(), serde_json::json!(from_val - amount));
+                let to_obj = world.get_mut(to).unwrap();
+                to_obj.attrs.insert(key.clone(), serde_json::json!(to_val + amount));
+            }
         }
     }
     Ok(effects)
@@ -738,6 +769,7 @@ impl SoftcodeRuntime {
         themes: &HashMap<String, Theme>,
         map_templates: &HashMap<String, crate::map_template::MapTemplateFile>,
         scheduled_hooks: &[ScheduledHook],
+        tick_count: u64,
     ) -> Result<ProgramResult, SoftcodeError> {
         self.install_budget(budget);
         let batch = Rc::new(RefCell::new(IntentBatch::default()));
@@ -765,6 +797,7 @@ impl SoftcodeRuntime {
                 themes,
                 map_templates,
                 scheduled_hooks,
+                tick_count,
             )?;
 
             let compiled = self.get_or_compile(&program.source, &program.hook)
@@ -849,6 +882,7 @@ impl SoftcodeRuntime {
         themes: &HashMap<String, Theme>,
         map_templates: &HashMap<String, crate::map_template::MapTemplateFile>,
         scheduled_hooks: &[ScheduledHook],
+        tick_count: u64,
     ) -> Result<ProgramResult, SoftcodeError> {
         self.install_budget(budget);
         let batch = Rc::new(RefCell::new(IntentBatch::default()));
@@ -870,6 +904,7 @@ impl SoftcodeRuntime {
                 themes,
                 map_templates,
                 scheduled_hooks,
+                tick_count,
             )?;
 
             let compiled = self.get_or_compile(source, entry)
@@ -1229,6 +1264,7 @@ impl SoftcodeRuntime {
                         &empty_themes,
                         &empty_templates,
                         &[],
+                        0,
                     )?;
 
                     let ctx = self.lua.create_table()?;
@@ -1407,7 +1443,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(), &[],
+                &test_themes(), &test_map_templates(), &[], 0,
             )
             .expect("hook should run");
 
@@ -1450,7 +1486,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(), &[],
+                &test_themes(), &test_map_templates(), &[], 0,
             )
             .expect("hook should run");
 
@@ -1482,7 +1518,7 @@ mod tests {
                 Some("the button"),
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(), &[],
+                &test_themes(), &test_map_templates(), &[], 0,
             )
             .expect("hook should run");
 
@@ -1521,7 +1557,7 @@ mod tests {
                 None,
                 Budget::new(1000),
                 counter(&world),
-                &test_themes(), &test_map_templates(), &[],
+                &test_themes(), &test_map_templates(), &[], 0,
             )
             .expect_err("infinite loop should hit budget");
 
@@ -1555,7 +1591,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(), &[],
+                &test_themes(), &test_map_templates(), &[], 0,
             )
             .unwrap();
         let result_b = runtime
@@ -1568,7 +1604,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(), &[],
+                &test_themes(), &test_map_templates(), &[], 0,
             )
             .unwrap();
 
@@ -1614,7 +1650,7 @@ mod tests {
                 Some(""),
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(), &[],
+                &test_themes(), &test_map_templates(), &[], 0,
             )
             .unwrap();
 
@@ -1635,7 +1671,7 @@ mod tests {
         let runtime = SoftcodeRuntime::new();
         let program = ProgramRecord::new("on_get", source);
         runtime
-            .run_hook(world, &program, "#5", "#3", Some("#1"), None, Budget::default(), counter(world), &test_themes(), &test_map_templates(), &[])
+            .run_hook(world, &program, "#5", "#3", Some("#1"), None, Budget::default(), counter(world), &test_themes(), &test_map_templates(), &[], 0)
             .expect("script should run")
     }
 
@@ -1951,7 +1987,7 @@ mod tests {
                 counter(&world),
                 &themes,
                 &test_map_templates(),
-                &[],
+                &[], 0,
             )
             .expect("cmd_delve should run");
 
@@ -1994,7 +2030,7 @@ mod tests {
                 counter(&w),
                 &themes,
                 &test_map_templates(),
-                &[],
+                &[], 0,
             )
             .expect("cmd_leave should run");
         apply_batch(&mut w, &destroy_result.batch).expect("destroy batch should apply");
@@ -2055,7 +2091,7 @@ mod tests {
                 counter(&world),
                 &test_themes(),
                 &map_templates,
-                &[],
+                &[], 0,
             )
             .expect("cmd_explore should run");
 
@@ -2113,7 +2149,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(), &[],
+                &test_themes(), &test_map_templates(), &[], 0,
             )
             .expect("hook should run");
 
@@ -2149,7 +2185,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(), &[],
+                &test_themes(), &test_map_templates(), &[], 0,
             )
             .expect_err("should fail on missing module");
 
@@ -2185,7 +2221,7 @@ mod tests {
                 &HashMap::new(),
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(), &[],
+                &test_themes(), &test_map_templates(), &[], 0,
             )
             .expect("global script should run");
 
@@ -2243,7 +2279,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(), &[],
+                &test_themes(), &test_map_templates(), &[], 0,
             )
             .expect("hook should run");
 
@@ -2282,7 +2318,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(), &[],
+                &test_themes(), &test_map_templates(), &[], 0,
             )
             .unwrap();
 
@@ -2305,7 +2341,7 @@ mod tests {
                 None,
                 Budget::default(),
                 counter(&world),
-                &test_themes(), &test_map_templates(), &[],
+                &test_themes(), &test_map_templates(), &[], 0,
             )
             .unwrap();
 
@@ -2337,7 +2373,7 @@ mod tests {
         let result = runtime
             .run_hook(
                 &world, &program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[],
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[], 0,
             )
             .unwrap();
 
@@ -2369,7 +2405,7 @@ mod tests {
         let result = runtime
             .run_hook(
                 &world, &program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[],
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[], 0,
             )
             .unwrap();
 
@@ -2391,7 +2427,7 @@ mod tests {
         let result2 = runtime
             .run_hook(
                 &w, &restore_program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&w), &test_themes(), &test_map_templates(), &[],
+                Budget::default(), counter(&w), &test_themes(), &test_map_templates(), &[], 0,
             )
             .unwrap();
 
@@ -2428,7 +2464,7 @@ mod tests {
         let result = runtime
             .run_hook(
                 &world, &program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[],
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[], 0,
             )
             .unwrap();
 
@@ -2465,7 +2501,7 @@ mod tests {
         let result = runtime
             .run_hook(
                 &world, &program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[],
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[], 0,
             )
             .unwrap();
 
@@ -2512,7 +2548,7 @@ mod tests {
         let result = runtime
             .run_hook(
                 &world, &program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[],
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[], 0,
             )
             .unwrap();
 
@@ -2559,7 +2595,7 @@ mod tests {
         let result = runtime
             .run_hook(
                 &world, &program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[],
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[], 0,
             )
             .unwrap();
 
@@ -2598,7 +2634,7 @@ mod tests {
         let result = runtime
             .run_hook(
                 &world, &program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[],
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[], 0,
             )
             .unwrap();
 
@@ -2631,7 +2667,7 @@ mod tests {
         let result = runtime
             .run_hook(
                 &world, &program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[],
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[], 0,
             )
             .unwrap();
 
@@ -2664,7 +2700,7 @@ mod tests {
         let result = runtime
             .run_hook(
                 &world, &program, "#5", "#3", Some("#1"), None,
-                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[],
+                Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[], 0,
             )
             .unwrap();
 
