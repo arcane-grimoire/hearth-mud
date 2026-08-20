@@ -48,7 +48,7 @@ REST   ──► POST /api   ──►                    ├── World (objec
                                               └── Database (SQLite)
 ```
 
-Luau scripts push typed `Intent` enum variants into a batch. The engine validates and applies the batch atomically after the script finishes.
+Luau scripts push typed `Intent` enum variants into a batch. The engine validates and applies the batch atomically after the script finishes. Read-your-writes: `get_attr` and `pick` check the pending batch first, so scripts see their own writes immediately.
 
 ## Hooks
 
@@ -71,8 +71,8 @@ Programs are Luau functions attached to objects. The engine calls them at specif
 | `on_use` | After actor uses this object |
 | `on_enter` | After actor enters this room |
 | `on_leave` | After actor leaves this room |
-| `on_look` | After actor looks at this object |
-| `on_say` | After actor speaks in this room |
+| `on_look` | After actor looks at this object. On rooms, suppresses default look output — the hook handles all rendering. |
+| `on_say` | After actor speaks in this room. On rooms, suppresses default say broadcast — the hook handles distribution. Message available via `_say_message` attr. |
 | `on_move` | When this object is moved to a new location |
 | `on_receive` | When an item is placed in this object |
 | `on_damage` | When this object takes damage |
@@ -99,9 +99,9 @@ Objects tagged `system:global` receive `cmd_*` hooks from anywhere and lifecycle
 | Function | Description |
 |----------|-------------|
 | `get_object(ref)` | Returns a snapshot table of the object (`ref_id`, `key`, `kind`, `title`, `description`, `attrs`, `tags`, etc.) |
-| `get_attr(ref, key)` | Returns the value of one attribute, or `nil` |
-| `has_attr(ref, key)` | Returns `true` if the attribute exists |
-| `pick(ref, attr, ...)` | Walk into nested attrs: `pick(ref, "combat", 1, "hp")` returns the deep value |
+| `get_attr(ref, key)` | Returns the value of one attribute, or `nil`. Sees pending writes from the current script. |
+| `has_attr(ref, key)` | Returns `true` if the attribute exists. Sees pending writes. |
+| `pick(ref, attr, ...)` | Walk into nested attrs: `pick(ref, "combat", 1, "hp")`. Sees pending writes. |
 | `has_tag(ref, "category:key")` | Returns `true` if the object has this tag |
 | `get_tags(ref)` | Returns a list of tag specs (`"category:key"`) |
 | `get_room_contents(ref)` | Returns all objects located in a room |
@@ -114,6 +114,8 @@ Objects tagged `system:global` receive `cmd_*` hooks from anywhere and lifecycle
 | `get_players_in_room(ref)` | Returns player objects in a room |
 | `get_timers(ref)` | Returns active timers on this object |
 | `get_all_by_kind(kind)` | Returns all objects of a given kind |
+| `get_tick` | The current engine tick count (a value, not a function) |
+| `resolve_key(file_key)` | Returns the ref_id for a TOML-defined object by file key (e.g. `"town/crossroads"`) |
 
 ### Search
 
@@ -122,6 +124,14 @@ Objects tagged `system:global` receive `cmd_*` hooks from anywhere and lifecycle
 | `find_by_tag("category:key")` | Returns all objects with this tag |
 | `find_by_attr(key, value)` | Returns all objects where `attrs[key] == value` |
 | `find_in_room(room_ref, name)` | Finds an object in a room by name/key match |
+| `match_name(name, input)` | Partial name matching — `match_name("iron sword", "ir")` returns `true`. Matches start of full name or any word. |
+
+### Spatial Queries
+
+| Function | Description |
+|----------|-------------|
+| `get_nearby(room, x, y, radius)` | Returns all objects in `room` whose `_x`/`_y` attrs are within `radius` |
+| `get_rooms_in_radius(room, distance)` | BFS walk through exits, returns `{ {ref, distance, name}, ... }`. Respects `muffle` and `blocked_sound` exit attrs. |
 
 ### Predicates
 
@@ -144,6 +154,7 @@ Objects tagged `system:global` receive `cmd_*` hooks from anywhere and lifecycle
 | `set_attr(ref, key, value)` | Sets an attribute. Pass `nil` to remove it. |
 | `set_val(ref, attr, ..., value)` | Sets a value deep inside a nested attr: `set_val(ref, "combat", 1, "hp", 5)` |
 | `unset_attr(ref, key)` | Removes an attribute |
+| `transfer_attr(from, to, key, amount)` | Atomic numeric transfer between objects. Validates sufficient balance; rolls back on failure. |
 | `set_tag(ref, "category:key")` | Adds a tag |
 | `unset_tag(ref, "category:key")` | Removes a tag |
 | `set_title(ref, title)` | Sets the object's title |
@@ -162,6 +173,8 @@ Objects tagged `system:global` receive `cmd_*` hooks from anywhere and lifecycle
 |----------|-------------|
 | `emit(ref, message)` | Sends a message to one player |
 | `emit_room(room_ref, message, exclude?)` | Sends a message to all players in a room |
+| `emit_nearby(room, x, y, radius, message, exclude?)` | Sends a message to players in `room` whose `_x`/`_y` attrs are within `radius` |
+| `emit_radius(room, distance, messages, exclude?)` | BFS walk through exits, delivers distance-keyed messages. Exit attrs `muffle` (adds distance) and `blocked_sound` (blocks traversal) control propagation. |
 | `emit_data(ref, channel, data)` | Sends structured JSON to a player's web client |
 | `prompt(ref, message)` | Prompts a player for input (fires `on_reply` with their response) |
 | `log(message)` | Writes to the server log |
@@ -188,7 +201,7 @@ Objects tagged `system:global` receive `cmd_*` hooks from anywhere and lifecycle
 |----------|-------------|
 | `json_encode(value)` | Converts a Lua value to a JSON string |
 | `json_decode(string)` | Parses a JSON string into a Lua value |
-| `trigger(ref, hook)` | Manually fires a hook on an object |
+| `trigger(ref, hook, data?)` | Manually fires a hook on an object. Optional `data` is available as `_trigger_data` attr during execution. |
 
 ## Standard Library
 
@@ -199,7 +212,7 @@ These modules are bundled in the binary and available via `require()`. Games can
 | `str` | String utilities: `split`, `trim`, `pad_left`, `pad_right`, `wrap`, `truncate`, `pluralize`, `title_case` |
 | `collections` | Ordered `Set` and `Array` helpers: `map`, `filter`, `find`, `reduce`, `flat`, `slice`, `every`, `some` |
 | `random` | Dice rolls (`roll("2d6")`), `weighted_choice`, `shuffle`, `sample`, `chance` |
-| `text` | Rich text formatting with accessible/visual modes: `bar`, `header`, `divider`, `table`, `box`, `stat`, `for_mode` |
+| `text` | Rich text formatting with accessible/visual modes: `bar`, `header`, `divider`, `table`, `box`, `stat`, `for_mode`. Uses BBCode markup. |
 | `signal` | Pub/sub event system: `Signal` (fire-and-forget) and `Subject` (replay last value) |
 | `state_machine` | Synchronous FSM with guards, actions, enter/exit callbacks |
 | `Grid3D` | 3D spatial grid with get/set/update/iterate (complements the Rust-side Grid2D) |
@@ -210,10 +223,11 @@ These modules are bundled in the binary and available via `require()`. Games can
 The built-in web client is a Svelte 5 app with:
 
 - Scrolling output pane with BBCode rendering and clickable `[cmd=...]` elements
-- Structured sidebar: Who's Here, What's Here, Exits (clickable)
+- Structured sidebar: Who's Here, What's Here, Exits (clickable), game widgets
 - Command input with history
 - In-browser object editor (for builders)
 - Settings drawer with theme toggle
+- Sidebar respects `can_see` hooks and `system:hidden` tags
 
 ### Game Widgets
 
@@ -243,6 +257,17 @@ Built-in widget types:
 Transport-neutral styling — converted to ANSI for telnet, HTML for web:
 
 `[b]bold[/b]`, `[u]underline[/u]`, `[dim]dim[/dim]`, `[red]color[/red]`, `[cmd=go north]clickable[/cmd]`
+
+Colors: `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, and bright variants (`bright_red`, `bright_green`, etc.)
+
+## Exit Propagation Attrs
+
+Exits can carry attributes that control how sound, light, and events propagate through the room graph:
+
+| Attr | Type | Effect |
+|------|------|--------|
+| `muffle` | integer | Adds to perceived distance when propagating through this exit |
+| `blocked_sound` | boolean | Prevents `emit_radius` and `get_rooms_in_radius` from traversing this exit |
 
 ## License
 
