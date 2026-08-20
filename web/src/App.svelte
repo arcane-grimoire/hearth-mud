@@ -18,6 +18,8 @@
   let roomData = $state(null);
   let gamePanels = $state(new Map());
   let scopes = $state([]);
+  let availableCommands = $state([]);
+  let autocomplete = $state(localStorage.getItem('hearth-autocomplete') === 'true');
   let editingEntity = $state(null);
   let settingsOpen = $state(false);
   let adminOpen = $state(false);
@@ -58,6 +60,9 @@
             scopes = msg.scopes || [];
             break;
           case 'prompt': break;
+          case 'commands':
+            availableCommands = msg.commands || [];
+            break;
           case 'game':
             if (msg.channel && msg.data?.widget) {
               gamePanels = new Map(gamePanels).set(msg.channel, msg.data);
@@ -90,6 +95,7 @@
   function closeEditor() { editingEntity = null; }
   function toggleAdmin() { adminOpen = !adminOpen; editingEntity = null; }
   function toggleSidebar() { sidebarOpen = !sidebarOpen; }
+  function setAutocomplete(val) { autocomplete = val; localStorage.setItem('hearth-autocomplete', val); }
 
   let isBuilder = $derived(scopes.includes('builder') || scopes.includes('admin'));
   let inputBar;
@@ -156,10 +162,10 @@
     {/if}
   </div>
 
-  <InputBar bind:this={inputBar} oncommand={handleCommand} />
+  <InputBar bind:this={inputBar} oncommand={handleCommand} commands={availableCommands} {autocomplete} />
 </div>
 
-<Settings open={settingsOpen} onclose={() => settingsOpen = false} {scopes} oncommand={handleCommand} />
+<Settings open={settingsOpen} onclose={() => settingsOpen = false} {scopes} oncommand={handleCommand} {autocomplete} onautocomplete={setAutocomplete} />
 
 <style>
   .app {

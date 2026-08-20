@@ -28,6 +28,7 @@ pub enum ClientMessage {
     Inventory { items: Vec<ItemData> },
     Game { channel: String, data: serde_json::Value },
     Auth { token: String, scopes: Vec<String> },
+    Commands { commands: Vec<String> },
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1518,6 +1519,7 @@ impl Engine {
         let look_output = self.look_with_visibility(&player_ref);
         self.send(session_id, &look_output);
         self.send_room_data(session_id, &player_ref);
+        self.send_commands(session_id, &player_ref);
 
         self.broadcast_to_all(
             &format!("{} has connected.\r\n", username),
@@ -1701,6 +1703,7 @@ impl Engine {
         let room_after = self.world.get(&actor_ref).and_then(|a| a.location_ref.clone());
         if matches!(cmd.as_str(), "look" | "l") || room_before != room_after {
             self.send_room_data(session_id, &actor_ref);
+            self.send_commands(session_id, &actor_ref);
         }
     }
 
@@ -2992,6 +2995,68 @@ impl Engine {
         }
     }
 
+    fn send_commands(&self, session_id: &str, actor_ref: &str) {
+        let is_builder = self.session_has_scope(session_id, Scope::Builder);
+        let is_admin = self.session_has_scope(session_id, Scope::Admin);
+
+        let mut cmds: Vec<String> = vec![
+            "look", "say", "go", "quit", "inventory", "get", "put", "drop",
+            "use", "examine", "who", "whisper", "emote", "help",
+            "@password", "@email", "@token", "@display",
+            "@charlist", "@charcreate", "@charswitch", "@chardelete",
+        ].into_iter().map(String::from).collect();
+
+        if is_builder {
+            cmds.extend([
+                "@dig", "@open", "@describe", "@create", "@destroy", "@set",
+                "@teleport", "@name", "@program", "@programs", "@rmprogram",
+                "@tag", "@untag", "@script", "@scripts", "@rmscript",
+                "@script-interval", "@lock", "@unlock", "@locks",
+                "@dialogue", "@test", "@reload", "@puppet", "@unpuppet", "@chown",
+            ].iter().map(|s| String::from(*s)));
+        }
+
+        if is_admin {
+            cmds.extend([
+                "@grant", "@revoke", "@scopes", "@wall", "@boot",
+                "@save", "@shutdown", "@reload-world", "@maxchars",
+            ].iter().map(|s| String::from(*s)));
+        }
+
+        let room_ref = self.world.get(actor_ref).and_then(|a| a.location_ref.clone());
+        if let Some(room_ref) = &room_ref {
+            for exit in self.world.exits_from(room_ref) {
+                cmds.push(exit.key.clone());
+                for alias in &exit.aliases {
+                    cmds.push(alias.clone());
+                }
+            }
+
+            let global_tag = Tag { category: "system".into(), key: "global".into() };
+            let room_itself = self.world.get(room_ref).into_iter();
+            let room_objs = self.world.objects_in(room_ref).into_iter()
+                .filter(|o| o.ref_id != actor_ref);
+            let inv_objs = self.world.objects_in(actor_ref).into_iter();
+            let global_objs = self.world.objects.values()
+                .filter(|o| o.tags.contains(&global_tag));
+
+            for obj in room_itself.chain(room_objs).chain(inv_objs).chain(global_objs) {
+                for (hook, prog) in &obj.programs {
+                    if hook.starts_with("cmd_") && prog.enabled {
+                        cmds.push(hook[4..].to_string());
+                    }
+                }
+            }
+        }
+
+        cmds.sort();
+        cmds.dedup();
+
+        if let Some(session) = self.sessions.get(session_id) {
+            let _ = session.tx.send(ClientMessage::Commands { commands: cmds });
+        }
+    }
+
     fn cmd_whisper(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
         // whisper <player> <message>
         let (target_name, message) = match args.split_once(' ') {
@@ -3284,6 +3349,19 @@ impl Engine {
                     }
                 }
                 msg.push_str("Script cache cleared.\r\n");
+
+                let playing: Vec<(String, String)> = self.sessions.iter()
+                    .filter_map(|(sid, s)| match &s.state {
+                        SessionState::Playing { actor_ref, .. } => {
+                            Some((sid.clone(), actor_ref.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                for (sid, actor) in playing {
+                    self.send_commands(&sid, &actor);
+                }
+
                 msg
             }
             Err(e) => format!("Reload error: {}\r\n", e),

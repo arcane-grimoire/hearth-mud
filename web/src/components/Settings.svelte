@@ -1,8 +1,8 @@
 <script>
-  import { DetailDrawer, ThemeToggle, Button, TextInput, showFlash } from '@kenn-io/kit-ui';
+  import { DetailDrawer, ThemeToggle, Toggle, Button, TextInput, showFlash } from '@kenn-io/kit-ui';
   import { api } from '../lib/api.js';
 
-  let { open = false, onclose = () => {}, scopes = [], oncommand = () => {} } = $props();
+  let { open = false, onclose = () => {}, scopes = [], oncommand = () => {}, autocomplete = false, onautocomplete = () => {} } = $props();
 
   let tokenLabel = $state('');
   let fontSize = $state(localStorage.getItem('hearth-font-size') || '14');
@@ -34,6 +34,10 @@
         <div class="setting-row">
           <span class="setting-name">Theme</span>
           <ThemeToggle variant="segmented" size="sm" />
+        </div>
+        <div class="setting-row">
+          <span class="setting-name">Autocomplete</span>
+          <Toggle checked={autocomplete} onchange={onautocomplete} />
         </div>
         <div class="setting-row">
           <span class="setting-name">Font size</span>
