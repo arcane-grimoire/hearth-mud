@@ -11,6 +11,7 @@ pub enum Scope {
     Player,
     Builder,
     Admin,
+    Puppeteer,
 }
 
 impl Scope {
@@ -19,6 +20,7 @@ impl Scope {
             Scope::Player => "player",
             Scope::Builder => "builder",
             Scope::Admin => "admin",
+            Scope::Puppeteer => "puppeteer",
         }
     }
 
@@ -27,6 +29,7 @@ impl Scope {
             "player" => Some(Scope::Player),
             "builder" => Some(Scope::Builder),
             "admin" => Some(Scope::Admin),
+            "puppeteer" => Some(Scope::Puppeteer),
             _ => None,
         }
     }
@@ -43,7 +46,9 @@ pub struct Account {
     pub id: String,
     pub username: String,
     pub password_hash: String,
-    pub character_ref: Option<String>,
+    pub characters: Vec<String>,
+    pub active_character: Option<String>,
+    pub max_characters: Option<u8>,
     pub email: Option<String>,
     pub scopes: HashSet<Scope>,
 }
@@ -117,8 +122,9 @@ impl AccountStore {
             id: id.clone(),
             username: username.to_string(),
             password_hash: hash,
-            // Assigned a real dbref on first login — see Engine::enter_world.
-            character_ref: None,
+            characters: Vec::new(),
+            active_character: None,
+            max_characters: None,
             email: None,
             scopes,
         };
@@ -254,7 +260,8 @@ mod tests {
         let mut store = AccountStore::new();
         let account = store.create("TestUser", "password123").unwrap();
         assert_eq!(account.username, "TestUser");
-        assert_eq!(account.character_ref, None);
+        assert!(account.characters.is_empty());
+        assert_eq!(account.active_character, None);
     }
 
     #[test]

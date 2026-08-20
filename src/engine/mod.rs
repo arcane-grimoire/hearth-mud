@@ -124,7 +124,9 @@ enum SessionState {
     CreateUsername,
     CreatePassword { username: String },
     ConfirmPassword { username: String, password: String },
-    Playing { actor_ref: String, account_id: String },
+    SelectCharacter { account_id: String },
+    CreateCharacterName { account_id: String },
+    Playing { actor_ref: String, account_id: String, puppet_ref: Option<String> },
 }
 
 struct Session {
@@ -178,6 +180,7 @@ pub struct Engine {
     api_tokens: HashMap<String, TokenInfo>,
     /// Content hashes from the last load/reload, used to skip unchanged files.
     file_hashes: HashMap<std::path::PathBuf, u64>,
+    max_characters: u8,
 }
 
 use crate::softcode::ScheduledHook;
@@ -278,6 +281,7 @@ impl Engine {
             scheduled_hooks,
             api_tokens,
             file_hashes,
+            max_characters: config.max_characters,
         }
     }
 
@@ -1033,6 +1037,8 @@ impl Engine {
                 SessionState::CreatePassword { .. } => "create_password",
                 SessionState::ConfirmPassword { .. } => "confirm_password",
                 SessionState::Playing { .. } => "playing",
+                SessionState::SelectCharacter { .. } => "select_character",
+                SessionState::CreateCharacterName { .. } => "create_character_name",
             },
             None => return,
         };
@@ -1043,6 +1049,8 @@ impl Engine {
             "create_username" => self.handle_create_username(session_id, input),
             "create_password" => self.handle_create_password(session_id, input),
             "confirm_password" => self.handle_confirm_password(session_id, input),
+            "select_character" => self.handle_select_character(session_id, input),
+            "create_character_name" => self.handle_create_character_name(session_id, input),
             "playing" => self.handle_game_input(session_id, input),
             _ => {}
         }
@@ -1075,7 +1083,8 @@ impl Engine {
         };
 
         let username = account.username.clone();
-        let character_ref = account.character_ref.clone().unwrap_or_default();
+        let characters = account.characters.clone();
+        let active_character = account.active_character.clone().unwrap_or_default();
 
         // If already logged in from another session (e.g. stale tab), kick the old one
         let stale: Vec<String> = self
@@ -1092,7 +1101,17 @@ impl Engine {
             self.sessions.remove(&old_sid);
         }
 
-        self.enter_world(session_id, &username, &character_ref, &account_id);
+        match characters.len() {
+            0 => self.enter_world(session_id, &username, "", &account_id),
+            1 => self.enter_world(session_id, &username, &characters[0], &account_id),
+            _ => {
+                if !active_character.is_empty() && characters.contains(&active_character) {
+                    self.enter_world(session_id, &username, &active_character, &account_id);
+                } else {
+                    self.show_character_select(session_id, &account_id);
+                }
+            }
+        }
     }
 
     fn handle_login_username(&mut self, session_id: &str, input: &str) {
@@ -1136,7 +1155,8 @@ impl Engine {
         match self.accounts.authenticate(&username, input) {
             Ok(account) => {
                 let account_id = account.id.clone();
-                let character_ref = account.character_ref.clone().unwrap_or_default();
+                let characters = account.characters.clone();
+                let active_character = account.active_character.clone().unwrap_or_default();
 
                 // Kick any existing sessions for this account
                 let stale: Vec<String> = self
@@ -1153,7 +1173,17 @@ impl Engine {
                     self.sessions.remove(&old_sid);
                 }
 
-                self.enter_world(session_id, &username, &character_ref, &account_id);
+                match characters.len() {
+                    0 => self.enter_world(session_id, &username, "", &account_id),
+                    1 => self.enter_world(session_id, &username, &characters[0], &account_id),
+                    _ => {
+                        if !active_character.is_empty() && characters.contains(&active_character) {
+                            self.enter_world(session_id, &username, &active_character, &account_id);
+                        } else {
+                            self.show_character_select(session_id, &account_id);
+                        }
+                    }
+                }
             }
             Err(msg) => {
                 self.send(session_id, &format!("{}\r\nUsername: ", msg));
@@ -1246,9 +1276,8 @@ impl Engine {
         match self.accounts.create(&username, &password) {
             Ok(account) => {
                 let account_id = account.id.clone();
-                let character_ref = account.character_ref.clone().unwrap_or_default();
                 self.send(session_id, &format!("\r\nAccount created! Welcome, {}.\r\n", username));
-                self.enter_world(session_id, &username, &character_ref, &account_id);
+                self.enter_world(session_id, &username, "", &account_id);
             }
             Err(msg) => {
                 self.send(session_id, &format!("{}\r\nChoose a username: ", msg));
@@ -1257,6 +1286,126 @@ impl Engine {
                 }
             }
         }
+    }
+
+    fn show_character_select(&mut self, session_id: &str, account_id: &str) {
+        let characters = self
+            .accounts
+            .get(account_id)
+            .map(|a| a.characters.clone())
+            .unwrap_or_default();
+
+        let mut msg = "\r\nSelect a character:\r\n".to_string();
+        for (i, ref_id) in characters.iter().enumerate() {
+            let name = self
+                .world
+                .get(ref_id)
+                .map(|o| o.display_name().to_string())
+                .unwrap_or_else(|| ref_id.clone());
+            let location = self
+                .world
+                .get(ref_id)
+                .and_then(|o| o.location_ref.as_ref())
+                .and_then(|loc| self.world.get(loc))
+                .map(|r| r.display_name().to_string())
+                .unwrap_or_else(|| "unknown".into());
+            msg.push_str(&format!("  {}) {} ({})\r\n", i + 1, name, location));
+        }
+        msg.push_str("  create) Create a new character\r\n");
+        msg.push_str("\r\nChoice: ");
+        self.send(session_id, &msg);
+
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            session.state = SessionState::SelectCharacter {
+                account_id: account_id.to_string(),
+            };
+        }
+    }
+
+    fn handle_select_character(&mut self, session_id: &str, input: &str) {
+        let account_id = match self.sessions.get(session_id) {
+            Some(Session {
+                state: SessionState::SelectCharacter { account_id },
+                ..
+            }) => account_id.clone(),
+            _ => return,
+        };
+
+        let input = input.trim().to_lowercase();
+
+        if input == "create" {
+            self.send(session_id, "Character name: ");
+            if let Some(session) = self.sessions.get_mut(session_id) {
+                session.state = SessionState::CreateCharacterName { account_id };
+            }
+            return;
+        }
+
+        let index: usize = match input.parse::<usize>() {
+            Ok(n) if n >= 1 => n - 1,
+            _ => {
+                self.send(session_id, "Invalid choice. Enter a number or 'create': ");
+                return;
+            }
+        };
+
+        let (username, character_ref) = match self.accounts.get(&account_id) {
+            Some(account) => {
+                if index >= account.characters.len() {
+                    self.send(session_id, "Invalid choice. Enter a number or 'create': ");
+                    return;
+                }
+                (account.username.clone(), account.characters[index].clone())
+            }
+            None => return,
+        };
+
+        self.enter_world(session_id, &username, &character_ref, &account_id);
+    }
+
+    fn handle_create_character_name(&mut self, session_id: &str, input: &str) {
+        let account_id = match self.sessions.get(session_id) {
+            Some(Session {
+                state: SessionState::CreateCharacterName { account_id },
+                ..
+            }) => account_id.clone(),
+            _ => return,
+        };
+
+        let name = input.trim();
+        if name.len() < 3 {
+            self.send(session_id, "Name must be at least 3 characters. Try again: ");
+            return;
+        }
+        if name.len() > 20 {
+            self.send(session_id, "Name must be 20 characters or fewer. Try again: ");
+            return;
+        }
+        if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ' ') {
+            self.send(session_id, "Name may only contain letters, numbers, underscores, and spaces. Try again: ");
+            return;
+        }
+
+        let max = self
+            .accounts
+            .get(&account_id)
+            .and_then(|a| a.max_characters)
+            .unwrap_or(self.max_characters);
+        let current = self
+            .accounts
+            .get(&account_id)
+            .map(|a| a.characters.len())
+            .unwrap_or(0);
+        if current as u8 >= max {
+            self.send(
+                session_id,
+                &format!("You already have the maximum of {} characters.\r\n", max),
+            );
+            self.show_character_select(session_id, &account_id);
+            return;
+        }
+
+        self.enter_world(session_id, name, "", &account_id);
     }
 
     fn enter_world(
@@ -1304,16 +1453,24 @@ impl Engine {
             self.world.add_object(player);
             self.fire_on_create(&ref_id);
             if let Some(account) = self.accounts.get_mut(account_id) {
-                account.character_ref = Some(ref_id.clone());
+                if !account.characters.contains(&ref_id) {
+                    account.characters.push(ref_id.clone());
+                }
+                account.active_character = Some(ref_id.clone());
             }
             self.db.save_accounts(&self.accounts).ok();
             ref_id
         };
 
+        if let Some(account) = self.accounts.get_mut(account_id) {
+            account.active_character = Some(player_ref.clone());
+        }
+
         if let Some(session) = self.sessions.get_mut(session_id) {
             session.state = SessionState::Playing {
                 actor_ref: player_ref.clone(),
                 account_id: account_id.to_string(),
+                puppet_ref: None,
             };
         }
 
@@ -1398,13 +1555,14 @@ impl Engine {
             return;
         }
 
-        let actor_ref = match self.sessions.get(session_id) {
+        let (actor_ref, puppet_ref) = match self.sessions.get(session_id) {
             Some(Session {
-                state: SessionState::Playing { actor_ref, .. },
+                state: SessionState::Playing { actor_ref, puppet_ref, .. },
                 ..
-            }) => actor_ref.clone(),
+            }) => (actor_ref.clone(), puppet_ref.clone()),
             _ => return,
         };
+        let effective_ref = puppet_ref.as_deref().unwrap_or(&actor_ref).to_string();
 
         // Check for pending prompt — intercept input before command dispatch
         if let Some(actor) = self.world.get(&actor_ref) {
@@ -1504,6 +1662,13 @@ impl Engine {
             "@unlock" => self.cmd_unlock(session_id, &actor_ref, &args),
             "@locks" => self.cmd_locks(session_id, &actor_ref, &args),
 
+            "@charlist" => self.cmd_charlist(session_id),
+            "@charcreate" => self.cmd_charcreate(session_id, &args),
+            "@charswitch" => self.cmd_charswitch(session_id, &args),
+            "@chardelete" => self.cmd_chardelete(session_id, &args),
+            "@puppet" => self.cmd_puppet(session_id, &actor_ref, &args),
+            "@unpuppet" => self.cmd_unpuppet(session_id),
+
             "@chown" => self.cmd_chown(session_id, &args),
             "@dialogue" | "@dialog" => self.cmd_dialogue(session_id, &actor_ref, &args),
 
@@ -1516,6 +1681,7 @@ impl Engine {
             "@save" => self.cmd_save(session_id),
             "@shutdown" => self.cmd_shutdown(session_id),
             "@reload-world" => self.cmd_reload_world(session_id),
+            "@maxchars" => self.cmd_maxchars(session_id, &args),
             "@test" => self.cmd_test(session_id, &args),
             "@reload" => self.cmd_reload(session_id, &actor_ref, &args),
 
@@ -4029,6 +4195,281 @@ impl Engine {
             .get(target_ref)
             .and_then(|o| o.owner_ref.as_ref())
             .is_some_and(|owner| owner == actor_ref)
+    }
+
+    fn cmd_charlist(&mut self, session_id: &str) -> String {
+        let account_id = match self.session_account_id(session_id) {
+            Some(id) => id,
+            None => return "Not logged in.\r\n".to_string(),
+        };
+        let characters = match self.accounts.get(&account_id) {
+            Some(a) => a.characters.clone(),
+            None => return "Account not found.\r\n".to_string(),
+        };
+        if characters.is_empty() {
+            return "You have no characters.\r\n".to_string();
+        }
+        let active = self
+            .accounts
+            .get(&account_id)
+            .and_then(|a| a.active_character.clone())
+            .unwrap_or_default();
+        let mut out = "Your characters:\r\n".to_string();
+        for ref_id in &characters {
+            let name = self
+                .world
+                .get(ref_id)
+                .map(|o| o.display_name().to_string())
+                .unwrap_or_else(|| ref_id.clone());
+            let location = self
+                .world
+                .get(ref_id)
+                .and_then(|o| o.location_ref.as_ref())
+                .and_then(|loc| self.world.get(loc))
+                .map(|r| r.display_name().to_string())
+                .unwrap_or_else(|| "unknown".into());
+            let marker = if *ref_id == active { " [active]" } else { "" };
+            out.push_str(&format!("  {} ({}){}\r\n", name, location, marker));
+        }
+        out
+    }
+
+    fn cmd_charcreate(&mut self, session_id: &str, args: &str) -> String {
+        let account_id = match self.session_account_id(session_id) {
+            Some(id) => id,
+            None => return "Not logged in.\r\n".to_string(),
+        };
+        let name = args.trim();
+        if name.is_empty() {
+            return "Usage: @charcreate <name>\r\n".to_string();
+        }
+        if name.len() < 3 {
+            return "Name must be at least 3 characters.\r\n".to_string();
+        }
+        if name.len() > 20 {
+            return "Name must be 20 characters or fewer.\r\n".to_string();
+        }
+
+        let max = self
+            .accounts
+            .get(&account_id)
+            .and_then(|a| a.max_characters)
+            .unwrap_or(self.max_characters);
+        let current = self
+            .accounts
+            .get(&account_id)
+            .map(|a| a.characters.len())
+            .unwrap_or(0);
+        if current as u8 >= max {
+            return format!("You already have the maximum of {} characters.\r\n", max);
+        }
+
+        let spawn_room_ref = self.spawn_room_ref.clone();
+        let ref_id = self.world.next_dbref();
+        let player = GameObject::new(&ref_id, name, Kind::Player)
+            .with_title(name)
+            .with_description("A traveler.")
+            .with_location(&spawn_room_ref);
+        self.world.add_object(player);
+        self.fire_on_create(&ref_id);
+
+        if let Some(account) = self.accounts.get_mut(&account_id) {
+            account.characters.push(ref_id.clone());
+        }
+        self.db.save_accounts(&self.accounts).ok();
+
+        format!("Character '{}' created. Use @charswitch {} to play as them.\r\n", name, name)
+    }
+
+    fn cmd_charswitch(&mut self, session_id: &str, args: &str) -> String {
+        let account_id = match self.session_account_id(session_id) {
+            Some(id) => id,
+            None => return "Not logged in.\r\n".to_string(),
+        };
+        let name = args.trim().to_lowercase();
+        if name.is_empty() {
+            return "Usage: @charswitch <name>\r\n".to_string();
+        }
+
+        let (current_ref, target_ref) = {
+            let account = match self.accounts.get(&account_id) {
+                Some(a) => a,
+                None => return "Account not found.\r\n".to_string(),
+            };
+            let current = account.active_character.clone().unwrap_or_default();
+            let target = account
+                .characters
+                .iter()
+                .find(|r| {
+                    self.world
+                        .get(r.as_str())
+                        .map(|o| o.display_name().to_lowercase().contains(&name) || o.key.to_lowercase().contains(&name))
+                        .unwrap_or(false)
+                })
+                .cloned();
+            (current, target)
+        };
+
+        let target_ref = match target_ref {
+            Some(r) => r,
+            None => return format!("No character matching '{}'.\r\n", args.trim()),
+        };
+
+        if target_ref == current_ref {
+            return "You're already playing that character.\r\n".to_string();
+        }
+
+        // Disconnect current character
+        let room = self.world.get(&current_ref).and_then(|o| o.location_ref.clone());
+        let _ = self.fire_hook(&current_ref, "on_disconnect", &current_ref, room.as_deref(), None);
+        if let Some(room_ref) = &room {
+            let _ = self.fire_hook(room_ref, "on_disconnect", &current_ref, Some(room_ref), None);
+        }
+        self.fire_global_hooks("on_disconnect", &current_ref, room.as_deref(), None);
+        if let Some(obj) = self.world.get_mut(&current_ref) {
+            obj.tags.insert(crate::world::Tag {
+                category: "system".to_string(),
+                key: "offline".to_string(),
+            });
+        }
+
+        let username = self
+            .accounts
+            .get(&account_id)
+            .map(|a| a.username.clone())
+            .unwrap_or_default();
+        self.enter_world(session_id, &username, &target_ref, &account_id);
+        String::new()
+    }
+
+    fn cmd_chardelete(&mut self, session_id: &str, args: &str) -> String {
+        let account_id = match self.session_account_id(session_id) {
+            Some(id) => id,
+            None => return "Not logged in.\r\n".to_string(),
+        };
+        let name = args.trim().to_lowercase();
+        if name.is_empty() {
+            return "Usage: @chardelete <name>\r\n".to_string();
+        }
+
+        let (active, target_ref) = {
+            let account = match self.accounts.get(&account_id) {
+                Some(a) => a,
+                None => return "Account not found.\r\n".to_string(),
+            };
+            let active = account.active_character.clone().unwrap_or_default();
+            let target = account
+                .characters
+                .iter()
+                .find(|r| {
+                    self.world
+                        .get(r.as_str())
+                        .map(|o| o.display_name().to_lowercase() == name || o.key.to_lowercase() == name)
+                        .unwrap_or(false)
+                })
+                .cloned();
+            (active, target)
+        };
+
+        let target_ref = match target_ref {
+            Some(r) => r,
+            None => return format!("No character matching '{}'.\r\n", args.trim()),
+        };
+
+        if target_ref == active {
+            return "You can't delete your currently active character. Switch first.\r\n".to_string();
+        }
+
+        let char_name = self
+            .world
+            .get(&target_ref)
+            .map(|o| o.display_name().to_string())
+            .unwrap_or_default();
+
+        if let Some(account) = self.accounts.get_mut(&account_id) {
+            account.characters.retain(|r| r != &target_ref);
+        }
+        self.world.objects.remove(&target_ref);
+        self.db.save_accounts(&self.accounts).ok();
+
+        format!("Character '{}' deleted.\r\n", char_name)
+    }
+
+    fn cmd_puppet(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
+        let target_ref = args.trim();
+        if target_ref.is_empty() {
+            return "Usage: @puppet <ref>\r\n".to_string();
+        }
+
+        let target = match self.world.get(target_ref) {
+            Some(o) => o,
+            None => return format!("No object with ref '{}'.\r\n", target_ref),
+        };
+
+        if target.kind == Kind::Player {
+            return "You can't puppet a player.\r\n".to_string();
+        }
+
+        let is_admin = self.session_has_scope(session_id, Scope::Admin);
+        let can_puppet_own = self.session_has_scope(session_id, Scope::Builder)
+            || self.session_has_scope(session_id, Scope::Puppeteer);
+        let is_owner = target.owner_ref.as_deref() == Some(actor_ref);
+
+        if !is_admin && !(can_puppet_own && is_owner) {
+            return "Permission denied. You need builder/puppeteer scope and ownership, or admin.\r\n".to_string();
+        }
+
+        let target_name = target.display_name().to_string();
+
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            if let SessionState::Playing { puppet_ref, .. } = &mut session.state {
+                *puppet_ref = Some(target_ref.to_string());
+            }
+        }
+
+        format!("You are now puppeting {}. Use @unpuppet to return.\r\n", target_name)
+    }
+
+    fn cmd_unpuppet(&mut self, session_id: &str) -> String {
+        let was_puppeting = if let Some(session) = self.sessions.get_mut(session_id) {
+            if let SessionState::Playing { puppet_ref, .. } = &mut session.state {
+                let was = puppet_ref.take();
+                was.is_some()
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if was_puppeting {
+            "You return to your own body.\r\n".to_string()
+        } else {
+            "You aren't puppeting anything.\r\n".to_string()
+        }
+    }
+
+    fn cmd_maxchars(&mut self, session_id: &str, args: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Admin) {
+            return "Permission denied (admin only).\r\n".to_string();
+        }
+        let (username, count_str) = match args.split_once(' ') {
+            Some((u, c)) => (u.trim(), c.trim()),
+            None => return "Usage: @maxchars <username> <count>\r\n".to_string(),
+        };
+        let count: u8 = match count_str.parse() {
+            Ok(n) if n >= 1 => n,
+            _ => return "Count must be a positive number.\r\n".to_string(),
+        };
+        let account_id = match self.accounts.get_id_by_username(username) {
+            Some(id) => id,
+            None => return format!("No account '{}'.\r\n", username),
+        };
+        if let Some(account) = self.accounts.get_mut(&account_id) {
+            account.max_characters = Some(count);
+        }
+        self.db.save_accounts(&self.accounts).ok();
+        format!("Max characters for '{}' set to {}.\r\n", username, count)
     }
 
     fn cmd_chown(&mut self, session_id: &str, args: &str) -> String {

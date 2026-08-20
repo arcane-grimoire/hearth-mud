@@ -74,6 +74,9 @@ impl Database {
         let _ = self.conn.execute("ALTER TABLE objects ADD COLUMN target_ref TEXT", []);
         let _ = self.conn.execute("ALTER TABLE objects ADD COLUMN aliases_json TEXT NOT NULL DEFAULT '[]'", []);
         let _ = self.conn.execute("ALTER TABLE accounts ADD COLUMN email TEXT", []);
+        let _ = self.conn.execute("ALTER TABLE accounts ADD COLUMN characters_json TEXT NOT NULL DEFAULT '[]'", []);
+        let _ = self.conn.execute("ALTER TABLE accounts ADD COLUMN active_character TEXT", []);
+        let _ = self.conn.execute("ALTER TABLE accounts ADD COLUMN max_characters INTEGER", []);
         let _ = self.conn.execute("ALTER TABLE objects ADD COLUMN owner_ref TEXT", []);
 
         self.conn.execute_batch(
@@ -103,18 +106,22 @@ impl Database {
         tx.execute("DELETE FROM accounts", [])?;
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO accounts (id, username, password_hash, character_ref, email, scopes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO accounts (id, username, password_hash, character_ref, email, scopes, characters_json, active_character, max_characters) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
             for account in accounts.all() {
                 let scopes: Vec<&str> = account.scopes.iter().map(|s| s.label()).collect();
                 let scopes_str = scopes.join(",");
+                let characters_json = serde_json::to_string(&account.characters).unwrap_or_else(|_| "[]".into());
                 stmt.execute(params![
                     account.id,
                     account.username,
                     account.password_hash,
-                    account.character_ref,
+                    account.active_character,
                     account.email,
                     scopes_str,
+                    characters_json,
+                    account.active_character,
+                    account.max_characters,
                 ])?;
             }
         }
@@ -124,7 +131,7 @@ impl Database {
     pub fn load_accounts(&self) -> rusqlite::Result<AccountStore> {
         let mut store = AccountStore::new();
         let mut stmt = self.conn.prepare(
-            "SELECT id, username, password_hash, character_ref, email, scopes FROM accounts",
+            "SELECT id, username, password_hash, character_ref, email, scopes, characters_json, active_character, max_characters FROM accounts",
         )?;
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
@@ -133,20 +140,46 @@ impl Database {
             let character_ref: Option<String> = row.get(3)?;
             let email: Option<String> = row.get(4)?;
             let scopes_str: String = row.get(5)?;
-            Ok((id, username, password_hash, character_ref, email, scopes_str))
+            let characters_json: Option<String> = row.get(6).unwrap_or(None);
+            let active_character: Option<String> = row.get(7).unwrap_or(None);
+            let max_characters: Option<u8> = row.get(8).unwrap_or(None);
+            Ok((id, username, password_hash, character_ref, email, scopes_str, characters_json, active_character, max_characters))
         })?;
 
         for row in rows {
-            let (id, username, password_hash, character_ref, email, scopes_str) = row?;
+            let (id, username, password_hash, character_ref, email, scopes_str, characters_json, active_character, max_characters) = row?;
             let scopes: HashSet<Scope> = scopes_str
                 .split(',')
                 .filter_map(|s| Scope::parse(s.trim()))
                 .collect();
+
+            let characters: Vec<String> = characters_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str(j).ok())
+                .unwrap_or_default();
+
+            // Migration: if characters is empty but character_ref exists, migrate
+            let (characters, active_character) = if characters.is_empty() {
+                if let Some(ref cr) = character_ref {
+                    if !cr.is_empty() {
+                        (vec![cr.clone()], Some(cr.clone()))
+                    } else {
+                        (Vec::new(), None)
+                    }
+                } else {
+                    (Vec::new(), active_character)
+                }
+            } else {
+                (characters, active_character)
+            };
+
             let account = Account {
                 id,
                 username,
                 password_hash,
-                character_ref,
+                characters,
+                active_character,
+                max_characters,
                 email,
                 scopes,
             };

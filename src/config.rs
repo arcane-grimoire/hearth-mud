@@ -13,6 +13,7 @@ pub struct Config {
     pub spawn_room: String,
     pub game_dir: Option<String>,
     pub game_web_dir: Option<String>,
+    pub max_characters: u8,
 }
 
 impl Default for Config {
@@ -26,6 +27,7 @@ impl Default for Config {
             spawn_room: "starter/town_square".into(),
             game_dir: None,
             game_web_dir: None,
+            max_characters: 3,
         }
     }
 }
