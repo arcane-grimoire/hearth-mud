@@ -103,8 +103,9 @@ src/
     web_client.html    Fallback HTML client (used when web/dist/ not built)
   softcode/
     mod.rs             Intent enum, IntentBatch, Budget, SoftcodeRuntime, bytecode cache
-    api.rs             Luau-facing functions (read, write, predicates, utility, noise, rng, math, scheduling, emit_data)
+    api.rs             Luau-facing functions (read, write, predicates, utility, noise, rng, math, scheduling, emit_data, ink)
     hooks.rs           32 known hooks, ProgramRecord with persistent state
+    ink.rs             Ink narrative runtime (bladeink), compile cache, conversation state
   world/
     mod.rs             World struct (objects HashMap, scripts, queries)
     object.rs          GameObject, Kind enum (Room/Item/Npc/Player/Exit)
@@ -139,7 +140,7 @@ docs/
 
 - **Everything is an object** — rooms, items, NPCs, players, exits all share `GameObject`
 - **32 hooks** — can_get, on_get, can_drop, on_drop, can_put, on_put, can_use, on_use, can_traverse, can_enter, on_enter, on_leave, can_look, on_look, can_say, on_say, can_see, on_move, on_destroy, on_connect, on_disconnect, on_whisper, on_emote, on_receive, on_damage, on_death, on_tick, on_startup, on_shutdown, on_reload, on_save, on_create
-- **64 Luau API functions** — read (18), predicates (9), write (19 incl. emit_data), utility (3), noise (5), seeded RNG (4), coordinate math (6), grid (1)
+- **77 Luau API functions** — read (20), predicates (9), write (20 incl. emit_data), spatial (4), utility (5), noise (5), seeded RNG (4), coordinate math (6), grid (1), ink (7)
 - **Luau modules** — `require()` loads shared .luau files from `<game_dir>/lib/`
 - **Grid2D userdata** — Rust-backed spatial grid: get/set, A* pathfinding, LOS, FOV, Dijkstra, flood fill
 - **Ownership** — `owner_ref` on every object, auto-set on creation, `@chown` admin command, builder permission enforcement
@@ -161,6 +162,7 @@ docs/
 - **REST API** — POST /api with 17 actions (list, create, examine, set, delete, etc.)
 - **Web client** — Svelte 5 + Vite, multi-panel layout: scrolling output, structured sidebar, command input with history
 - **Game web override** — `game_web_dir` config lets games provide their own web client, framework falls back to default
+- **Ink dialog** — bladeink-powered narrative scripting, compile-on-demand with source hash caching, 7 Luau API functions (`ink_start`, `ink_continue`, `ink_choose`, `ink_get_var`, `ink_set_var`, `ink_end`, `ink_goto`), `@dialogue` builder command with multi-line editor, state persistence via attrs
 - **Player persistence** — players marked offline on disconnect, restored on reconnect
 - **Autosave** — configurable interval (default 5 min)
 - **Accounts** — argon2 password hashing, scoped roles, optional email
@@ -184,8 +186,8 @@ See `docs/adr/` (6 ADRs). See `CONTEXT.md` for domain glossary.
 
 ## Testing
 
-121 tests across: accounts (12), db round-trips (7), engine API (8),
-locks DSL (9), softcode (37), grid (14), loader (6), dungeon (4),
+130 tests across: accounts (12), db round-trips (7), engine API (8),
+locks DSL (9), softcode (37), ink (9), grid (14), loader (6), dungeon (4),
 theme (1), lock validator (7), map templates (9), markup (6),
 game softcode (1 harness).
 
@@ -224,6 +226,7 @@ the-last-stag-mud/
       text.luau               — rich formatting with accessible/visual modes
       str.luau                — string utilities (split, trim, wrap, etc.)
       collections.luau        — Set, Array helpers
+      dialog.luau             — ink dialog wrapper (start, render choices, prompt loop)
       random.luau             — dice, weighted choice, shuffle
       state_machine.luau      — synchronous FSM
       signal.luau             — pub/sub signals (adapted from luau-signal)

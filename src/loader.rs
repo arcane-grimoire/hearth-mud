@@ -545,6 +545,40 @@ pub fn load_modules(game_dir: &Path) -> HashMap<String, String> {
     modules
 }
 
+/// Recursively scan `game_dir` for `.ink` files. Returns a map of
+/// relative path (without extension) to source code.
+pub fn load_ink_files(game_dir: &Path) -> HashMap<String, String> {
+    let mut files = HashMap::new();
+    collect_ink_files(game_dir, game_dir, &mut files);
+    if !files.is_empty() {
+        tracing::info!(count = files.len(), "Loaded ink files");
+    }
+    files
+}
+
+fn collect_ink_files(base: &Path, dir: &Path, out: &mut HashMap<String, String>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_ink_files(base, &path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("ink") {
+            if let Ok(source) = std::fs::read_to_string(&path) {
+                let relative = path
+                    .strip_prefix(base)
+                    .unwrap_or(&path)
+                    .with_extension("")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.insert(relative, source);
+            }
+        }
+    }
+}
+
 fn collect_toml_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,

@@ -8,6 +8,7 @@
 
 pub mod api;
 pub mod hooks;
+pub mod ink;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -612,6 +613,7 @@ pub struct ProgramResult {
 pub struct SoftcodeRuntime {
     lua: Lua,
     chunk_cache: std::cell::RefCell<HashMap<u64, mlua::RegistryKey>>,
+    ink: RefCell<ink::InkRuntime>,
 }
 
 const MODULE_SOURCES_KEY: &str = "_hearth_module_sources";
@@ -634,6 +636,7 @@ impl SoftcodeRuntime {
         Self {
             lua,
             chunk_cache: std::cell::RefCell::new(HashMap::new()),
+            ink: RefCell::new(ink::InkRuntime::new()),
         }
     }
 
@@ -725,6 +728,11 @@ impl SoftcodeRuntime {
             .named_registry_value(MODULE_CACHE_KEY)
             .expect("module cache table");
         clear_table(&cache);
+        self.ink.borrow_mut().invalidate_cache();
+    }
+
+    pub fn ink_runtime(&self) -> &RefCell<ink::InkRuntime> {
+        &self.ink
     }
 
     /// Compile `source` without running it. Used by `@program` to reject
@@ -797,6 +805,7 @@ impl SoftcodeRuntime {
                 map_templates,
                 scheduled_hooks,
                 tick_count,
+                &self.ink,
             )?;
 
             let compiled = self.get_or_compile(&program.source, &program.hook)
@@ -903,6 +912,7 @@ impl SoftcodeRuntime {
                 map_templates,
                 scheduled_hooks,
                 tick_count,
+                &self.ink,
             )?;
 
             let compiled = self.get_or_compile(source, entry)
@@ -1253,6 +1263,7 @@ impl SoftcodeRuntime {
                         &empty_templates,
                         &[],
                         0,
+                        &self.ink,
                     )?;
 
                     let ctx = self.lua.create_table()?;

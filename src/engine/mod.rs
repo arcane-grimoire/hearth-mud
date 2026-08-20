@@ -92,6 +92,9 @@ pub enum ApiRequest {
     ListPrograms { ref_id: String },
     ListExits { room_ref: String },
     SaveWorld,
+    InkCompile { source: String },
+    InkSave { ref_id: String, source: String },
+    InkLoad { ref_id: String },
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -209,6 +212,13 @@ impl Engine {
                 Err(e) => tracing::error!(error = %e, "Failed to load game content"),
             }
             softcode.load_modules(crate::loader::load_modules(game_path));
+            softcode.ink_runtime().borrow_mut().set_ink_dir(game_path.to_path_buf());
+            let ink_files = crate::loader::load_ink_files(game_path);
+            for (_, source) in &ink_files {
+                if let Err(e) = softcode.ink_runtime().borrow_mut().compile(source) {
+                    tracing::warn!(error = %e, "Failed to pre-compile ink file");
+                }
+            }
         }
 
         // Resolve the spawn room to a dbref, creating a fallback room if
@@ -915,6 +925,50 @@ impl Engine {
                 self.do_save();
                 ApiResponse::ok()
             }
+            ApiRequest::InkCompile { source } => {
+                match self.softcode.ink_runtime().borrow_mut().compile(&source) {
+                    Ok(_) => ApiResponse::success(serde_json::json!({ "valid": true })),
+                    Err(e) => ApiResponse::success(serde_json::json!({
+                        "valid": false,
+                        "errors": e,
+                    })),
+                }
+            }
+            ApiRequest::InkSave { ref_id, source } => {
+                match self.world.get_mut(&ref_id) {
+                    Some(obj) => {
+                        let errors = match self.softcode.ink_runtime().borrow_mut().compile(&source) {
+                            Ok(_) => None,
+                            Err(e) => Some(e),
+                        };
+                        obj.attrs.insert("_ink_source".into(), serde_json::json!(source));
+                        if let Some(ref e) = errors {
+                            obj.attrs.insert("_ink_errors".into(), serde_json::json!(e));
+                        } else {
+                            obj.attrs.remove("_ink_errors");
+                        }
+                        ApiResponse::success(serde_json::json!({
+                            "saved": true,
+                            "valid": errors.is_none(),
+                            "errors": errors,
+                        }))
+                    }
+                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
+            ApiRequest::InkLoad { ref_id } => {
+                match self.world.get(&ref_id) {
+                    Some(obj) => {
+                        let source = obj.attrs.get("_ink_source").and_then(|v| v.as_str());
+                        let errors = obj.attrs.get("_ink_errors").and_then(|v| v.as_str());
+                        ApiResponse::success(serde_json::json!({
+                            "source": source,
+                            "errors": errors,
+                        }))
+                    }
+                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
         }
     }
 
@@ -948,6 +1002,8 @@ impl Engine {
                     let _ = self.fire_hook(room_ref, "on_disconnect", actor_ref, Some(room_ref), None);
                 }
                 self.fire_global_hooks("on_disconnect", actor_ref, room.as_deref(), None);
+
+                self.softcode.ink_runtime().borrow_mut().cleanup_player(actor_ref);
 
                 if let Some(obj) = self.world.get_mut(actor_ref) {
                     obj.tags.insert(crate::world::Tag {
@@ -1375,6 +1431,14 @@ impl Engine {
             }
         }
 
+        // Check for multi-line ink editor mode
+        if let Some(actor) = self.world.get(&actor_ref) {
+            if actor.attrs.contains_key("_ink_editing") {
+                self.handle_ink_editor_input(session_id, &actor_ref, input);
+                return;
+            }
+        }
+
         let (cmd, args) = match input.split_once(' ') {
             Some((c, a)) => (c.to_lowercase(), a.trim().to_string()),
             None => (input.to_lowercase(), String::new()),
@@ -1441,6 +1505,7 @@ impl Engine {
             "@locks" => self.cmd_locks(session_id, &actor_ref, &args),
 
             "@chown" => self.cmd_chown(session_id, &args),
+            "@dialogue" | "@dialog" => self.cmd_dialogue(session_id, &actor_ref, &args),
 
             // Admin commands
             "@grant" => self.cmd_grant(session_id, &args),
@@ -3024,6 +3089,12 @@ impl Engine {
         self.softcode.invalidate_cache();
         self.softcode
             .load_modules(crate::loader::load_modules(game_path));
+        let ink_files = crate::loader::load_ink_files(game_path);
+        for (_, source) in &ink_files {
+            if let Err(e) = self.softcode.ink_runtime().borrow_mut().compile(source) {
+                tracing::warn!(error = %e, "Failed to pre-compile ink file on reload");
+            }
+        }
         match crate::loader::load_game_dir(game_path, &mut self.world, &self.file_hashes) {
             Ok(result) => {
                 if let Some(ref_id) = result.key_map.get(&self.spawn_room) {
@@ -3050,6 +3121,213 @@ impl Engine {
                 msg
             }
             Err(e) => format!("Reload error: {}\r\n", e),
+        }
+    }
+
+    fn cmd_dialogue(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Builder) {
+            return "Permission denied.\r\n".to_string();
+        }
+        let args = args.trim();
+        if args.is_empty() {
+            return concat!(
+                "Usage: @dialogue <ref> [subcommand]\r\n",
+                "  @dialogue <ref>           - Show current ink source\r\n",
+                "  @dialogue <ref> edit       - Enter multi-line editor\r\n",
+                "  @dialogue <ref> test       - Compile and report errors\r\n",
+                "  @dialogue <ref> clear      - Remove dialogue source\r\n",
+                "  @dialogue <ref> export     - Show raw .ink source\r\n",
+            )
+            .to_string();
+        }
+
+        let (target_input, subcommand) = match args.split_once(' ') {
+            Some((t, s)) => (t.trim(), s.trim()),
+            None => (args, "show"),
+        };
+
+        let target_ref = if target_input == "here" {
+            match self.world.get(actor_ref).and_then(|a| a.location_ref.clone()) {
+                Some(r) => r,
+                None => return "You're nowhere.\r\n".to_string(),
+            }
+        } else if self.world.get(target_input).is_some() {
+            target_input.to_string()
+        } else {
+            let target_lower = target_input.to_lowercase();
+            let room_ref = self
+                .world
+                .get(actor_ref)
+                .and_then(|a| a.location_ref.clone());
+            let candidates: Vec<&crate::world::GameObject> = room_ref
+                .as_deref()
+                .map(|r| self.world.objects_in(r))
+                .unwrap_or_default()
+                .into_iter()
+                .chain(self.world.objects_in(actor_ref))
+                .collect();
+            match candidates.iter().find(|o| {
+                o.key.to_lowercase().contains(&target_lower)
+                    || o.display_name().to_lowercase().contains(&target_lower)
+            }) {
+                Some(o) => o.ref_id.clone(),
+                None => return format!("Cannot find '{}'.\r\n", target_input),
+            }
+        };
+
+        match subcommand {
+            "show" => {
+                let source = self
+                    .world
+                    .get(&target_ref)
+                    .and_then(|o| o.attrs.get("_ink_source"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                match source {
+                    Some(s) => {
+                        let lines: Vec<&str> = s.lines().collect();
+                        let preview = if lines.len() > 10 {
+                            format!(
+                                "{}\r\n  ... ({} more lines)\r\n",
+                                lines[..10].join("\r\n"),
+                                lines.len() - 10
+                            )
+                        } else {
+                            s.replace('\n', "\r\n")
+                        };
+                        format!("Ink source for {}:\r\n{}\r\n", target_ref, preview)
+                    }
+                    None => format!("{} has no dialogue.\r\n", target_ref),
+                }
+            }
+            "edit" => {
+                if let Some(actor) = self.world.get_mut(actor_ref) {
+                    actor.attrs.insert(
+                        "_ink_editing".into(),
+                        serde_json::json!(target_ref),
+                    );
+                    actor
+                        .attrs
+                        .insert("_ink_buffer".into(), serde_json::json!(""));
+                }
+                "Enter .ink source. Type '.' on a line by itself to finish, '@abort' to cancel:\r\n"
+                    .to_string()
+            }
+            "test" => {
+                let source = self
+                    .world
+                    .get(&target_ref)
+                    .and_then(|o| o.attrs.get("_ink_source"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                match source {
+                    Some(s) => {
+                        match self.softcode.ink_runtime().borrow_mut().compile(&s) {
+                            Ok(_) => format!("{}: compiles OK.\r\n", target_ref),
+                            Err(e) => format!("{}: compile error:\r\n{}\r\n", target_ref, e),
+                        }
+                    }
+                    None => format!("{} has no dialogue to test.\r\n", target_ref),
+                }
+            }
+            "clear" => {
+                if let Some(obj) = self.world.get_mut(&target_ref) {
+                    obj.attrs.remove("_ink_source");
+                    obj.attrs.remove("_ink_errors");
+                    obj.attrs
+                        .retain(|k, _| !k.starts_with("_ink_state_"));
+                }
+                format!("Dialogue cleared from {}.\r\n", target_ref)
+            }
+            "export" => {
+                let source = self
+                    .world
+                    .get(&target_ref)
+                    .and_then(|o| o.attrs.get("_ink_source"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                match source {
+                    Some(s) => format!("{}\r\n", s.replace('\n', "\r\n")),
+                    None => format!("{} has no dialogue.\r\n", target_ref),
+                }
+            }
+            _ => format!("Unknown subcommand '{}'. See @dialogue for usage.\r\n", subcommand),
+        }
+    }
+
+    fn handle_ink_editor_input(&mut self, session_id: &str, actor_ref: &str, input: &str) {
+        let editing_ref = self
+            .world
+            .get(actor_ref)
+            .and_then(|a| a.attrs.get("_ink_editing"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let editing_ref = match editing_ref {
+            Some(r) => r,
+            None => return,
+        };
+
+        if input == "." {
+            let buffer = self
+                .world
+                .get(actor_ref)
+                .and_then(|a| a.attrs.get("_ink_buffer"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if let Some(actor) = self.world.get_mut(actor_ref) {
+                actor.attrs.remove("_ink_editing");
+                actor.attrs.remove("_ink_buffer");
+            }
+            if buffer.is_empty() {
+                self.send(session_id, "Empty source, dialogue not saved.\r\n");
+                return;
+            }
+            match self.softcode.ink_runtime().borrow_mut().compile(&buffer) {
+                Ok(_) => {
+                    if let Some(obj) = self.world.get_mut(&editing_ref) {
+                        obj.attrs
+                            .insert("_ink_source".into(), serde_json::json!(buffer));
+                        obj.attrs.remove("_ink_errors");
+                    }
+                    self.send(session_id, "Dialogue saved and validated.\r\n");
+                }
+                Err(e) => {
+                    if let Some(obj) = self.world.get_mut(&editing_ref) {
+                        obj.attrs
+                            .insert("_ink_source".into(), serde_json::json!(buffer));
+                        obj.attrs
+                            .insert("_ink_errors".into(), serde_json::json!(e));
+                    }
+                    self.send(
+                        session_id,
+                        &format!("Dialogue saved with compile errors:\r\n{}\r\n", e),
+                    );
+                }
+            }
+        } else if input == "@abort" {
+            if let Some(actor) = self.world.get_mut(actor_ref) {
+                actor.attrs.remove("_ink_editing");
+                actor.attrs.remove("_ink_buffer");
+            }
+            self.send(session_id, "Editing cancelled.\r\n");
+        } else {
+            if let Some(actor) = self.world.get_mut(actor_ref) {
+                let current = actor
+                    .attrs
+                    .get("_ink_buffer")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let new_buffer = if current.is_empty() {
+                    input.to_string()
+                } else {
+                    format!("{}\n{}", current, input)
+                };
+                actor
+                    .attrs
+                    .insert("_ink_buffer".into(), serde_json::json!(new_buffer));
+            }
         }
     }
 
