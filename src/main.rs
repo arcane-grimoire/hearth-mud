@@ -20,11 +20,55 @@ mod theme;
 mod world;
 
 use std::path::Path;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 
 use config::Config;
 use db::Database;
+
+/// How long to wait for the engine's final checkpoint before giving up.
+///
+/// Container runtimes allow a grace period after SIGTERM (10s by default for
+/// Docker and Kubernetes) before following up with SIGKILL, so this is a
+/// backstop for a wedged engine rather than a budget to spend.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Resolves when the process is asked to stop — ctrl-c, or SIGTERM on Unix.
+///
+/// SIGTERM is what a container runtime sends on `docker stop` or a pod
+/// eviction. With no handler installed the default disposition terminates the
+/// process immediately, so the engine's shutdown checkpoint never runs and
+/// every deploy discards world state back to the last autosave.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::error!(error = %e, "Failed to install ctrl-c handler");
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -72,7 +116,7 @@ async fn main() {
         }
     });
 
-    let engine_handle = tokio::spawn(engine.run());
+    let mut engine_handle = tokio::spawn(engine.run());
 
     tracing::info!(
         telnet = %config.telnet_addr,
@@ -80,9 +124,36 @@ async fn main() {
         "Hearth MUD running"
     );
 
-    tokio::select! {
-        _ = engine_handle => tracing::info!("Engine stopped"),
-        _ = telnet_handle => tracing::info!("Telnet stopped"),
-        _ = web_handle => tracing::info!("Web server stopped"),
+    // The engine owns the final checkpoint, so a stop signal has to reach it
+    // rather than felling the process — see `shutdown_signal`.
+    let engine_already_stopped = tokio::select! {
+        _ = &mut engine_handle => true,
+        _ = shutdown_signal() => {
+            tracing::info!("Shutdown signal received");
+            false
+        }
+        _ = telnet_handle => {
+            tracing::info!("Telnet stopped");
+            false
+        }
+        _ = web_handle => {
+            tracing::info!("Web server stopped");
+            false
+        }
+    };
+
+    if engine_already_stopped {
+        tracing::info!("Engine stopped");
+        return;
+    }
+
+    let _ = engine_tx.send(engine::EngineMessage::Shutdown);
+    match tokio::time::timeout(SHUTDOWN_TIMEOUT, engine_handle).await {
+        Ok(_) => tracing::info!("World checkpointed, shutdown complete"),
+        Err(_) => tracing::error!(
+            timeout_secs = SHUTDOWN_TIMEOUT.as_secs(),
+            "Engine did not finish its shutdown checkpoint in time; \
+             world state may have been lost back to the last autosave"
+        ),
     }
 }
