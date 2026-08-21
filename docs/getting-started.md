@@ -157,9 +157,11 @@ installs (or upgrades) a TOML+`.luau` bundle into the database — see
 Reference for the full upgrade semantics (it's safe to run repeatedly; a
 second import of an unchanged bundle is a no-op, and a local edit is never
 silently overwritten). `@export <path>` is the reverse direction: it writes
-everything the database owns a file identity for back out to the same
-format, so `git diff` and disaster recovery both work even for content that
-was only ever authored in-game.
+the whole database (every object except player characters) back out to the
+same format — including things like a `@create`d item or a `@dig`ged room
+that were never imported in the first place, which get a stable identity
+stamped on the moment they're first exported — so `git diff` and disaster
+recovery both work even for content that was only ever authored in-game.
 
 `load_world_files = false` turns off the automatic boot-time load, so
 startup reads only the database — `@import` becomes the only way file

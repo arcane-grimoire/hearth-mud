@@ -18,7 +18,7 @@ are built on. The game (The Last Stag) lives in `../the-last-stag-mud/`.
 ```sh
 cargo run                                    # default config (hearth.toml)
 cargo run -- ../the-last-stag-mud/hearth.toml  # game-specific config
-cargo test                                   # 229 tests
+cargo test                                   # 236 tests
 
 # Web client (Svelte)
 cd web && npm install                        # first time
@@ -37,8 +37,8 @@ depends on what you're changing:
 | ------------------ | ---------------------------------------------------- |
 | Rust backend       | `cargo run -- ../the-last-stag-mud/hearth.toml`      |
 | Web client only    | Backend + `cd web && npm run dev` (hot reload on :5173) |
-| Softcode (Luau)    | Backend running, edit .luau files, `@reload-world` in-game |
-| Game content (TOML)| Backend running, edit .toml files, `@reload-world` in-game |
+| Softcode (Luau)    | Backend running, edit .luau files, `hearth program set` (or `@reload-world`) |
+| Game content (TOML)| Backend running, edit .toml files, `hearth import` (or `@reload-world`) |
 
 **Web client dev:** The Vite dev server on port 5173 proxies `/ws` and
 `/api` to the Rust backend on port 8000. Open `http://localhost:5173`.
@@ -109,9 +109,8 @@ src/
     hooks.rs           32 known hooks, ProgramRecord with persistent state
     ink.rs             Ink narrative runtime (bladeink), compile cache, conversation state
   world/
-    mod.rs             World struct (objects HashMap, scripts, queries)
-    object.rs          GameObject, Kind enum (Room/Item/Npc/Player/Exit)
-    script.rs          Script (global tick scripts)
+    mod.rs             World struct (objects HashMap, queries)
+    object.rs          GameObject, Kind enum (Room/Item/Npc/Player/Exit/Code)
     tag.rs             Tag (category:key)
 web/                   Svelte 5 + Vite web client
   package.json         Dependencies: @kenn-io/kit-ui (local), @lucide/svelte, svelte 5, vite 6
@@ -188,8 +187,8 @@ See `docs/adr/` (6 ADRs). See `CONTEXT.md` for domain glossary.
 
 ## Testing
 
-229 tests across: softcode (57), engine (53), db (18), grid (16),
-loader (14), accounts (12), import/export (11), cli (10), ink (9),
+236 tests across: softcode (57), engine (54), db (18), import/export (17),
+grid (16), loader (14), accounts (12), cli (10), ink (9),
 map templates (9), locks (9), markup (6), dungeon (4), world (1).
 
 Softcode tests also discover and run `*.test.luau` files from the game

@@ -758,20 +758,257 @@ fn resolve_ref_to_key(dbref: &str, exporting_area: &str, ref_to_key: &HashMap<&s
     }
 }
 
-/// Emit every `FILE_KEY_ATTR`-carrying object in `world` back to
+/// Area an object lands in when export can't derive a real one for it — a
+/// freshly `@dig`ged room, a `@script`/`@lib` object (never has a
+/// location), or a container chain that bottoms out with no room
+/// underneath. Reported via `written_areas`, never silently dropped — see
+/// `resolve_export_area` and the plan's "Export is not optional."
+const FALLBACK_AREA: &str = "unfiled";
+
+/// Turn arbitrary text into a lowercase, filesystem/TOML-safe slug: ASCII
+/// alphanumerics survive, every other run of characters becomes a single
+/// `-` (leading/trailing dashes trim away). Empty input, or input with no
+/// alphanumeric characters at all, falls back to `"obj"` so a stamped key
+/// is never an empty path segment.
+fn slugify(s: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = true; // suppresses a leading '-'
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    if out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "obj".to_string()
+    } else {
+        out
+    }
+}
+
+/// Pick the first `"{area}/{sub}/{base}"` (`sub` may be empty, giving
+/// `"{area}/{base}"`) not already in `used`, trying `base`, `base-2`,
+/// `base-3`, ... and reserving the winner in `used` before returning its
+/// bare (non-area-qualified) form. Deterministic for a given `used` and
+/// processing order, which is what makes re-exporting an unchanged world
+/// assign the same disambiguated keys every time — see
+/// `stamp_missing_identities`'s fixed kind ordering.
+fn dedupe_key(area: &str, sub: &str, base: &str, used: &mut HashSet<String>) -> String {
+    let mut n = 1u32;
+    loop {
+        let candidate = if n == 1 { base.to_string() } else { format!("{}-{}", base, n) };
+        let full = if sub.is_empty() {
+            format!("{}/{}", area, candidate)
+        } else {
+            format!("{}/{}/{}", area, sub, candidate)
+        };
+        if used.insert(full) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// Walk `location_ref` from `ref_id` up to the nearest ancestor that
+/// already carries a `FILE_KEY_ATTR` (its area is taken directly), or that
+/// is a `Room`/`Code` object with none (which always resolves to
+/// [`FALLBACK_AREA`] — neither kind has anywhere else to inherit an area
+/// from). Passes straight through a carrying player (players are not
+/// terminal — an item a player is holding still belongs to whatever room
+/// the player is standing in) and through any number of nested
+/// containers. A dangling reference or a `location_ref` cycle (guarded by
+/// a depth cap) also resolves to [`FALLBACK_AREA`] rather than failing.
+fn resolve_export_area(world: &World, ref_id: &str) -> String {
+    let mut current = ref_id.to_string();
+    for _ in 0..64 {
+        let Some(obj) = world.get(&current) else {
+            return FALLBACK_AREA.to_string();
+        };
+        if let Some(fk) = obj.attrs.get(loader::FILE_KEY_ATTR).and_then(|v| v.as_str()) {
+            return fk.split('/').next().unwrap_or(FALLBACK_AREA).to_string();
+        }
+        if matches!(obj.kind, Kind::Room | Kind::Code) {
+            return FALLBACK_AREA.to_string();
+        }
+        match &obj.location_ref {
+            Some(loc) => current = loc.clone(),
+            None => return FALLBACK_AREA.to_string(),
+        }
+    }
+    FALLBACK_AREA.to_string()
+}
+
+/// Assign a `FILE_KEY_ATTR` identity to every exportable object that lacks
+/// one — see the module docs, `export_bundle`'s doc comment, and the
+/// plan's "Export is not optional." `Kind::Player` is never touched here;
+/// `export_bundle` excludes it before this even matters.
+///
+/// This is the one place `@export` is not purely read-only: it mutates
+/// `world` directly so the assigned identity is stable rather than
+/// re-derived (and potentially re-disambiguated differently) on every
+/// export. Processing order is fixed — Room, then Item/Npc, then Code,
+/// then Exit last — because an Exit's key embeds its source room's key
+/// text and so needs that room already resolved; nothing else depends on
+/// processing order (see `resolve_export_area`, which reads ancestor
+/// identity rather than an in-progress assignment).
+fn stamp_missing_identities(world: &mut World) {
+    let mut used_keys: HashSet<String> = world
+        .objects
+        .values()
+        .filter_map(|o| o.attrs.get(loader::FILE_KEY_ATTR).and_then(|v| v.as_str()))
+        .map(|s| s.to_string())
+        .collect();
+
+    // Deterministic order: numeric dbref, so re-running export against an
+    // unchanged world always disambiguates collisions the same way.
+    let mut refs: Vec<String> = world
+        .objects
+        .values()
+        .filter(|o| o.kind != Kind::Player && !o.attrs.contains_key(loader::FILE_KEY_ATTR))
+        .map(|o| o.ref_id.clone())
+        .collect();
+    refs.sort_by_key(|r| r.trim_start_matches('#').parse::<u64>().unwrap_or(u64::MAX));
+
+    for ref_id in &refs {
+        if world.get(ref_id).map(|o| o.kind.clone()) != Some(Kind::Room) {
+            continue;
+        }
+        let (title, key_field) = {
+            let obj = world.get(ref_id).unwrap();
+            (obj.title.clone(), obj.key.clone())
+        };
+        let base = slugify(title.as_deref().unwrap_or(&key_field));
+        let key = dedupe_key(FALLBACK_AREA, "", &base, &mut used_keys);
+        let fk = format!("{}/{}", FALLBACK_AREA, key);
+        world.get_mut(ref_id).unwrap().attrs.insert(loader::FILE_KEY_ATTR.into(), serde_json::json!(fk));
+    }
+
+    for ref_id in &refs {
+        let kind = world.get(ref_id).map(|o| o.kind.clone());
+        if !matches!(kind, Some(Kind::Item) | Some(Kind::Npc)) {
+            continue;
+        }
+        let area = resolve_export_area(world, ref_id);
+        let (title, key_field) = {
+            let obj = world.get(ref_id).unwrap();
+            (obj.title.clone(), obj.key.clone())
+        };
+        let base = slugify(title.as_deref().unwrap_or(&key_field));
+        let key = dedupe_key(&area, "", &base, &mut used_keys);
+        let fk = format!("{}/{}", area, key);
+        world.get_mut(ref_id).unwrap().attrs.insert(loader::FILE_KEY_ATTR.into(), serde_json::json!(fk));
+    }
+
+    for ref_id in &refs {
+        if world.get(ref_id).map(|o| o.kind.clone()) != Some(Kind::Code) {
+            continue;
+        }
+        let key_field = world.get(ref_id).unwrap().key.clone();
+        let base = slugify(&key_field);
+        let key = dedupe_key(FALLBACK_AREA, "script", &base, &mut used_keys);
+        let fk = format!("{}/script/{}", FALLBACK_AREA, key);
+        world.get_mut(ref_id).unwrap().attrs.insert(loader::FILE_KEY_ATTR.into(), serde_json::json!(fk));
+    }
+
+    // Exits last: their key embeds the source room's key, which must
+    // already be resolved (either pre-existing, or just stamped above).
+    for ref_id in &refs {
+        if world.get(ref_id).map(|o| o.kind.clone()) != Some(Kind::Exit) {
+            continue;
+        }
+        let (direction, room_ref) = {
+            let obj = world.get(ref_id).unwrap();
+            (obj.key.clone(), obj.location_ref.clone())
+        };
+        let Some(room_ref) = room_ref else {
+            // No source room at all — nothing to key this against.
+            // export_bundle reports it in `skipped` rather than silently
+            // dropping it.
+            continue;
+        };
+        let room_fk = world
+            .get(&room_ref)
+            .and_then(|r| r.attrs.get(loader::FILE_KEY_ATTR))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let (area, room_key) = match &room_fk {
+            Some(fk) => {
+                let (a, k) = fk.split_once('/').unwrap_or((FALLBACK_AREA, fk.as_str()));
+                (a.to_string(), k.to_string())
+            }
+            // The source room isn't itself exportable (e.g. it was
+            // destroyed but the exit lingers) — key against its raw
+            // dbref so the exit still gets *something* rather than being
+            // silently skipped by this pass (export_bundle's own
+            // location resolution will separately catch and report it).
+            None => (FALLBACK_AREA.to_string(), room_ref.clone()),
+        };
+        let candidate = format!("{}/exit/{}/{}", area, room_key, direction);
+        if used_keys.insert(candidate.clone()) {
+            world.get_mut(ref_id).unwrap().attrs.insert(loader::FILE_KEY_ATTR.into(), serde_json::json!(candidate));
+        }
+        // else: another exit already claimed this exact room+direction
+        // (two exits with the same direction from the same room) — leave
+        // unstamped. export_bundle reports it in `skipped` rather than
+        // guessing at a disambiguated direction, which would change what
+        // players type to use it.
+    }
+}
+
+/// Emit every non-`Player` object in `world` back to
 /// `<path>/<area>/<area>.toml` plus sibling `.luau` files, one area per
-/// directory. Only objects carrying that identity are in scope — see the
-/// module docs and the plan's "Export is not optional": this is
-/// specifically the mirror of `@import`, not a full database backup of
-/// every object (player characters and objects created ad hoc via
-/// `@create`/`@dig` were never imported and have no file identity to
-/// export against).
-pub fn export_bundle(path: &Path, world: &World) -> Result<ExportReport, String> {
+/// directory — the mirror of `@import`. Unlike a pure read, this can
+/// mutate `world` first: see [`stamp_missing_identities`], called at the
+/// top of this function, which gives any object lacking a `FILE_KEY_ATTR`
+/// identity (anything created in-game via `@create`, `@dig`, `@script`,
+/// `@lib`, etc.) a stable, deterministically-derived one — because once
+/// `load_world_files` is off, `@export` is the only way such an object
+/// survives a lost database. See the module docs and the plan's "Export
+/// is not optional."
+///
+/// `Kind::Player` is excluded explicitly, not incidentally: player
+/// objects are account-linked runtime state, not world content, and are
+/// never exported regardless of whether they carry an identity.
+///
+/// An object's area is its own `FILE_KEY_ATTR` area if it has one,
+/// otherwise the containing room found by walking `location_ref` — see
+/// `resolve_export_area` for the exact rule, including nested containers
+/// and the [`FALLBACK_AREA`] catch-all.
+pub fn export_bundle(path: &Path, world: &mut World) -> Result<ExportReport, String> {
+    stamp_missing_identities(world);
+
+    let mut report = ExportReport::default();
     let mut by_area: HashMap<String, Vec<&GameObject>> = HashMap::new();
     for obj in world.objects.values() {
-        if let Some(fk) = obj.attrs.get(loader::FILE_KEY_ATTR).and_then(|v| v.as_str()) {
-            let area = fk.split('/').next().unwrap_or("").to_string();
-            by_area.entry(area).or_default().push(obj);
+        if obj.kind == Kind::Player {
+            // Account-linked runtime state, not world content — see this
+            // function's doc comment. Excluded here explicitly rather
+            // than by the incidental fact that nothing ever gave a
+            // player a FILE_KEY_ATTR.
+            continue;
+        }
+        match obj.attrs.get(loader::FILE_KEY_ATTR).and_then(|v| v.as_str()) {
+            Some(fk) => {
+                let area = fk.split('/').next().unwrap_or(FALLBACK_AREA).to_string();
+                by_area.entry(area).or_default().push(obj);
+            }
+            None => {
+                // Only reachable for an Exit that collided with another
+                // exit's derived key during stamping (see
+                // `stamp_missing_identities`) — two exits with the same
+                // direction from the same room. Reported, not silently
+                // dropped.
+                report.skipped.push(format!(
+                    "{} (exit key collision — another exit already uses this room and direction)",
+                    obj.ref_id
+                ));
+            }
         }
     }
 
@@ -788,7 +1025,6 @@ pub fn export_bundle(path: &Path, world: &World) -> Result<ExportReport, String>
 
     std::fs::create_dir_all(path).map_err(|e| format!("Failed to create {}: {}", path.display(), e))?;
 
-    let mut report = ExportReport::default();
     let mut area_names: Vec<&String> = by_area.keys().collect();
     area_names.sort();
 
@@ -859,11 +1095,20 @@ pub fn export_bundle(path: &Path, world: &World) -> Result<ExportReport, String>
                     report.objects_written += 1;
                 }
                 Kind::Room => {
-                    let programs = write_programs(obj, &area_dir)?;
+                    // Last segment of the (possibly freshly-stamped) file
+                    // key, not `obj.key` directly — the two only diverge
+                    // for an object `stamp_missing_identities` just gave
+                    // an identity to, and using the stamped slug here
+                    // (rather than mutating `obj.key`, which is what
+                    // players type to reference the object in `get`/
+                    // `drop`/`examine`) keeps stamping from having any
+                    // live gameplay side effect.
+                    let key = fk.rsplit('/').next().unwrap_or(&obj.key).to_string();
+                    let programs = write_programs(obj, &key, &area_dir)?;
                     let mut tags: Vec<String> = obj.tags.iter().map(|t| t.as_spec()).collect();
                     tags.sort();
                     area_file.rooms.push(loader::RoomDef {
-                        key: obj.key.clone(),
+                        key,
                         title: obj.title.clone().unwrap_or_default(),
                         description: obj.description.clone(),
                         tags,
@@ -872,24 +1117,35 @@ pub fn export_bundle(path: &Path, world: &World) -> Result<ExportReport, String>
                     });
                     report.objects_written += 1;
                 }
-                Kind::Item | Kind::Npc | Kind::Player => {
+                Kind::Item | Kind::Npc => {
                     let location = match &obj.location_ref {
                         Some(r) => match resolve_ref_to_key(r, area_name, &ref_to_key) {
                             Some(k) => Some(k),
                             None => {
-                                report.skipped.push(format!("{} (unresolvable location)", fk));
+                                let reason = if world
+                                    .get(r)
+                                    .map(|o| o.kind == Kind::Player)
+                                    .unwrap_or(false)
+                                {
+                                    "carried by a player, not exportable"
+                                } else {
+                                    "unresolvable location"
+                                };
+                                report.skipped.push(format!("{} ({})", fk, reason));
                                 continue;
                             }
                         },
                         None => None,
                     };
-                    let programs = write_programs(obj, &area_dir)?;
+                    // See the note on the `Kind::Room` arm above.
+                    let key = fk.rsplit('/').next().unwrap_or(&obj.key).to_string();
+                    let programs = write_programs(obj, &key, &area_dir)?;
                     let mut tags: Vec<String> = obj.tags.iter().map(|t| t.as_spec()).collect();
                     tags.sort();
                     let mut attrs = obj.attrs.clone();
                     attrs.remove(loader::FILE_KEY_ATTR);
                     area_file.objects.push(loader::ObjectDef {
-                        key: obj.key.clone(),
+                        key,
                         kind: obj.kind.to_string(),
                         title: obj.title.clone(),
                         description: obj.description.clone(),
@@ -901,6 +1157,9 @@ pub fn export_bundle(path: &Path, world: &World) -> Result<ExportReport, String>
                     });
                     report.objects_written += 1;
                 }
+                Kind::Player => unreachable!(
+                    "Kind::Player is filtered out before `by_area` is built, above"
+                ),
             }
         }
 
@@ -921,10 +1180,24 @@ pub fn export_bundle(path: &Path, world: &World) -> Result<ExportReport, String>
 /// source — matches the predominant style game authors already use (see
 /// `the-last-stag-mud`) and avoids TOML string-escaping edge cases for
 /// multi-line Luau.
-fn write_programs(obj: &GameObject, area_dir: &Path) -> Result<HashMap<String, ProgramSource>, String> {
+///
+/// `export_key` (the last segment of the object's `FILE_KEY_ATTR`, not
+/// `obj.key`) names the file: `obj.key` is only guaranteed unique for an
+/// object that came from a file import (`check_collisions` enforces that
+/// at import time) — `@create` sets it from a lowercased title with no
+/// uniqueness check at all, so two ad-hoc objects can easily share one
+/// (two things both named "Crate"). Using `obj.key` here would let a
+/// second object's Program silently overwrite the first's `.luau` file on
+/// disk the moment both exported into the same area; `export_key` is
+/// already unique within the area by construction (see `dedupe_key`).
+fn write_programs(
+    obj: &GameObject,
+    export_key: &str,
+    area_dir: &Path,
+) -> Result<HashMap<String, ProgramSource>, String> {
     let mut programs = HashMap::new();
     for (hook, prog) in &obj.programs {
-        let file_name = format!("{}__{}.luau", sanitize_filename(&obj.key), hook);
+        let file_name = format!("{}__{}.luau", sanitize_filename(export_key), hook);
         std::fs::write(area_dir.join(&file_name), &prog.source)
             .map_err(|e| format!("Failed to write {}: {}", file_name, e))?;
         programs.insert(hook.clone(), ProgramSource::File { file: file_name });
@@ -1313,7 +1586,7 @@ mod tests {
         import_bundle(&import_dir.path, &mut world, &db, false, Some("#1")).unwrap();
 
         let export_dir = TempDir::new();
-        let export_report = export_bundle(&export_dir.path, &world).unwrap();
+        let export_report = export_bundle(&export_dir.path, &mut world).unwrap();
         assert!(export_report.skipped.is_empty(), "{:?}", export_report);
         assert_eq!(export_report.objects_written, 4);
 
@@ -1330,5 +1603,252 @@ mod tests {
             report
         );
         assert_eq!(world.objects.len(), object_count_before);
+    }
+
+    /// Build an ad-hoc item the way `@create` does — `Kind::Item`, title,
+    /// `location_ref` set, an owner, and critically *no* `FILE_KEY_ATTR` —
+    /// rather than hand-constructing one with a key already stamped. See
+    /// `src/engine/mod.rs`'s `cmd_create`.
+    fn adhoc_item(world: &mut World, title: &str, location: &str, owner: &str) -> String {
+        let ref_id = world.next_dbref();
+        let key = title.to_lowercase().replace(' ', "_");
+        let item = GameObject::new(&ref_id, &key, Kind::Item)
+            .with_title(title)
+            .with_location(location)
+            .with_owner(owner);
+        world.add_object(item);
+        ref_id
+    }
+
+    /// Build an ad-hoc room the way `@dig` does — `Kind::Room`, title, an
+    /// owner, and no location and no `FILE_KEY_ATTR`. See `cmd_dig`.
+    fn adhoc_room(world: &mut World, title: &str, owner: &str) -> String {
+        let ref_id = world.next_dbref();
+        let key = title.to_lowercase().replace(' ', "_");
+        let room = GameObject::new(&ref_id, &key, Kind::Room).with_title(title).with_owner(owner);
+        world.add_object(room);
+        ref_id
+    }
+
+    /// Objects created entirely in-game (no `@import` involved, no
+    /// `FILE_KEY_ATTR` ever set by hand) must still round-trip: `@export`
+    /// stamps identity, and re-importing the exported bundle must report
+    /// zero created and zero updated. Covers a room with no natural area
+    /// (nothing imported it, so it has no location to derive one from) and
+    /// a nested container — an item inside an item inside that room —
+    /// which only has a *location*, no area of its own, either.
+    #[test]
+    fn adhoc_objects_round_trip_through_export_including_nested_containment() {
+        let db = temp_db();
+        let mut world = World::new();
+        let owner = "#1";
+
+        let room_ref = adhoc_room(&mut world, "The Vault", owner);
+        let bag_ref = adhoc_item(&mut world, "Leather Bag", &room_ref, owner);
+        let coin_ref = adhoc_item(&mut world, "Gold Coin", &bag_ref, owner);
+
+        let export_dir = TempDir::new();
+        let report = export_bundle(&export_dir.path, &mut world).unwrap();
+        assert!(report.skipped.is_empty(), "nothing should be unrepresentable: {:?}", report);
+        assert_eq!(report.objects_written, 3);
+        assert!(report.written_areas.contains(&FALLBACK_AREA.to_string()), "{:?}", report);
+
+        // Identity was stamped in place — same objects, now with a key.
+        assert!(world.get(&room_ref).unwrap().attrs.contains_key(loader::FILE_KEY_ATTR));
+        assert!(world.get(&bag_ref).unwrap().attrs.contains_key(loader::FILE_KEY_ATTR));
+        let coin_fk = world.get(&coin_ref).unwrap().attrs[loader::FILE_KEY_ATTR].as_str().unwrap().to_string();
+        assert!(coin_fk.starts_with(&format!("{}/", FALLBACK_AREA)), "unexpected key: {}", coin_fk);
+
+        // Gameplay-facing `.key` must be untouched by stamping — export
+        // must never change what a player types to refer to an object.
+        assert_eq!(world.get(&coin_ref).unwrap().key, "gold_coin");
+
+        let object_count_before = world.objects.len();
+        let import_report = import_bundle(&export_dir.path, &mut world, &db, false, Some(owner)).unwrap();
+        assert!(import_report.created.is_empty(), "export->import must be a no-op: {:?}", import_report);
+        assert!(import_report.updated.is_empty(), "{:?}", import_report);
+        assert_eq!(import_report.unchanged.len(), 3, "{:?}", import_report);
+        assert_eq!(world.objects.len(), object_count_before);
+
+        // The nested relationship must have actually round-tripped, not
+        // just avoided an error.
+        assert_eq!(world.get(&coin_ref).unwrap().location_ref.as_deref(), Some(bag_ref.as_str()));
+    }
+
+    /// Re-exporting an unchanged world must derive the exact same keys
+    /// every time — otherwise a second `@export` (with nothing having
+    /// changed in between) would look like a diff in git for no reason,
+    /// and a re-import could fail to match what an earlier export already
+    /// installed.
+    #[test]
+    fn stamped_keys_are_stable_across_repeated_exports() {
+        let mut world = World::new();
+        let owner = "#1";
+        let room_ref = adhoc_room(&mut world, "Greenhouse", owner);
+        adhoc_item(&mut world, "Watering Can", &room_ref, owner);
+
+        let dir_a = TempDir::new();
+        export_bundle(&dir_a.path, &mut world).unwrap();
+        let keys_after_first: std::collections::BTreeMap<String, String> = world
+            .objects
+            .values()
+            .filter_map(|o| {
+                o.attrs
+                    .get(loader::FILE_KEY_ATTR)
+                    .and_then(|v| v.as_str())
+                    .map(|k| (o.ref_id.clone(), k.to_string()))
+            })
+            .collect();
+
+        // Export again — identity is already stamped, so this must be a
+        // pure no-op on the keys (nothing left to stamp).
+        let dir_b = TempDir::new();
+        export_bundle(&dir_b.path, &mut world).unwrap();
+        let keys_after_second: std::collections::BTreeMap<String, String> = world
+            .objects
+            .values()
+            .filter_map(|o| {
+                o.attrs
+                    .get(loader::FILE_KEY_ATTR)
+                    .and_then(|v| v.as_str())
+                    .map(|k| (o.ref_id.clone(), k.to_string()))
+            })
+            .collect();
+
+        assert_eq!(keys_after_first, keys_after_second);
+    }
+
+    /// Two ad-hoc objects with the same title in the same (fallback) area
+    /// must not collide — the second gets a disambiguated key rather than
+    /// silently overwriting or erroring.
+    #[test]
+    fn colliding_titles_get_disambiguated_keys() {
+        let mut world = World::new();
+        let owner = "#1";
+        let room_ref = adhoc_room(&mut world, "Storage", owner);
+        let a = adhoc_item(&mut world, "Crate", &room_ref, owner);
+        let b = adhoc_item(&mut world, "Crate", &room_ref, owner);
+
+        let dir = TempDir::new();
+        let report = export_bundle(&dir.path, &mut world).unwrap();
+        assert!(report.skipped.is_empty(), "{:?}", report);
+
+        let key_a = world.get(&a).unwrap().attrs[loader::FILE_KEY_ATTR].as_str().unwrap().to_string();
+        let key_b = world.get(&b).unwrap().attrs[loader::FILE_KEY_ATTR].as_str().unwrap().to_string();
+        assert_ne!(key_a, key_b, "colliding titles must not stamp the same key");
+    }
+
+    /// An ad-hoc exit (the way `@open` creates one — no `FILE_KEY_ATTR`,
+    /// `location_ref`/`target_ref` set, `.key` is the direction) must round
+    /// trip too: its stamped key embeds the source room's key, which the
+    /// stamping pass has to resolve before the exit's own key can be built.
+    #[test]
+    fn adhoc_exit_round_trips_through_export() {
+        let db = temp_db();
+        let mut world = World::new();
+        let owner = "#1";
+
+        let room_a = adhoc_room(&mut world, "Alpha Room", owner);
+        let room_b = adhoc_room(&mut world, "Beta Room", owner);
+        let exit_ref = world.next_dbref();
+        let exit = GameObject::new(&exit_ref, "north", Kind::Exit)
+            .with_location(&room_a)
+            .with_target(&room_b)
+            .with_owner(owner);
+        world.add_object(exit);
+
+        let export_dir = TempDir::new();
+        let report = export_bundle(&export_dir.path, &mut world).unwrap();
+        assert!(report.skipped.is_empty(), "{:?}", report);
+        assert_eq!(report.objects_written, 3);
+
+        let exit_fk = world.get(&exit_ref).unwrap().attrs[loader::FILE_KEY_ATTR].as_str().unwrap().to_string();
+        assert!(exit_fk.contains("/exit/"), "unexpected exit key: {}", exit_fk);
+
+        let object_count_before = world.objects.len();
+        let import_report = import_bundle(&export_dir.path, &mut world, &db, false, Some(owner)).unwrap();
+        assert!(import_report.created.is_empty(), "{:?}", import_report);
+        assert!(import_report.updated.is_empty(), "{:?}", import_report);
+        assert_eq!(world.objects.len(), object_count_before);
+        assert_eq!(world.find_exit(&room_a, "north").map(|e| e.ref_id.clone()), Some(exit_ref));
+    }
+
+    /// `@create` derives `.key` from a lowercased title with no uniqueness
+    /// check at all (unlike a file import, where `check_collisions`
+    /// enforces it) — so two ad-hoc objects can easily share one, e.g. two
+    /// things both named "Crate". If `write_programs` used `obj.key` (the
+    /// gameplay key) to name the `.luau` file it writes, the second
+    /// object's Program would silently overwrite the first's file on disk
+    /// the moment both exported into the same area. It must use the
+    /// disambiguated export key instead.
+    #[test]
+    fn colliding_gameplay_keys_do_not_clobber_each_others_program_files() {
+        let mut world = World::new();
+        let owner = "#1";
+        let room_ref = adhoc_room(&mut world, "Storage", owner);
+
+        let a = world.next_dbref();
+        let mut obj_a = GameObject::new(&a, "crate", Kind::Item).with_title("Crate").with_location(&room_ref);
+        hooks::set_program(&mut obj_a, "on_look", "return 'crate A'".into()).unwrap();
+        world.add_object(obj_a);
+
+        let b = world.next_dbref();
+        let mut obj_b = GameObject::new(&b, "crate", Kind::Item).with_title("Crate").with_location(&room_ref);
+        hooks::set_program(&mut obj_b, "on_look", "return 'crate B'".into()).unwrap();
+        world.add_object(obj_b);
+
+        assert_eq!(world.get(&a).unwrap().key, world.get(&b).unwrap().key, "both share the same gameplay key");
+
+        let dir = TempDir::new();
+        let report = export_bundle(&dir.path, &mut world).unwrap();
+        assert!(report.skipped.is_empty(), "{:?}", report);
+
+        let source_a = world.get(&a).unwrap().programs["on_look"].source.clone();
+        let source_b = world.get(&b).unwrap().programs["on_look"].source.clone();
+
+        // Read back both `.luau` files that were actually written and
+        // confirm neither one clobbered the other.
+        let toml_text =
+            std::fs::read_to_string(dir.path.join(FALLBACK_AREA).join(format!("{}.toml", FALLBACK_AREA))).unwrap();
+        let file_names: Vec<&str> = toml_text
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("file = \"").and_then(|s| s.strip_suffix('"')))
+            .collect();
+        assert_eq!(file_names.len(), 2, "expected a distinct .luau file per object:\n{}", toml_text);
+        assert_ne!(file_names[0], file_names[1], "both objects wrote to the same file: {:?}", file_names);
+
+        let written: Vec<String> =
+            file_names.iter().map(|f| std::fs::read_to_string(dir.path.join(FALLBACK_AREA).join(f)).unwrap()).collect();
+        assert!(written.contains(&source_a));
+        assert!(written.contains(&source_b));
+    }
+
+    /// `Kind::Player` is account-linked runtime state, not world content —
+    /// it must never be exported, identity or no identity.
+    #[test]
+    fn players_are_never_exported() {
+        let mut world = World::new();
+        let room_ref = adhoc_room(&mut world, "Lobby", "#1");
+        let player_ref = world.next_dbref();
+        let player = GameObject::new(&player_ref, "wanderer", Kind::Player)
+            .with_title("A Wanderer")
+            .with_location(&room_ref);
+        world.add_object(player);
+
+        let dir = TempDir::new();
+        let report = export_bundle(&dir.path, &mut world).unwrap();
+
+        assert!(
+            !world.get(&player_ref).unwrap().attrs.contains_key(loader::FILE_KEY_ATTR),
+            "a player must never be stamped with a file identity"
+        );
+        // Only the room should have been written — the player must not
+        // appear anywhere in the emitted bundle.
+        assert_eq!(report.objects_written, 1, "{:?}", report);
+        let toml_text = std::fs::read_to_string(
+            dir.path.join(FALLBACK_AREA).join(format!("{}.toml", FALLBACK_AREA)),
+        )
+        .unwrap();
+        assert!(!toml_text.contains("wanderer"), "player must not appear in exported TOML:\n{}", toml_text);
     }
 }

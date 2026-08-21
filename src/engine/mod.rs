@@ -1115,7 +1115,7 @@ impl Engine {
             }
             ApiRequest::Export { path } => {
                 let export_path = std::path::Path::new(&path);
-                match crate::import_export::export_bundle(export_path, &self.world) {
+                match crate::import_export::export_bundle(export_path, &mut self.world) {
                     Ok(report) => {
                         let output = crate::import_export::render_export_report(&report, &path);
                         ApiResponse::success(serde_json::json!({ "output": output }))
@@ -4093,7 +4093,7 @@ impl Engine {
         if path.is_empty() {
             return "Usage: @export <path>\r\n".to_string();
         }
-        match crate::import_export::export_bundle(std::path::Path::new(path), &self.world) {
+        match crate::import_export::export_bundle(std::path::Path::new(path), &mut self.world) {
             Ok(report) => crate::import_export::render_export_report(&report, path),
             Err(e) => format!("Export error: {}\r\n", e),
         }
@@ -6587,6 +6587,81 @@ mod tests {
         assert_eq!(resp.error.as_deref(), Some("Admin scope required"));
     }
 
+    /// The whole point of closing the export coverage gap: content built
+    /// entirely in-game (`@create`, `@dig`, `@tag`, `put ... in ...` — the
+    /// same commands a builder actually types, not hand-constructed
+    /// `World`/`GameObject`s with a key already attached) must survive
+    /// `@export` and re-import as a no-op. Exercises `cmd_create` (an item
+    /// in a room that itself has no file identity — `test_engine_with_session`'s
+    /// spawn room is a from-scratch fallback room, see `Engine::new`, so
+    /// this also covers "an object whose room has no area") and nested
+    /// containment via `put`.
+    #[test]
+    fn export_round_trips_objects_created_entirely_in_game() {
+        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
+
+        assert!(
+            !engine
+                .world
+                .get(&engine.spawn_room_ref)
+                .unwrap()
+                .attrs
+                .contains_key(crate::loader::FILE_KEY_ATTR),
+            "the from-scratch spawn room must start with no file identity"
+        );
+
+        engine.cmd_create(&session_id, &actor_ref, "Rusty Sword");
+        engine.cmd_create(&session_id, &actor_ref, "Wooden Box");
+        let box_ref = engine
+            .world
+            .objects
+            .values()
+            .find(|o| o.key == "wooden_box")
+            .unwrap()
+            .ref_id
+            .clone();
+        engine.cmd_tag(&session_id, &actor_ref, &format!("{} = item:container", box_ref));
+        let put_result = engine.cmd_put(&actor_ref, "rusty sword in wooden box");
+        assert!(!put_result.to_lowercase().contains("don't"), "put should have succeeded: {}", put_result);
+
+        let sword_ref = engine
+            .world
+            .objects
+            .values()
+            .find(|o| o.key == "rusty_sword")
+            .unwrap()
+            .ref_id
+            .clone();
+        assert_eq!(
+            engine.world.get(&sword_ref).unwrap().location_ref.as_deref(),
+            Some(box_ref.as_str()),
+            "the sword must actually be nested inside the box before export"
+        );
+
+        let export_dir = TempBundleDir::new("adhoc-round-trip");
+        let export_output = engine.cmd_export(&session_id, &export_dir.path.to_string_lossy());
+        assert!(!export_output.to_lowercase().contains("error"), "{}", export_output);
+
+        let object_count_before = engine.world.objects.len();
+        let report = crate::import_export::import_bundle(
+            &export_dir.path,
+            &mut engine.world,
+            &engine.db,
+            false,
+            Some(&actor_ref),
+        )
+        .unwrap();
+
+        assert!(report.created.is_empty(), "export->import of ad-hoc content must be a no-op: {:?}", report);
+        assert!(report.updated.is_empty(), "{:?}", report);
+        assert_eq!(engine.world.objects.len(), object_count_before);
+        assert_eq!(
+            engine.world.get(&sword_ref).unwrap().location_ref.as_deref(),
+            Some(box_ref.as_str()),
+            "nested containment must survive the round trip"
+        );
+    }
+
     #[test]
     fn api_import_creates_objects_and_reports_via_output() {
         let dir = TempBundleDir::new("api-create");
@@ -6668,7 +6743,13 @@ mod tests {
 
         let export_dir = TempBundleDir::new("telnet-export");
         let out = engine.cmd_export(&session_id, &export_dir.path.to_string_lossy());
-        assert!(out.contains("1 area(s) written"), "unexpected output: {}", out);
+        // Two areas: "gate" from the import above, plus "unfiled" — the
+        // test session's spawn room (`test_engine_with_session`'s
+        // from-scratch fallback room, no `game_dir` configured) has no
+        // file identity of its own and now gets swept up too, per the
+        // export coverage fix (see docs/plans/program-authoring.md Stage
+        // 4 and `stamp_missing_identities`).
+        assert!(out.contains("2 area(s) written"), "unexpected output: {}", out);
         assert!(export_dir.path.join("gate").join("gate.toml").exists());
 
         // Re-importing the export must be a no-op.

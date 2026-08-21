@@ -9,9 +9,15 @@ This supersedes an earlier version of this plan that tried to reconcile files
 and the database on every boot. See [Superseded](#superseded) for what changed
 and why.
 
-**Status:** stages 1–3 are implemented (194 tests, up from 137). Stage 4 is not
-started and needs a decision on the dev loop before it should be — see the note
-at the end of that section.
+**Status:** all four stages are implemented, along with the CLI client (236
+tests, up from 137). Boot-time file loading is unchanged and now sits behind the
+`load_world_files` config option, defaulting to on, so switching the database to
+being the sole source of truth at boot stays a deliberate act.
+
+Not done: copy mode (instantiating a fresh object set with new dbrefs),
+uninstall, and the UGC permission model — `apply_to` still validates only that
+intent targets exist, though the batch now carries the owning authority so
+enforcement can be added there rather than retrofitted.
 
 ## The model
 

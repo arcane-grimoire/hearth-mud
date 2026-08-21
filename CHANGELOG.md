@@ -54,6 +54,20 @@ Hearth has no tagged releases yet, so everything so far is unreleased.
 - **`load_world_files`** config option controlling boot-time file loading,
   defaulting to the current behaviour. Turning it off makes the database the
   sole source of truth at boot, with `@import` as the explicit way in.
+- **`@export` now covers in-game-created content.** Previously it only wrote
+  back objects that already carried a `"<area>/<key>"` file identity, so
+  anything built live with `@create`/`@dig`/`@script`/`@lib` had no way back
+  to files — a real gap now that `load_world_files` can turn boot-time
+  loading off and the database becomes the only copy of anything authored
+  in-game. `@export` now stamps a stable identity (a disambiguated slug of
+  the object's title, never its in-game `key`) onto any object that lacks
+  one, derives its area from the containing room — walking through nested
+  containers and a carrying player — and falls back to a catch-all `unfiled`
+  area rather than dropping anything that resolves to no area at all (an
+  ad-hoc room, a script/library object). `Kind::Player` is excluded
+  explicitly at the export filter rather than incidentally via lacking an
+  identity. Nested containment (an item inside another item) round-trips
+  correctly. `export_bundle` now takes `&mut World` to support the stamping.
 - **Require cycle detection.** A module requiring itself directly or
   transitively now errors with the chain rendered (`a -> b -> a`) instead of
   recursing until the stack or instruction budget blew.
@@ -80,6 +94,12 @@ Hearth has no tagged releases yet, so everything so far is unreleased.
   always at least two, so every tick's accumulated state was thrown away
   instead of persisted. Longstanding, and untested until per-object ticking got
   its own coverage.
+- **Export could silently clobber one object's Program with another's.**
+  `.luau` filenames were derived from the in-game `key`, which `@create` builds
+  from a lowercased title with no uniqueness check — unlike imported objects,
+  where collisions are refused. Two ad-hoc objects both called "Crate", each
+  with a Program, would overwrite each other's file. Filenames now use the
+  disambiguated export identity.
 
 ### Security
 

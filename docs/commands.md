@@ -235,12 +235,36 @@ Import (dry run) of world:
 anything — to either the world or the version log — so "will this eat my
 work?" is always checkable before a real import.
 
-`@export <path>` writes every object the database owns an identity for (see
-above) back to `<path>` as one `<area>/<area>.toml` per area plus sibling
-`.luau` files, one per Program — the same format `@import` reads and the
-same format game authors already hand-write. It only covers objects that
-carry that file identity: player characters and anything created ad hoc with
-`@create`/`@dig` (never imported) have none, and are outside its scope.
+`@export <path>` writes the database back to `<path>` as one
+`<area>/<area>.toml` per area plus sibling `.luau` files, one per Program —
+the same format `@import` reads and the same format game authors already
+hand-write. It covers **every object except `Kind::Player`** — player
+characters are account-linked runtime state, not world content, and are
+never written regardless of anything else. Everything else is in scope,
+including objects that were never imported and have no file identity yet:
+anything created ad hoc with `@create`, `@dig`, `@script`, `@lib`, and so on.
+
+Because of that, `@export` is not purely read-only: an object with no
+`"<area>/<key>"` identity gets one stamped on before it's written, so a
+second `@export` (or a re-import of the first one) sees the same identity
+rather than minting a new one. The key is a slug of the object's title (its
+plain `key` if it has no title), disambiguated with a `-2`, `-3`, ...
+suffix on collision; the object's own in-game `key` (what `get`/`drop`/
+`examine` match against) is never touched, so exporting something can never
+change what a player types to refer to it. The area comes from the
+containing room — found by walking up through any number of nested
+containers or a carrying player — or, if that resolves to no room at all (a
+freshly `@dig`ged room, a `@script`/`@lib` object, which have no location,
+or a broken chain), from a catch-all `unfiled` area rather than being
+dropped silently. An item nested inside another item exports and re-imports
+correctly — its `location` in the TOML names the containing object's key,
+not a room.
+
+The one case `@export` can't represent, and reports under "skipped" rather
+than writing: an item currently being carried by a player (its true
+location is "in someone's inventory," not any area or container the file
+format can express).
+
 Export→import is a no-op by construction — this is what makes `@export`
 disaster recovery as well as the git story once boot stops reading files.
 
