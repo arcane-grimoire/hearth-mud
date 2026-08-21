@@ -38,6 +38,7 @@ pub async fn start_web(
     let base = Router::new()
         .route("/ws", get(ws_handler))
         .route("/api", post(api_handler))
+        .route("/builder", get(builder_handler))
         .with_state(state)
         .layer(CorsLayer::permissive());
 
@@ -126,6 +127,13 @@ async fn ws_handler(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws(socket, state.engine_tx))
+}
+
+/// Serve the Mapwright map-builder UI. It talks back to `POST /api` with the
+/// `{action,...}` envelope + a Bearer admin token (see the map actions in
+/// `engine::ApiRequest`). Embedded at compile time so it ships in the binary.
+async fn builder_handler() -> impl IntoResponse {
+    axum::response::Html(include_str!("mapwright.html"))
 }
 
 async fn api_handler(
