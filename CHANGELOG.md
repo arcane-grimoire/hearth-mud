@@ -57,6 +57,20 @@ Hearth has no tagged releases yet, so everything so far is unreleased.
 - **Require cycle detection.** A module requiring itself directly or
   transitively now errors with the chain rendered (`a -> b -> a`) instead of
   recursing until the stack or instruction budget blew.
+- **Shared terrain palette.** A game defines default terrain "square types"
+  once in `<game_dir>/terrain.toml`; every map inherits them, and a map's own
+  `[terrain.X]` block overrides that character wholesale. The palette folds
+  into each template at load, so maps can drop redundant `[terrain]` blocks
+  with no change to instantiation or `get_map_template`.
+- **Custom terrain attributes.** Any key on a `[terrain.X]` block beyond the
+  known fields is captured and stamped onto every room of that terrain as a
+  `terrain_<key>` attribute, so game softcode can reference it at runtime — the
+  `terrain_` namespace mirrors the existing `map_*` room stamps.
+- **Terrain presentation metadata** — optional `color`, `tile_image`, and
+  `tile_rotation` (cardinal) fields on a terrain, carried through
+  `get_map_template` for a builder or graphical client. The engine never reads
+  them. A plan for delivering room/terrain data to map-aware clients (GMCP,
+  Mudlet) lives in `docs/plans/mudlet-client-integration.md`.
 
 ### Changed
 
