@@ -73,16 +73,19 @@ next.
   sources to `.toml` in game-dir layout, so the loop closes: builder → DB →
   `@export` → commit. This is the half that makes "local authoring, durable via
   git" actually usable.
-- **`@import` covering maps is the remaining half** — this is what closes the
-  *update* gap (a map fix shipped in a later image reaching the DB). It should
-  bring a changed file into the DB reusing the recorded/current/incoming
-  three-way hash `@import` already applies to Programs' conffile problem — the
-  recorded hash lives in `import_hashes`, and a map's seed hash is the same kind
-  of fact — so a map whose DB copy still matches what was seeded updates
-  silently, and one edited in the builder is a conflict to report rather than
-  clobber. It also means the boot seed must record that hash. With `@import`,
-  maps get world content's full story and `load_world_files` stops needing to
-  mean anything for maps. **The next tagged RC holds until this lands.**
+- **`@import` covers maps + terrain — done** (`resolve_file_sources`, wired
+  into `import_bundle` so the same bundle carries both world content and map
+  sources). Closes the *update* gap: a changed file reaches the DB via the
+  recorded/current/incoming three-way `@import` already applies to Programs'
+  conffile problem — the recorded baseline lives in `import_hashes` under the
+  `file_source` sentinel ref, stamped by the boot seed. A map whose DB copy
+  still matches its baseline updates silently; one edited in the builder while
+  the bundle also changed is a **conflict kept local and reported** (unlike a
+  Program conflict, which overwrites-with-preserve — the builder has no version
+  log, so keeping the local copy avoids data loss). Import reloads the sources
+  and rebuilds the live templates, no restart. With both halves in, maps have
+  world content's full story and `load_world_files` need not mean anything for
+  maps.
 - **Map picker / rename / delete** actions (`delete_map`).
 - **Themes and ink** want the same DB-backed treatment; `file_sources` is
   already the generic authored-source table (keyed by path) they'd share.

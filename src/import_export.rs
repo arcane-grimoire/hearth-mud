@@ -59,6 +59,19 @@ pub struct ImportReport {
     /// this bundle no longer defines. Reported, never removed — see the
     /// plan's "In the DB, gone from the file".
     pub missing: Vec<String>,
+    /// Map/terrain sources (`file_sources` rows) new to the DB from this
+    /// bundle, and existing ones whose DB copy still matched its seed baseline
+    /// so the incoming file applied cleanly.
+    pub maps_installed: Vec<String>,
+    pub maps_updated: Vec<String>,
+    /// A builder edit to the DB copy that the bundle didn't also change —
+    /// kept as-is, incoming ignored.
+    pub maps_kept_local: Vec<String>,
+    /// Both the DB copy and the incoming file changed since the baseline (or
+    /// there is no baseline) — kept local and reported, never clobbered. The
+    /// map builder has no version log to preserve a discarded edit, so unlike
+    /// a Program conflict this keeps the local copy rather than overwriting.
+    pub maps_conflicts: Vec<String>,
 }
 
 impl ImportReport {
@@ -69,6 +82,10 @@ impl ImportReport {
         self.missing.sort();
         self.kept_local.sort_by(|a, b| (&a.ref_id, &a.hook).cmp(&(&b.ref_id, &b.hook)));
         self.conflicts.sort_by(|a, b| (&a.ref_id, &a.hook).cmp(&(&b.ref_id, &b.hook)));
+        self.maps_installed.sort();
+        self.maps_updated.sort();
+        self.maps_kept_local.sort();
+        self.maps_conflicts.sort();
     }
 }
 
@@ -117,6 +134,38 @@ pub fn render_import_report(report: &ImportReport, dry_run: bool, bundle: &str) 
             ));
         }
     }
+    if !report.maps_installed.is_empty() || !report.maps_updated.is_empty() {
+        out.push_str(&format!(
+            "  {} map/terrain source(s) installed, {} updated\r\n",
+            report.maps_installed.len(),
+            report.maps_updated.len()
+        ));
+        for m in &report.maps_installed {
+            out.push_str(&format!("    + {}\r\n", m));
+        }
+        for m in &report.maps_updated {
+            out.push_str(&format!("    ~ {}\r\n", m));
+        }
+    }
+    if !report.maps_kept_local.is_empty() {
+        out.push_str(&format!(
+            "  {} map source(s) with a local edit kept as-is (bundle unchanged since baseline):\r\n",
+            report.maps_kept_local.len()
+        ));
+        for m in &report.maps_kept_local {
+            out.push_str(&format!("    = {}\r\n", m));
+        }
+    }
+    if !report.maps_conflicts.is_empty() {
+        out.push_str(&format!(
+            "  {} map source(s) changed in BOTH the builder and the bundle — kept your builder \
+             copy, bundle NOT applied (re-import after reconciling, or @export to take yours):\r\n",
+            report.maps_conflicts.len()
+        ));
+        for m in &report.maps_conflicts {
+            out.push_str(&format!("    ! {}\r\n", m));
+        }
+    }
     if !report.missing.is_empty() {
         out.push_str(&format!(
             "  {} object(s) in the database but missing from this bundle (NOT removed):\r\n",
@@ -157,6 +206,9 @@ pub fn import_bundle(
     } else {
         apply(&areas, world, db, true, author)?
     };
+    // Map + terrain sources ride the same bundle, resolved into the
+    // `file_sources` table with the same three-way (dry run writes nothing).
+    resolve_file_sources(path, db, !dry_run, &mut report)?;
     report.sort();
     Ok(report)
 }
@@ -268,7 +320,7 @@ enum ProgOutcome {
     Conflict,
 }
 
-fn blake3_hex(s: &str) -> String {
+pub(crate) fn blake3_hex(s: &str) -> String {
     blake3::hash(s.as_bytes()).to_hex().to_string()
 }
 
@@ -395,6 +447,75 @@ fn resolve_programs(
 /// dry-run computation — `world` is a scratch clone in that case (see
 /// `import_bundle`), so every mutation here is safe to always perform;
 /// only the `db` writes are gated.
+/// The `import_hashes` obj_ref sentinel under which map/terrain sources record
+/// their baseline hash. Not a real object ref (those are `#N`), so it can't
+/// collide; the path is the "hook".
+pub(crate) const FILE_SOURCE_REF: &str = "file_source";
+
+/// Bring the bundle's map + terrain sources into the `file_sources` table
+/// using the same recorded/current/incoming three-way as programs
+/// ([`resolve_one_program`]) — but, lacking a map version log to preserve a
+/// discarded edit, a genuine conflict keeps the local copy and reports it
+/// rather than overwriting. `record_db == false` (dry run) computes outcomes
+/// without writing. Returns whether anything was written, so the caller knows
+/// to rebuild the live templates.
+fn resolve_file_sources(
+    bundle: &Path,
+    db: &Database,
+    record_db: bool,
+    report: &mut ImportReport,
+) -> Result<bool, String> {
+    let incoming = crate::map_template::read_map_source_files(bundle);
+    if incoming.is_empty() {
+        return Ok(false);
+    }
+    let current = db.load_file_sources().map_err(|e| e.to_string())?;
+    let mut wrote = false;
+    for (path, inc) in incoming {
+        let inc_hash = blake3_hex(&inc);
+        let outcome = match current.get(&path) {
+            None => ProgOutcome::New,
+            Some(cur) if blake3_hex(cur) == inc_hash => ProgOutcome::Unchanged,
+            Some(cur) => match db.get_import_hash(FILE_SOURCE_REF, &path).map_err(|e| e.to_string())? {
+                Some(rec) if rec == blake3_hex(cur) => ProgOutcome::Overwritten,
+                Some(rec) if rec == inc_hash => ProgOutcome::KeptLocal,
+                _ => ProgOutcome::Conflict,
+            },
+        };
+        match outcome {
+            ProgOutcome::New | ProgOutcome::Overwritten => {
+                if record_db {
+                    db.save_file_source(&path, &inc).map_err(|e| e.to_string())?;
+                    db.set_import_hash(FILE_SOURCE_REF, &path, &inc_hash).map_err(|e| e.to_string())?;
+                }
+                wrote = true;
+                if outcome == ProgOutcome::New {
+                    report.maps_installed.push(path);
+                } else {
+                    report.maps_updated.push(path);
+                }
+            }
+            ProgOutcome::Unchanged => {
+                // Stamp a baseline if this source has never been through
+                // import, so a future builder edit has something to compare
+                // against — mirrors resolve_one_program's Unchanged branch.
+                if record_db
+                    && db
+                        .get_import_hash(FILE_SOURCE_REF, &path)
+                        .map_err(|e| e.to_string())?
+                        .as_deref()
+                        != Some(inc_hash.as_str())
+                {
+                    db.set_import_hash(FILE_SOURCE_REF, &path, &inc_hash).map_err(|e| e.to_string())?;
+                }
+            }
+            ProgOutcome::KeptLocal => report.maps_kept_local.push(path),
+            ProgOutcome::Conflict => report.maps_conflicts.push(path),
+        }
+    }
+    Ok(wrote)
+}
+
 fn apply(
     areas: &[loader::ParsedArea],
     world: &mut World,
@@ -1333,6 +1454,88 @@ mod tests {
         assert_eq!(written, vec!["maps/ok.toml".to_string()]);
         assert!(!dir.path.parent().unwrap().join("escape.toml").exists());
         assert!(!std::path::Path::new("/tmp/hearth-abs-escape.toml").exists());
+    }
+
+    // ---- @import for maps: the recorded/current/incoming three-way. ----
+    const M_ORIG: &str = "[map]\nname = \"m\"\ngrid = \"\"\"\n.\n\"\"\"\n";
+    const M_EDIT: &str = "[map]\nname = \"m\"\ngrid = \"\"\"\n.f\n\"\"\"\n";
+    const M_UPSTREAM: &str = "[map]\nname = \"m\"\ngrid = \"\"\"\nff\n\"\"\"\n";
+
+    fn seed(db: &Database, current: &str, baseline: &str) {
+        db.save_file_source("maps/m.toml", current).unwrap();
+        db.set_import_hash(super::FILE_SOURCE_REF, "maps/m.toml", &super::blake3_hex(baseline)).unwrap();
+    }
+    fn run_import(bundle_body: &str) -> (Database, ImportReport, String) {
+        // helper: (fresh db) -> caller seeds -> import bundle carrying bundle_body
+        let dir = TempDir::new();
+        dir.write("maps", "m.toml", bundle_body);
+        let db = temp_db();
+        seed(&db, M_ORIG, M_ORIG); // default un-edited baseline; tests re-seed as needed
+        let mut report = ImportReport::default();
+        super::resolve_file_sources(&dir.path, &db, true, &mut report).unwrap();
+        let after = db.load_file_sources().unwrap()["maps/m.toml"].clone();
+        (db, report, after)
+    }
+
+    #[test]
+    fn import_installs_a_new_map() {
+        let dir = TempDir::new();
+        dir.write("maps", "new.toml", M_ORIG);
+        let db = temp_db(); // empty — no such source
+        let mut report = ImportReport::default();
+        let wrote = super::resolve_file_sources(&dir.path, &db, true, &mut report).unwrap();
+        assert!(wrote);
+        assert_eq!(report.maps_installed, vec!["maps/new.toml".to_string()]);
+        assert_eq!(db.load_file_sources().unwrap()["maps/new.toml"], M_ORIG);
+    }
+
+    #[test]
+    fn import_updates_when_db_still_matches_baseline() {
+        // DB == baseline (un-edited), bundle changed → silent update.
+        let (_db, report, after) = run_import(M_UPSTREAM);
+        assert_eq!(report.maps_updated, vec!["maps/m.toml".to_string()]);
+        assert!(report.maps_conflicts.is_empty());
+        assert_eq!(after, M_UPSTREAM);
+    }
+
+    #[test]
+    fn import_keeps_local_edit_when_bundle_unchanged() {
+        // DB edited, bundle == baseline (upstream unchanged) → keep the edit.
+        let dir = TempDir::new();
+        dir.write("maps", "m.toml", M_ORIG);
+        let db = temp_db();
+        seed(&db, M_EDIT, M_ORIG);
+        let mut report = ImportReport::default();
+        super::resolve_file_sources(&dir.path, &db, true, &mut report).unwrap();
+        assert_eq!(report.maps_kept_local, vec!["maps/m.toml".to_string()]);
+        assert_eq!(db.load_file_sources().unwrap()["maps/m.toml"], M_EDIT);
+    }
+
+    #[test]
+    fn import_conflict_keeps_builder_copy_and_reports() {
+        // DB edited AND bundle changed differently → conflict, keep local.
+        let dir = TempDir::new();
+        dir.write("maps", "m.toml", M_UPSTREAM);
+        let db = temp_db();
+        seed(&db, M_EDIT, M_ORIG);
+        let mut report = ImportReport::default();
+        super::resolve_file_sources(&dir.path, &db, true, &mut report).unwrap();
+        assert_eq!(report.maps_conflicts, vec!["maps/m.toml".to_string()]);
+        assert!(report.maps_updated.is_empty());
+        // the builder's copy is NOT clobbered
+        assert_eq!(db.load_file_sources().unwrap()["maps/m.toml"], M_EDIT);
+    }
+
+    #[test]
+    fn import_dry_run_writes_nothing() {
+        let dir = TempDir::new();
+        dir.write("maps", "m.toml", M_UPSTREAM);
+        let db = temp_db();
+        seed(&db, M_ORIG, M_ORIG);
+        let mut report = ImportReport::default();
+        super::resolve_file_sources(&dir.path, &db, false, &mut report).unwrap();
+        assert_eq!(report.maps_updated, vec!["maps/m.toml".to_string()]); // reported
+        assert_eq!(db.load_file_sources().unwrap()["maps/m.toml"], M_ORIG); // but not written
     }
 
     fn town_toml(crossroads_desc: &str) -> String {
