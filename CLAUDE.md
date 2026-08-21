@@ -18,7 +18,7 @@ are built on. The game (The Last Stag) lives in `../the-last-stag-mud/`.
 ```sh
 cargo run                                    # default config (hearth.toml)
 cargo run -- ../the-last-stag-mud/hearth.toml  # game-specific config
-cargo test                                   # 261 tests
+cargo test                                   # 263 tests
 
 # Web client (Svelte)
 cd web && npm install                        # first time
@@ -179,7 +179,26 @@ tick_secs = 1
 spawn_room = "area/town/room/crossroads"
 game_dir = "../the-last-stag-mud/world"
 game_web_dir = "web/dist"  # optional, relative to game root (parent of game_dir)
+load_world_files = true    # boot-time world loading; see below before turning off
 ```
+
+**`game_dir` is always required, even with `load_world_files = false`.**
+That flag governs *world content* only — `<area>/*.toml` and the program
+`.luau` files they reference. Everything else loads from disk on every boot
+and is never persisted to the database:
+
+| Path | What |
+| ---- | ---- |
+| `<game_dir>/lib/*.luau` | modules resolved by `require()` |
+| `<game_dir>/**/*.ink` | ink narrative scripts |
+| `<game_dir>/themes/*.toml` | themes |
+| `<game_dir>/maps/*.toml` | map templates |
+| `<game_dir>/terrain.toml` | terrain palette |
+
+A container built without the game directory boots — spawn resolves from the
+database — but libs, dialogue, themes, maps, and terrain are all missing, so
+anything touching them breaks at runtime rather than at startup. "The database
+is the source of truth" means world content, not code and spatial data.
 
 ## Design decisions
 
@@ -187,8 +206,8 @@ See `docs/adr/` (6 ADRs). See `CONTEXT.md` for domain glossary.
 
 ## Testing
 
-261 tests across: softcode (74), engine (57), db (19), import/export (17),
-grid (16), loader (16), accounts (12), map templates (11), cli (10), ink (9),
+263 tests across: softcode (74), engine (57), db (19), import/export (17),
+grid (16), loader (18), accounts (12), map templates (11), cli (10), ink (9),
 map templates (9), locks (9), markup (6), dungeon (4), world (1).
 
 Softcode tests also discover and run `*.test.luau` files from the game

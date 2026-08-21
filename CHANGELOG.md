@@ -109,6 +109,17 @@ delta against a previous version.
 
 ### Fixed
 
+- **Editing a program file alone was invisible to change detection.** `.luau`
+  files were hashed only for areas whose TOML had already been marked changed,
+  so editing a program without touching its area file was never noticed and
+  stale code kept running after a restart. `[[scripts]]` program files were
+  never hashed at all, since the walk covered rooms and objects only. Hashes
+  are now taken for every referenced program file before the skip decision, so
+  a changed program de-skips its area — and a skipped area carries its hashes
+  forward instead of dropping them, which had been shrinking the persisted set
+  on every warm boot. Harmless while boot always reloaded everything; a silent
+  correctness bug once boot began honouring the skip.
+
 - **Every boot re-read and reinstalled the whole game directory.**
   `load_game_dir` already skips files whose content hash is unchanged, which is
   why `@reload-world` is cheap — but `Engine::new` passed an empty

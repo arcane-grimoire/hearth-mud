@@ -57,6 +57,20 @@ fn managed_tag() -> Tag {
 /// drop only the ownership and reconcile semantics layered on top of it."
 pub(crate) const FILE_KEY_ATTR: &str = "_file_key";
 
+/// Every [`ProgramSource`] an area file references, across rooms, objects,
+/// and scripts.
+///
+/// Scripts matter here: the old change-detection walked rooms and objects
+/// only, so a `[[scripts]]` program file was invisible in the same way a
+/// room's was.
+fn referenced_program_files(area: &AreaFile) -> impl Iterator<Item = &ProgramSource> {
+    area.rooms
+        .iter()
+        .flat_map(|r| r.programs.values())
+        .chain(area.objects.iter().flat_map(|o| o.programs.values()))
+        .chain(area.scripts.iter().map(|s| &s.source))
+}
+
 /// Rebuild the `<area>/<key>` → dbref map from a world, without reading any
 /// files.
 ///
@@ -275,18 +289,13 @@ pub fn load_game_dir(
     for path in &area_files {
         let contents = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-        let hash = hash_content(&contents);
-        let unchanged = prev_hashes.get(path) == Some(&hash);
-        new_hashes.insert(path.clone(), hash);
+        let toml_hash = hash_content(&contents);
 
-        if unchanged {
-            skipped_files.push(path.clone());
-            continue;
-        }
-
-        let relative = path.strip_prefix(game_dir).unwrap_or(path);
-        changed_files.push(relative.display().to_string());
-
+        // Parsed unconditionally, even for an area that turns out unchanged.
+        // Whether it can be skipped depends on the program files it
+        // references, and there is no way to know what those are without
+        // reading it. Parsing is cheap; installing into the world is not, and
+        // installing is what the skip actually saves.
         let area_file: AreaFile = toml::from_str(&contents)
             .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
         let area_name = area_file.area.clone().unwrap_or_else(|| {
@@ -296,6 +305,54 @@ pub fn load_game_dir(
                 .to_string()
         });
         let base_dir = path.parent().unwrap_or(game_dir).to_path_buf();
+
+        // Hash every program file this area references, whether or not the
+        // TOML changed. Hashing them only for already-changed areas is what
+        // made a bare `.luau` edit invisible — the most common edit there is —
+        // and what dropped those hashes from the persisted set on a warm load.
+        let mut program_hashes: Vec<(PathBuf, String)> = Vec::new();
+        for source in referenced_program_files(&area_file) {
+            if let ProgramSource::File { file } = source {
+                let program_path = base_dir.join(file);
+                if program_path.exists()
+                    && let Ok(program_contents) = std::fs::read_to_string(&program_path)
+                {
+                    program_hashes.push((program_path, hash_content(&program_contents)));
+                }
+            }
+        }
+
+        let toml_unchanged = prev_hashes.get(path) == Some(&toml_hash);
+        let programs_unchanged = program_hashes
+            .iter()
+            .all(|(p, h)| prev_hashes.get(p) == Some(h));
+
+        if !toml_unchanged {
+            let relative = path.strip_prefix(game_dir).unwrap_or(path);
+            changed_files.push(relative.display().to_string());
+        }
+        for (p, h) in &program_hashes {
+            if prev_hashes.get(p) != Some(h) {
+                let relative = p.strip_prefix(game_dir).unwrap_or(p);
+                let name = relative.display().to_string();
+                if !changed_files.contains(&name) {
+                    changed_files.push(name);
+                }
+            }
+        }
+
+        // Recorded before the skip, so a skipped area still carries its
+        // hashes forward instead of shrinking the persisted set each boot.
+        new_hashes.insert(path.clone(), toml_hash);
+        for (p, h) in program_hashes {
+            new_hashes.insert(p, h);
+        }
+
+        if toml_unchanged && programs_unchanged {
+            skipped_files.push(path.clone());
+            continue;
+        }
+
         parsed.push(ParsedArea {
             area_name,
             base_dir,
@@ -500,31 +557,6 @@ pub fn load_game_dir(
             installed_programs.extend(install_programs(&mut obj, &programs, &area.base_dir)?);
             world.add_object(obj);
             created += 1;
-        }
-    }
-
-    // Also hash .luau files referenced by programs in changed areas
-    for area in &parsed {
-        for programs in area.file.rooms.iter().flat_map(|r| std::iter::once(&r.programs))
-            .chain(area.file.objects.iter().map(|o| &o.programs))
-        {
-            for source in programs.values() {
-                if let ProgramSource::File { file } = source {
-                    let path = area.base_dir.join(file);
-                    if path.exists()
-                        && let Ok(contents) = std::fs::read_to_string(&path) {
-                            let hash = hash_content(&contents);
-                            if prev_hashes.get(&path) != Some(&hash) {
-                                let relative = path.strip_prefix(game_dir).unwrap_or(&path);
-                                let name = relative.display().to_string();
-                                if !changed_files.contains(&name) {
-                                    changed_files.push(name);
-                                }
-                            }
-                            new_hashes.insert(path, hash);
-                        }
-                }
-            }
         }
     }
 
@@ -1304,6 +1336,94 @@ mod tests {
     /// dropped players into it instead of the real one. The identity is
     /// already on each object and persists with it, so the map can be
     /// rebuilt from a world loaded straight from the database.
+    /// Editing a program file without touching its area TOML is the single
+    /// most common thing a developer does, and it was invisible to change
+    /// detection: `.luau` files were only hashed for areas that had already
+    /// been marked changed, so the edit was never seen and stale code kept
+    /// running. Harmless while boot always reloaded everything; a silent
+    /// correctness bug once boot started honouring the skip.
+    #[test]
+    fn editing_only_a_program_file_is_detected() {
+        let dir = TempGameDir::new();
+        dir.write_area(
+            "town",
+            "town.toml",
+            r#"
+            area = "town"
+            [[rooms]]
+            key = "square"
+            title = "The Square"
+            [rooms.programs]
+            on_enter = { file = "greet.luau" }
+            "#,
+        );
+        std::fs::write(
+            dir.path.join("town").join("greet.luau"),
+            "function on_enter(this, actor, room) end",
+        )
+        .unwrap();
+
+        let mut world = World::new();
+        let first = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+
+        // Only the program file changes. The area TOML is untouched.
+        std::fs::write(
+            dir.path.join("town").join("greet.luau"),
+            "function on_enter(this, actor, room) emit(actor, \"hello\") end",
+        )
+        .unwrap();
+
+        let second = load_game_dir(&dir.path, &mut world, &first.file_hashes).unwrap();
+
+        let room = world
+            .objects
+            .values()
+            .find(|o| o.key == "square")
+            .expect("room should exist");
+        let program = crate::softcode::hooks::get_program(room, "on_enter")
+            .expect("room should still have its program");
+        assert!(
+            program.source.contains("hello"),
+            "the edited program should have been reinstalled, got: {}",
+            program.source
+        );
+        assert_eq!(second.skipped, 0, "a changed program must de-skip its area");
+    }
+
+    /// A warm load must carry every hash forward, not just the ones belonging
+    /// to areas it happened to reinstall — otherwise the persisted set shrinks
+    /// on each boot and the dropped files look changed next time.
+    #[test]
+    fn skipped_areas_still_carry_their_program_hashes_forward() {
+        let dir = TempGameDir::new();
+        dir.write_area(
+            "town",
+            "town.toml",
+            r#"
+            area = "town"
+            [[rooms]]
+            key = "square"
+            title = "The Square"
+            [rooms.programs]
+            on_enter = { file = "greet.luau" }
+            "#,
+        );
+        std::fs::write(
+            dir.path.join("town").join("greet.luau"),
+            "function on_enter(this, actor, room) end",
+        )
+        .unwrap();
+
+        let mut world = World::new();
+        let first = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+        let second = load_game_dir(&dir.path, &mut world, &first.file_hashes).unwrap();
+
+        assert_eq!(
+            second.file_hashes, first.file_hashes,
+            "an unchanged reload must not drop hashes it skipped over"
+        );
+    }
+
     /// The in-process skip was already tested; this is the part that was
     /// missing — carrying it across a restart. Boot used to pass an empty
     /// previous-hash map, so every startup re-read and reinstalled the whole
