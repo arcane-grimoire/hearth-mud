@@ -9,6 +9,66 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## 0.1.0-rc.2 — 2026-08-21
+
+Two resource guards and three bug fixes, one of which was introduced by
+rc.2's own boot-skip change and caught before release.
+
+### Fixed
+
+- **Editing a program file alone was invisible to change detection.** `.luau`
+  files were hashed only for areas whose TOML had already been marked changed,
+  so editing a program without touching its area file was never noticed and
+  stale code kept running after a restart. `[[scripts]]` program files were
+  never hashed at all, since the walk covered rooms and objects only. Hashes
+  are now taken for every referenced program file before the skip decision, so
+  a changed program de-skips its area — and a skipped area carries its hashes
+  forward instead of dropping them, which had been shrinking the persisted set
+  on every warm boot. Harmless while boot always reloaded everything; a silent
+  correctness bug once boot began honouring the skip, immediately below.
+
+- **Every boot re-read and reinstalled the whole game directory.**
+  `load_game_dir` already skips files whose content hash is unchanged, which is
+  why `@reload-world` is cheap — but `Engine::new` passed an empty
+  previous-hash map, so a restart could never skip anything. Hashes are now
+  persisted and restored, so boot skips what has not changed. Hashing moved
+  from `DefaultHasher` to blake3 in the process: the former is explicitly not
+  stable across Rust versions, so persisting it would have made every file look
+  changed after a toolchain bump.
+
+- **`load_world_files = false` broke `spawn_room`.** The `<area>/<key>` → dbref
+  map was built only as a by-product of loading the game directory, so with
+  boot-time file loading off it stayed empty. `spawn_room` then failed to
+  resolve and the engine created a duplicate empty room, landing players in "An
+  empty room. Build your world from here." instead of the real spawn. The
+  identity already lives on each object in `_file_key` and persists with it, so
+  the map is now rebuilt from the loaded world before file loading runs. This
+  made the flag unusable, which is the whole point of it. (`resolve_key` and map
+  `fixed_room` were unaffected — they resolve by scanning the world rather than
+  through the cached map.)
+
+### Security
+
+- **Fork-bomb guard on timers.** At most `OWNER_TIMER_QUOTA` (100) timers may
+  be pending against one owner's objects. A hook that schedules two more of
+  itself is worse than a runaway loop, because `scheduled_hooks` is persisted
+  and so the bomb survives a restart — bouncing the server does not clear it,
+  and the instruction budget is no defence when every individual run is well
+  inside it and only the count grows. Counted against the target's owner rather
+  than whoever scheduled it, so the cap holds however the timer was created;
+  unowned targets are the system layer and exempt. A refused timer is dropped
+  with a warning rather than failing the batch, since effects are delivered
+  after the batch has already been applied.
+
+- **Emit limit.** A builder-authored run may emit at most `EMIT_BATCH_LIMIT`
+  (50) messages. Scoped to a single batch because that is where a runaway loop
+  lives — the instruction budget bounds how long a hook runs but not how much
+  it says. The batch is refused whole rather than truncated, so the reason
+  stays legible. System authority is exempt, since a server-wide announcement
+  legitimately emits once per player. This does not bound a program that emits
+  a few every tick forever; that is a content bug rather than a runaway, and it
+  is visible in play.
+
 ## 0.1.0-rc.1 — 2026-08-21
 
 First tagged release. Everything below is the initial cut rather than a
@@ -109,36 +169,6 @@ delta against a previous version.
 
 ### Fixed
 
-- **Editing a program file alone was invisible to change detection.** `.luau`
-  files were hashed only for areas whose TOML had already been marked changed,
-  so editing a program without touching its area file was never noticed and
-  stale code kept running after a restart. `[[scripts]]` program files were
-  never hashed at all, since the walk covered rooms and objects only. Hashes
-  are now taken for every referenced program file before the skip decision, so
-  a changed program de-skips its area — and a skipped area carries its hashes
-  forward instead of dropping them, which had been shrinking the persisted set
-  on every warm boot. Harmless while boot always reloaded everything; a silent
-  correctness bug once boot began honouring the skip.
-
-- **Every boot re-read and reinstalled the whole game directory.**
-  `load_game_dir` already skips files whose content hash is unchanged, which is
-  why `@reload-world` is cheap — but `Engine::new` passed an empty
-  previous-hash map, so a restart could never skip anything. Hashes are now
-  persisted and restored, so boot skips what has not changed. Hashing moved
-  from `DefaultHasher` to blake3 in the process: the former is explicitly not
-  stable across Rust versions, so persisting it would have made every file look
-  changed after a toolchain bump.
-
-- **`load_world_files = false` broke every file-key lookup.** The
-  `<area>/<key>` → dbref map was built only as a by-product of loading the game
-  directory, so with boot-time file loading off it stayed empty. `spawn_room`
-  then failed to resolve and the engine created a duplicate empty room, landing
-  players in "An empty room. Build your world from here." instead of the real
-  spawn — and `resolve_key` and map `fixed_room` references failed the same
-  way. The identity already lives on each object in `_file_key` and persists
-  with it, so the map is now rebuilt from the loaded world before file loading
-  runs. This made the flag unusable, which is the whole point of it.
-
 - **`on_tick` programs silently discarded their `state` writes.** `run_hook`
   used `Rc::try_unwrap(...).unwrap_or_default()` where the reference count is
   always at least two, so every tick's accumulated state was thrown away
@@ -185,26 +215,6 @@ delta against a previous version.
   someone else's object but can move it into one of their own. That is accepted
   as a social problem rather than a technical one, on the assumption that the
   builder flag goes to people you know.
-
-- **Emit limit.** A builder-authored run may emit at most `EMIT_BATCH_LIMIT`
-  (50) messages. Scoped to a single batch because that is where a runaway loop
-  lives — the instruction budget bounds how long a hook runs but not how much
-  it says. The batch is refused whole rather than truncated, so the reason
-  stays legible. System authority is exempt, since a server-wide announcement
-  legitimately emits once per player. This does not bound a program that emits
-  a few every tick forever; that is a content bug rather than a runaway, and it
-  is visible in play.
-
-- **Fork-bomb guard on timers.** At most `OWNER_TIMER_QUOTA` (100) timers may
-  be pending against one owner's objects. A hook that schedules two more of
-  itself is worse than a runaway loop, because `scheduled_hooks` is persisted
-  and so the bomb survives a restart — bouncing the server does not clear it,
-  and the instruction budget is no defence when every individual run is well
-  inside it and only the count grows. Counted against the target's owner rather
-  than whoever scheduled it, so the cap holds however the timer was created;
-  unowned targets are the system layer and exempt. A refused timer is dropped
-  with a warning rather than failing the batch, since effects are delivered
-  after the batch has already been applied.
 
 - **Creation quota.** One owner may hold at most `OWNER_OBJECT_QUOTA` (500)
   objects; `Spawn` and `CreateExit` are refused past it. A ceiling on the total
