@@ -212,6 +212,18 @@ pub(crate) struct ParsedArea {
 /// docs/plans/program-authoring.md Stage 4) — this keeps both readers
 /// backed by the exact same struct definitions rather than two formats that
 /// could drift.
+/// Map + terrain sources (`terrain.toml`, `maps/<name>.toml`) share the game
+/// directory with area files but are owned by `map_template` / the
+/// `file_sources` table, not world content. The area walk skips them: they
+/// would otherwise parse as empty `AreaFile`s (no `deny_unknown_fields`), and
+/// worse, one malformed map file would abort the *entire* world-content load
+/// (`load_game_dir` propagates the first parse error) — a real risk now that
+/// `@export`/edit/`@import` makes hand-editing map files a supported workflow.
+pub(crate) fn is_map_source_path(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n == "terrain.toml")
+        || path.parent().and_then(|p| p.file_name()).is_some_and(|n| n == "maps")
+}
+
 pub(crate) fn parse_area_dir(dir: &Path) -> Result<Vec<ParsedArea>, String> {
     if !dir.exists() {
         return Err(format!("Directory not found: {}", dir.display()));
@@ -222,6 +234,9 @@ pub(crate) fn parse_area_dir(dir: &Path) -> Result<Vec<ParsedArea>, String> {
 
     let mut parsed = Vec::new();
     for path in &area_files {
+        if is_map_source_path(path) {
+            continue;
+        }
         let contents = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
         let area_file: AreaFile = toml::from_str(&contents)
@@ -287,6 +302,12 @@ pub fn load_game_dir(
     let mut parsed: Vec<ParsedArea> = Vec::new();
     let mut skipped_files: Vec<PathBuf> = Vec::new();
     for path in &area_files {
+        // Map/terrain sources ride the same directory but are owned by the
+        // `file_sources` table — never world content, and never allowed to
+        // abort the world-content load. See `is_map_source_path`.
+        if is_map_source_path(path) {
+            continue;
+        }
         let contents = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
         let toml_hash = hash_content(&contents);
@@ -833,6 +854,27 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn area_walk_skips_maps_and_terrain_and_survives_a_bad_map_file() {
+        let dir = TempGameDir::new();
+        dir.write_area(
+            "town",
+            "town.toml",
+            "area = \"town\"\n[[rooms]]\nkey = \"square\"\ntitle = \"Square\"\n",
+        );
+        // A malformed map file must NOT abort the whole world-content load —
+        // it isn't world content at all. Owned by the file_sources table.
+        dir.write_area("maps", "iron_hills.toml", "this is not valid toml [[[");
+        dir.write_area("", "terrain.toml", "[terrain.f]\ntheme = \"forest\"\n");
+
+        let parsed = parse_area_dir(&dir.path)
+            .expect("a malformed map file must not abort the area walk");
+        let areas: Vec<&str> = parsed.iter().map(|a| a.area_name.as_str()).collect();
+        assert!(areas.contains(&"town"));
+        assert!(!areas.contains(&"iron_hills"), "maps/*.toml is not an area");
+        assert!(!areas.contains(&"terrain"), "terrain.toml is not an area");
     }
 
     #[test]
