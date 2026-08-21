@@ -723,6 +723,23 @@ pub fn export_file_sources(
     let mut rels: Vec<&String> = sources.keys().collect();
     rels.sort();
     for rel in rels {
+        // Defense in depth: the write must stay inside `path`. `Path::join`
+        // with an absolute component *replaces* the base, and `..` traverses
+        // out — so a row whose key is absolute or has any non-`Normal`
+        // component could turn @export into a write-anywhere primitive. Guard
+        // it at the dangerous operation rather than trusting every upstream
+        // writer (seed / put_map / put_terrain today, themes + ink to come).
+        // No legitimate key is ever anything but `terrain.toml` /
+        // `maps/<name>.toml`.
+        let relp = Path::new(rel);
+        if relp.is_absolute()
+            || relp
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            tracing::warn!(path = %rel, "refusing to export a file source with an unsafe path");
+            continue;
+        }
         let dest = path.join(rel);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
@@ -1299,6 +1316,23 @@ mod tests {
             std::fs::read_to_string(dir.path.join("maps/iron_hills.toml")).unwrap(),
             sources["maps/iron_hills.toml"]
         );
+    }
+
+    #[test]
+    fn export_file_sources_refuses_paths_that_escape_the_dir() {
+        let dir = TempDir::new();
+        let mut sources = std::collections::HashMap::new();
+        sources.insert("maps/ok.toml".to_string(), "ok".to_string());
+        // A poisoned key must never reach disk outside `dir`, whatever shape
+        // it takes — absolute, parent traversal, or traversal mid-path.
+        sources.insert("../escape.toml".to_string(), "no".to_string());
+        sources.insert("/tmp/hearth-abs-escape.toml".to_string(), "no".to_string());
+        sources.insert("a/../../escape2.toml".to_string(), "no".to_string());
+        let written = super::export_file_sources(&dir.path, &sources).unwrap();
+        // Only the safe in-dir path is written; every escaping key is refused.
+        assert_eq!(written, vec!["maps/ok.toml".to_string()]);
+        assert!(!dir.path.parent().unwrap().join("escape.toml").exists());
+        assert!(!std::path::Path::new("/tmp/hearth-abs-escape.toml").exists());
     }
 
     fn town_toml(crossroads_desc: &str) -> String {
