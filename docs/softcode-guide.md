@@ -643,6 +643,11 @@ Modules can require other modules (transitive deps). Module return values are
 cached — the source only runs once per engine lifetime. Cache clears on
 `@reload-world`.
 
+Circular requires are rejected rather than looping forever. If `a` requires
+`b` and `b` requires `a`, the inner call errors with
+`require cycle detected: a -> b -> a`. Break the cycle by extracting the
+shared piece into a third module.
+
 Modules have stdlib access (string, table, math, require) but **not** the
 game write API (emit, set_attr, etc.). They're for pure utility code.
 

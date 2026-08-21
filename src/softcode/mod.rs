@@ -618,6 +618,9 @@ pub struct SoftcodeRuntime {
 
 const MODULE_SOURCES_KEY: &str = "_hearth_module_sources";
 const MODULE_CACHE_KEY: &str = "_hearth_module_cache";
+/// Array of module names currently mid-`require`, innermost last. Used to
+/// detect cycles and to render the chain in the error message.
+const MODULE_LOADING_KEY: &str = "_hearth_module_loading";
 
 impl SoftcodeRuntime {
     pub fn new() -> Self {
@@ -628,6 +631,9 @@ impl SoftcodeRuntime {
         let cache = lua.create_table().expect("create module cache table");
         lua.set_named_registry_value(MODULE_CACHE_KEY, cache)
             .expect("store module cache");
+        let loading = lua.create_table().expect("create module loading table");
+        lua.set_named_registry_value(MODULE_LOADING_KEY, loading)
+            .expect("store module loading stack");
 
         Self::install_require(&lua);
         crate::grid::Grid2D::install_globals(&lua);
@@ -657,13 +663,26 @@ impl SoftcodeRuntime {
                     mlua::Error::RuntimeError(format!("module '{}' not found", name))
                 })?;
 
+                let loading: mlua::Table =
+                    lua.named_registry_value(MODULE_LOADING_KEY)?;
+                if let Some(chain) = cycle_chain(&loading, &name)? {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "require cycle detected: {}",
+                        chain
+                    )));
+                }
+
                 let chunk = lua.load(&source).set_name(&name).into_function()?;
                 let env = lua.create_table()?;
                 let mt = lua.create_table()?;
                 mt.set("__index", lua.globals())?;
                 env.set_metatable(Some(mt));
                 chunk.set_environment(env)?;
-                let result = chunk.call::<LuaValue>(())?;
+
+                loading.push(name.as_str())?;
+                let result = chunk.call::<LuaValue>(());
+                loading.pop::<LuaValue>()?;
+                let result = result?;
 
                 let result = if result == LuaValue::Nil {
                     LuaValue::Boolean(true)
@@ -692,6 +711,11 @@ impl SoftcodeRuntime {
             .named_registry_value(MODULE_CACHE_KEY)
             .expect("module cache table");
         clear_table(&cache);
+        let loading: mlua::Table = self
+            .lua
+            .named_registry_value(MODULE_LOADING_KEY)
+            .expect("module loading table");
+        clear_table(&loading);
     }
 
     fn source_hash(source: &str) -> u64 {
@@ -963,6 +987,27 @@ impl SoftcodeRuntime {
             state: new_state,
         })
     }
+}
+
+/// If `name` is already on the `loading` stack, render the cycle as
+/// `a -> b -> a`. Returns `None` when there's no cycle.
+fn cycle_chain(loading: &mlua::Table, name: &str) -> mlua::Result<Option<String>> {
+    let mut chain: Vec<String> = Vec::new();
+    let mut found = false;
+    for entry in loading.clone().sequence_values::<String>() {
+        let entry = entry?;
+        if entry == name {
+            found = true;
+        }
+        if found {
+            chain.push(entry);
+        }
+    }
+    if !found {
+        return Ok(None);
+    }
+    chain.push(name.to_string());
+    Ok(Some(chain.join(" -> ")))
 }
 
 fn clear_table(t: &mlua::Table) {
@@ -2189,6 +2234,138 @@ mod tests {
             .expect_err("should fail on missing module");
 
         assert!(matches!(err, SoftcodeError::Runtime(_)));
+    }
+
+    #[test]
+    fn require_cycle_errors_instead_of_recursing() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let mut modules = HashMap::new();
+        modules.insert("a".into(), r#"local b = require("b") return {}"#.into());
+        modules.insert("b".into(), r#"local a = require("a") return {}"#.into());
+        runtime.load_modules(modules);
+
+        let program = ProgramRecord::new(
+            "on_get",
+            r#"
+                function on_get(this, actor, room)
+                    require("a")
+                end
+            "#,
+        );
+
+        let err = runtime
+            .run_hook(
+                &world,
+                &program,
+                "#5",
+                "#3",
+                Some("#1"),
+                None,
+                Budget::default(),
+                counter(&world),
+                &test_themes(), &test_map_templates(), &[], 0,
+            )
+            .expect_err("cycle should be an error");
+
+        match err {
+            SoftcodeError::Runtime(msg) => {
+                assert!(
+                    msg.contains("require cycle detected: a -> b -> a"),
+                    "unexpected message: {}",
+                    msg
+                );
+            }
+            other => panic!("expected runtime error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn require_self_cycle_errors() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let mut modules = HashMap::new();
+        modules.insert("solo".into(), r#"return require("solo")"#.into());
+        runtime.load_modules(modules);
+
+        let program = ProgramRecord::new(
+            "on_get",
+            r#"
+                function on_get(this, actor, room)
+                    require("solo")
+                end
+            "#,
+        );
+
+        let err = runtime
+            .run_hook(
+                &world,
+                &program,
+                "#5",
+                "#3",
+                Some("#1"),
+                None,
+                Budget::default(),
+                counter(&world),
+                &test_themes(), &test_map_templates(), &[], 0,
+            )
+            .expect_err("self-cycle should be an error");
+
+        match err {
+            SoftcodeError::Runtime(msg) => {
+                assert!(msg.contains("require cycle detected: solo -> solo"), "{}", msg)
+            }
+            other => panic!("expected runtime error, got {:?}", other),
+        }
+    }
+
+    /// A failed require must not leave the module on the loading stack, or
+    /// every later require of it would look like a cycle.
+    #[test]
+    fn require_recovers_after_module_error() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let mut modules = HashMap::new();
+        modules.insert("boom".into(), r#"error("kaboom")"#.into());
+        runtime.load_modules(modules);
+
+        let program = ProgramRecord::new(
+            "on_get",
+            r#"
+                function on_get(this, actor, room)
+                    local ok1 = pcall(function() require("boom") end)
+                    local ok2, err2 = pcall(function() require("boom") end)
+                    set_attr(this, "second", tostring(err2))
+                end
+            "#,
+        );
+
+        let result = runtime
+            .run_hook(
+                &world,
+                &program,
+                "#5",
+                "#3",
+                Some("#1"),
+                None,
+                Budget::default(),
+                counter(&world),
+                &test_themes(), &test_map_templates(), &[], 0,
+            )
+            .expect("hook should run");
+
+        let mut world = world;
+        apply_batch(&mut world, &result.batch).unwrap();
+        let second = world.get("#5").unwrap().attrs["second"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            !second.contains("require cycle"),
+            "stale loading entry leaked: {}",
+            second
+        );
+        assert!(second.contains("kaboom"), "unexpected error: {}", second);
     }
 
     #[test]
