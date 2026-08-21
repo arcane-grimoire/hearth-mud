@@ -247,13 +247,13 @@ pub fn read_map_source_files(game_dir: &Path) -> Vec<(String, String)> {
     if let Ok(entries) = std::fs::read_dir(game_dir.join("maps")) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|e| e == "toml") {
-                if let (Some(name), Ok(c)) = (
+            if path.extension().is_some_and(|e| e == "toml")
+                && let (Some(name), Ok(c)) = (
                     path.file_name().and_then(|s| s.to_str()),
                     std::fs::read_to_string(&path),
-                ) {
-                    out.push((format!("maps/{}", name), c));
-                }
+                )
+            {
+                out.push((format!("maps/{}", name), c));
             }
         }
     }

@@ -9,8 +9,10 @@ Programs, applied to map templates and the terrain palette.
 
 ## What shipped in this branch
 
-- **Map + terrain sources are DB-owned.** A new `map_sources(path, toml)` table
+- **Map + terrain sources are DB-owned.** A new `file_sources(path, toml)` table
   holds `terrain.toml` and every `maps/<name>.toml` by game-dir-relative path.
+  (Named generically on purpose — themes and ink can share it later without a
+  `map_`-prefixed table holding non-map content.)
 - **Files seed, the DB owns.** At boot, on-disk `maps/*.toml` + `terrain.toml`
   are seeded into the DB with `INSERT OR IGNORE` — a fresh database gets the
   image's content, but files never overwrite what the DB already holds. The
@@ -42,41 +44,54 @@ Programs, applied to map templates and the terrain palette.
   validates the palette before touching the DB; a parse error is returned, not
   written.
 
-## The one open question for review — seed-if-absent vs. load_world_files
+## seed-if-absent, and the update gap it leaves
 
 World content re-installs from files on every boot when `load_world_files` is
-true (files win; the DB is truth only when the flag is off). This branch takes a
-different stance for maps: **seed-if-absent**, so the DB is authoritative once
-seeded regardless of the flag. That was chosen to make "durable in prod by
+true (files win; the DB is truth only when the flag is off). Maps take the
+**seed-if-absent** stance: the DB is authoritative once seeded, regardless of
+the flag. This isn't a third model — it's `load_world_files = false` semantics
+applied unconditionally, which is where world content is heading now that the
+flag can actually be flipped. So maps aren't diverging; they're standing where
+world content is about to stand. It's also what makes "durable in prod by
 default" true — The Last Stag's deploy re-copies `world/` from the image every
-deploy, so an upsert-on-boot model would clobber builder edits exactly the way
-it clobbers hand-edited world files. The cost: hand-editing a `maps/*.toml` in
-the repo no longer takes effect once that map is in the DB — you edit through
-the builder (or delete the row to reseed). This matches the MUSH/MOO "author
-live, export to files" model and the `@import`/`@export` direction, but it *is*
-a deliberate divergence from world content's flag semantics, and worth a second
-opinion before merge.
+deploy, so an upsert-on-boot model would clobber builder edits the way it
+clobbers hand-edited world files.
+
+The gap is narrower than "files are dead." `INSERT OR IGNORE` is keyed on path,
+so a genuinely **new** map in a later image still seeds — shipping new content
+works. What's blocked is **updating a map already in the DB**: a map fix shipped
+in an image won't apply, and there's no supported path from files into the DB
+short of deleting the row by hand. World content has an answer for exactly this
+(`@import`); maps don't yet. That's why the export/import work below is the
+thing that makes seed-if-absent *complete* rather than a nice-to-have — see
+next.
 
 ## Follow-ons (not in this branch)
 
-- **`@export` should emit maps + terrain**, so the loop is builder → DB →
-  `@export` → `.toml` → commit — one durability story, matching world content.
-  Until then, edits are durable in the DB and can be committed via the builder's
-  Export dialog (copy the TOML into the repo file).
+- **`@import`/`@export` should cover maps + terrain** — this is what closes the
+  update gap above, not just a convenience. `@export` emits the DB sources to
+  `.toml` (builder → DB → export → commit); `@import` brings a changed file back
+  into the DB, reusing the recorded/current/incoming three-way hash `@import`
+  already applies to Programs' conffile problem — a map whose DB copy still
+  matches what was seeded updates silently, one edited in the builder is a
+  conflict to report rather than clobber. With it, maps get world content's full
+  story and `load_world_files` stops needing to mean anything for maps. Until
+  then, builder edits are durable in the DB and can be committed via the
+  builder's Export dialog (copy the TOML into the repo file).
 - **Map picker / rename / delete** actions (`delete_map`).
-- **Themes and ink** want the same DB-backed treatment; `map_sources` could
-  generalize to an authored-source table keyed by path.
+- **Themes and ink** want the same DB-backed treatment; `file_sources` is
+  already the generic authored-source table (keyed by path) they'd share.
 - **Token delivery** — the builder currently takes a pasted admin token
   (`@token create`). A session-scoped handoff from a logged-in web client would
   be smoother.
 
 ## Files
 
-- `src/db.rs` — `map_sources` table + `seed_map_source` / `save_map_source` /
-  `load_map_sources`.
+- `src/db.rs` — `file_sources` table + `seed_file_source` / `save_file_source` /
+  `load_file_sources`.
 - `src/map_template.rs` — `parse_map_template`, `parse_terrain_palette`,
   `validate_terrain_toml`, `read_map_source_files`, `build_templates_from_sources`.
-- `src/engine/mod.rs` — boot seeding + build, `map_sources` field, five actions,
+- `src/engine/mod.rs` — boot seeding + build, `file_sources` field, five actions,
   Admin gate, `rebuild_map_templates`, `valid_map_name`.
 - `src/net/web.rs` — `GET /builder`.
 - `src/net/mapwright.html` — the builder UI (embedded).

@@ -92,7 +92,7 @@ impl Database {
                 path TEXT PRIMARY KEY,
                 hash TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS map_sources (
+            CREATE TABLE IF NOT EXISTS file_sources (
                 path TEXT PRIMARY KEY,
                 toml TEXT NOT NULL
             );",
@@ -335,32 +335,32 @@ impl Database {
 
     /// Map + terrain sources (TOML), keyed by game-dir-relative path
     /// (`"terrain.toml"`, `"maps/<name>.toml"`). The DB owns these once
-    /// seeded — see [`Database::seed_map_source`] / [`Database::save_map_source`].
+    /// seeded — see [`Database::seed_file_source`] / [`Database::save_file_source`].
     ///
     /// Seed a source only if `path` is absent: on-disk files provide the
     /// defaults for a fresh database, but never overwrite content the DB
     /// already owns (builder edits, imports), so map edits survive restart
     /// and redeploy the way world content does.
-    pub fn seed_map_source(&self, path: &str, toml: &str) -> rusqlite::Result<()> {
+    pub fn seed_file_source(&self, path: &str, toml: &str) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT OR IGNORE INTO map_sources (path, toml) VALUES (?1, ?2)",
+            "INSERT OR IGNORE INTO file_sources (path, toml) VALUES (?1, ?2)",
             rusqlite::params![path, toml],
         )?;
         Ok(())
     }
 
     /// Upsert a map source — the builder's write path. The DB now owns it.
-    pub fn save_map_source(&self, path: &str, toml: &str) -> rusqlite::Result<()> {
+    pub fn save_file_source(&self, path: &str, toml: &str) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT INTO map_sources (path, toml) VALUES (?1, ?2)
+            "INSERT INTO file_sources (path, toml) VALUES (?1, ?2)
              ON CONFLICT(path) DO UPDATE SET toml = excluded.toml",
             rusqlite::params![path, toml],
         )?;
         Ok(())
     }
 
-    pub fn load_map_sources(&self) -> rusqlite::Result<HashMap<String, String>> {
-        let mut stmt = self.conn.prepare("SELECT path, toml FROM map_sources")?;
+    pub fn load_file_sources(&self) -> rusqlite::Result<HashMap<String, String>> {
+        let mut stmt = self.conn.prepare("SELECT path, toml FROM file_sources")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
