@@ -249,7 +249,7 @@ pub struct Engine {
     /// (`"terrain.toml"`, `"maps/<name>.toml"`). The builder reads and writes
     /// these; `map_templates` above is the parsed runtime form rebuilt from
     /// them (see `rebuild_map_templates`).
-    map_sources: HashMap<String, String>,
+    file_sources: HashMap<String, String>,
     /// Hooks scheduled to fire in the future via `after(ticks, target, hook)`.
     scheduled_hooks: Vec<ScheduledHook>,
     /// API tokens: hash → info. Both session (ephemeral) and persistent tokens.
@@ -372,16 +372,16 @@ impl Engine {
         // then built from the DB sources, not the filesystem.
         if let Some(dir) = config.game_dir.as_deref() {
             for (path, toml) in crate::map_template::read_map_source_files(std::path::Path::new(dir)) {
-                if let Err(e) = db.seed_map_source(&path, &toml) {
+                if let Err(e) = db.seed_file_source(&path, &toml) {
                     tracing::warn!(error = %e, path = %path, "failed to seed map source");
                 }
             }
         }
-        let map_sources = db.load_map_sources().unwrap_or_else(|e| {
+        let file_sources = db.load_file_sources().unwrap_or_else(|e| {
             tracing::error!(error = %e, "failed to load map sources from DB");
             std::collections::HashMap::new()
         });
-        let map_templates = crate::map_template::build_templates_from_sources(&map_sources);
+        let map_templates = crate::map_template::build_templates_from_sources(&file_sources);
 
         let scheduled_hooks = db.load_scheduled_hooks().unwrap_or_else(|e| {
             tracing::error!(error = %e, "Failed to load scheduled hooks");
@@ -410,7 +410,7 @@ impl Engine {
             game_dir: config.game_dir.clone(),
             themes,
             map_templates,
-            map_sources,
+            file_sources,
             scheduled_hooks,
             api_tokens,
             file_hashes,
@@ -756,7 +756,7 @@ impl Engine {
     /// called after any builder write so `get_map_template`/`instantiate_map`
     /// see the change immediately, no restart.
     fn rebuild_map_templates(&mut self) {
-        self.map_templates = crate::map_template::build_templates_from_sources(&self.map_sources);
+        self.map_templates = crate::map_template::build_templates_from_sources(&self.file_sources);
     }
 
     /// A map name safe to use as `maps/<name>.toml` — bare filename only, no
@@ -1196,7 +1196,7 @@ impl Engine {
             }
             ApiRequest::ListMaps => {
                 let maps: Vec<String> = self
-                    .map_sources
+                    .file_sources
                     .keys()
                     .filter_map(|p| {
                         p.strip_prefix("maps/").and_then(|f| f.strip_suffix(".toml")).map(str::to_string)
@@ -1204,20 +1204,20 @@ impl Engine {
                     .collect::<std::collections::BTreeSet<_>>()
                     .into_iter()
                     .collect();
-                let terrain = self.map_sources.get("terrain.toml").cloned().unwrap_or_default();
+                let terrain = self.file_sources.get("terrain.toml").cloned().unwrap_or_default();
                 ApiResponse::success(serde_json::json!({ "maps": maps, "terrain": terrain }))
             }
             ApiRequest::GetMap { name } => {
                 if !Self::valid_map_name(&name) {
                     return ApiResponse::error("invalid map name");
                 }
-                match self.map_sources.get(&format!("maps/{}.toml", name)) {
+                match self.file_sources.get(&format!("maps/{}.toml", name)) {
                     Some(toml) => ApiResponse::success(serde_json::json!({ "name": name, "toml": toml })),
                     None => ApiResponse::error("no such map"),
                 }
             }
             ApiRequest::GetTerrain => ApiResponse::success(serde_json::json!({
-                "toml": self.map_sources.get("terrain.toml").cloned().unwrap_or_default()
+                "toml": self.file_sources.get("terrain.toml").cloned().unwrap_or_default()
             })),
             ApiRequest::PutMap { name, toml } => {
                 if !Self::valid_map_name(&name) {
@@ -1227,10 +1227,10 @@ impl Engine {
                     return ApiResponse::error(format!("invalid map TOML: {}", e));
                 }
                 let path = format!("maps/{}.toml", name);
-                if let Err(e) = self.db.save_map_source(&path, &toml) {
+                if let Err(e) = self.db.save_file_source(&path, &toml) {
                     return ApiResponse::error(format!("database error: {}", e));
                 }
-                self.map_sources.insert(path, toml);
+                self.file_sources.insert(path, toml);
                 self.rebuild_map_templates();
                 ApiResponse::success(serde_json::json!({ "name": name }))
             }
@@ -1238,10 +1238,10 @@ impl Engine {
                 if let Err(e) = crate::map_template::validate_terrain_toml(&toml) {
                     return ApiResponse::error(format!("invalid terrain TOML: {}", e));
                 }
-                if let Err(e) = self.db.save_map_source("terrain.toml", &toml) {
+                if let Err(e) = self.db.save_file_source("terrain.toml", &toml) {
                     return ApiResponse::error(format!("database error: {}", e));
                 }
-                self.map_sources.insert("terrain.toml".to_string(), toml);
+                self.file_sources.insert("terrain.toml".to_string(), toml);
                 self.rebuild_map_templates();
                 ApiResponse::ok()
             }
