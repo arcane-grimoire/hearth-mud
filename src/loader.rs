@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::softcode::hooks;
+use crate::softcode::hooks::{self, ProgramOrigin};
 use crate::world::{GameObject, Kind, Script, Tag, World};
 
 fn hash_content(content: &str) -> u64 {
@@ -450,6 +450,14 @@ fn sync_managed_tags(obj: &mut GameObject, file_tags: &[String]) {
     obj.tags.insert(managed);
 }
 
+/// Reconcile the file-owned Programs on `obj` against `programs`.
+///
+/// Only [`ProgramOrigin::File`] programs are touched. A Program written
+/// in-game is database-owned: if the files don't name its hook it is a
+/// builder's addition rather than a stale file program, and if they do it is
+/// an override that shadows the file version until the builder removes it.
+/// Reconciling those away would destroy them on every `@reload-world` — and,
+/// because startup loads with no previous file hashes, on every restart.
 fn install_programs(
     obj: &mut GameObject,
     programs: &std::collections::HashMap<String, ProgramSource>,
@@ -457,16 +465,25 @@ fn install_programs(
 ) -> Result<(), String> {
     let stale: Vec<String> = obj
         .programs
-        .keys()
-        .filter(|hook| !programs.contains_key(*hook))
-        .cloned()
+        .iter()
+        .filter(|(hook, record)| {
+            record.origin == ProgramOrigin::File && !programs.contains_key(hook.as_str())
+        })
+        .map(|(hook, _)| hook.clone())
         .collect();
     for hook in stale {
         hooks::remove_program(obj, &hook);
     }
     for (hook, source) in programs {
+        if obj
+            .programs
+            .get(hook)
+            .is_some_and(|record| record.origin == ProgramOrigin::InGame)
+        {
+            continue;
+        }
         let code = source.resolve(base_dir)?;
-        hooks::set_program(obj, hook, code)?;
+        hooks::set_program_with_origin(obj, hook, code, ProgramOrigin::File)?;
     }
     Ok(())
 }
@@ -816,6 +833,139 @@ mod tests {
 
         assert_eq!(key_map2.get("town/crossroads"), Some(&ref_id));
         assert_eq!(world.get(&ref_id).unwrap().description, "New description.");
+    }
+
+    /// A room with one inline program, so tests can vary just the parts they
+    /// care about.
+    fn area_with_program(description: &str, programs: &str) -> String {
+        format!(
+            r#"
+                area = "town"
+                [[rooms]]
+                key = "crossroads"
+                title = "The Crossroads"
+                description = "{description}"
+                {programs}
+            "#
+        )
+    }
+
+    /// The regression that motivated [`ProgramOrigin`]: a builder's in-game
+    /// program on a managed object used to be reconciled away by any load that
+    /// touched that object — including every startup, which loads with no
+    /// previous file hashes.
+    #[test]
+    fn reload_preserves_in_game_programs_on_managed_objects() {
+        let dir = TempGameDir::new();
+        dir.write_area("town", "town.toml", &area_with_program("Old.", ""));
+
+        let mut world = World::new();
+        let key_map = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap().key_map;
+        let ref_id = key_map.get("town/crossroads").unwrap().clone();
+
+        let obj = world.get_mut(&ref_id).unwrap();
+        hooks::set_program(obj, "cmd_wave", "function cmd_wave() end".into()).unwrap();
+
+        dir.write_area("town", "town.toml", &area_with_program("New.", ""));
+        load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+
+        let obj = world.get(&ref_id).unwrap();
+        assert_eq!(obj.description, "New.", "file-owned fields still reconcile");
+        let program = obj
+            .programs
+            .get("cmd_wave")
+            .expect("in-game program must survive a reload of its object");
+        assert_eq!(program.origin, ProgramOrigin::InGame);
+    }
+
+    /// The other half of the contract — dropping a program from the files must
+    /// still remove it, or the fix would just leak stale programs forever.
+    #[test]
+    fn reload_removes_file_programs_dropped_from_the_files() {
+        let dir = TempGameDir::new();
+        dir.write_area(
+            "town",
+            "town.toml",
+            &area_with_program(
+                "Old.",
+                r#"[rooms.programs.on_enter]
+                   source = "function on_enter() end""#,
+            ),
+        );
+
+        let mut world = World::new();
+        let key_map = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap().key_map;
+        let ref_id = key_map.get("town/crossroads").unwrap().clone();
+        assert_eq!(
+            world.get(&ref_id).unwrap().programs.get("on_enter").unwrap().origin,
+            ProgramOrigin::File,
+        );
+
+        dir.write_area("town", "town.toml", &area_with_program("Old.", ""));
+        load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+
+        assert!(!world.get(&ref_id).unwrap().programs.contains_key("on_enter"));
+    }
+
+    /// An in-game edit to a hook the files also define shadows the file
+    /// version rather than being overwritten by it.
+    #[test]
+    fn in_game_program_shadows_the_file_version() {
+        let dir = TempGameDir::new();
+        let toml = area_with_program(
+            "Old.",
+            r#"[rooms.programs.on_enter]
+               source = "function on_enter() return 'from file' end""#,
+        );
+        dir.write_area("town", "town.toml", &toml);
+
+        let mut world = World::new();
+        let key_map = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap().key_map;
+        let ref_id = key_map.get("town/crossroads").unwrap().clone();
+
+        let obj = world.get_mut(&ref_id).unwrap();
+        hooks::set_program(obj, "on_enter", "function on_enter() return 'edited' end".into())
+            .unwrap();
+
+        load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+
+        let program = world.get(&ref_id).unwrap().programs.get("on_enter").unwrap();
+        assert!(program.source.contains("edited"), "file load clobbered the override");
+        assert_eq!(program.origin, ProgramOrigin::InGame);
+    }
+
+    /// Reinstalling a file program on startup must not reset what its
+    /// `on_tick` state has accumulated.
+    #[test]
+    fn reload_preserves_accumulated_program_state() {
+        let dir = TempGameDir::new();
+        dir.write_area(
+            "town",
+            "town.toml",
+            &area_with_program(
+                "Old.",
+                r#"[rooms.programs.on_tick]
+                   source = "function on_tick() end""#,
+            ),
+        );
+
+        let mut world = World::new();
+        let key_map = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap().key_map;
+        let ref_id = key_map.get("town/crossroads").unwrap().clone();
+
+        world
+            .get_mut(&ref_id)
+            .unwrap()
+            .programs
+            .get_mut("on_tick")
+            .unwrap()
+            .state
+            .insert("visits".into(), serde_json::json!(7));
+
+        load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+
+        let program = world.get(&ref_id).unwrap().programs.get("on_tick").unwrap();
+        assert_eq!(program.state.get("visits"), Some(&serde_json::json!(7)));
     }
 
     #[test]

@@ -99,6 +99,28 @@ pub fn describe_hook(name: &str) -> &'static str {
     }
 }
 
+/// Where a Program's source came from — which authority owns it.
+///
+/// The loader reconciles only [`ProgramOrigin::File`] programs against the
+/// game files. [`ProgramOrigin::InGame`] programs are database-owned: they
+/// survive `@reload-world` and restarts, and a file load never deletes or
+/// overwrites one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgramOrigin {
+    /// Installed from a TOML definition or `.luau` file under `game_dir`.
+    ///
+    /// This is the *deserialization* default so that programs stored before
+    /// provenance existed stay under loader management — on a managed object
+    /// they can only have come from files, because every startup reconciled
+    /// them away otherwise. Records written since always set the field.
+    #[default]
+    File,
+    /// Written at runtime — `@program`, the REST API, or softcode's
+    /// `set_program`.
+    InGame,
+}
+
 /// A Program stored on an Object under a Hook name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgramRecord {
@@ -107,15 +129,28 @@ pub struct ProgramRecord {
     pub enabled: bool,
     #[serde(default)]
     pub state: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub origin: ProgramOrigin,
 }
 
 impl ProgramRecord {
+    /// A new in-game Program. File-loaded programs come from
+    /// [`ProgramRecord::from_file`].
     pub fn new(hook: impl Into<String>, source: impl Into<String>) -> Self {
         Self {
             hook: hook.into(),
             source: source.into(),
             enabled: true,
             state: HashMap::new(),
+            origin: ProgramOrigin::InGame,
+        }
+    }
+
+    /// A new Program owned by the game files, subject to loader reconciliation.
+    pub fn from_file(hook: impl Into<String>, source: impl Into<String>) -> Self {
+        Self {
+            origin: ProgramOrigin::File,
+            ..Self::new(hook, source)
         }
     }
 }
@@ -127,6 +162,21 @@ impl ProgramRecord {
 /// [`crate::softcode::SoftcodeRuntime::check_syntax`] first so builders get a
 /// syntax error instead of a silently broken program.
 pub fn set_program(obj: &mut GameObject, hook: &str, source: String) -> Result<(), String> {
+    set_program_with_origin(obj, hook, source, ProgramOrigin::InGame)
+}
+
+/// Attach (or replace) a Program on `obj` at `hook`, recording where the
+/// source came from.
+///
+/// Replacing a Program preserves the accumulated per-program `state` map —
+/// rewriting the source of an `on_tick` hook shouldn't reset what it has been
+/// remembering, and the loader reinstalls file programs on every startup.
+pub fn set_program_with_origin(
+    obj: &mut GameObject,
+    hook: &str,
+    source: String,
+    origin: ProgramOrigin,
+) -> Result<(), String> {
     if !is_valid_hook_name(hook) {
         return Err(format!(
             "Unknown hook '{}'. Known hooks: {}, or cmd_<name>.",
@@ -134,8 +184,15 @@ pub fn set_program(obj: &mut GameObject, hook: &str, source: String) -> Result<(
             KNOWN_HOOKS.join(", ")
         ));
     }
-    obj.programs
-        .insert(hook.to_string(), ProgramRecord::new(hook, source));
+    let state = obj
+        .programs
+        .get(hook)
+        .map(|prev| prev.state.clone())
+        .unwrap_or_default();
+    let mut record = ProgramRecord::new(hook, source);
+    record.origin = origin;
+    record.state = state;
+    obj.programs.insert(hook.to_string(), record);
     Ok(())
 }
 
