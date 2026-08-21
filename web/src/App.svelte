@@ -4,6 +4,9 @@
   import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
   import SettingsIcon from '@lucide/svelte/icons/settings';
   import DatabaseIcon from '@lucide/svelte/icons/database';
+  import MapIcon from '@lucide/svelte/icons/map';
+  import WrenchIcon from '@lucide/svelte/icons/wrench';
+  import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
   import Output from './components/Output.svelte';
   import InputBar from './components/InputBar.svelte';
   import Sidebar from './components/Sidebar.svelte';
@@ -23,6 +26,8 @@
   let editingEntity = $state(null);
   let settingsOpen = $state(false);
   let adminOpen = $state(false);
+  let mapsOpen = $state(false);
+  let toolsOpen = $state(false);
   let ws;
   let reconnectTimer;
 
@@ -91,13 +96,19 @@
   }
 
   function sendCommand(cmd) { handleCommand(cmd); }
-  function openEditor(entity) { editingEntity = entity; adminOpen = false; }
+  function openEditor(entity) { editingEntity = entity; adminOpen = false; mapsOpen = false; }
   function closeEditor() { editingEntity = null; }
-  function toggleAdmin() { adminOpen = !adminOpen; editingEntity = null; }
+  function toggleAdmin() { adminOpen = !adminOpen; editingEntity = null; mapsOpen = false; toolsOpen = false; }
+  function openMaps() { mapsOpen = true; adminOpen = false; editingEntity = null; toolsOpen = false; }
+  function closeMaps() { mapsOpen = false; }
   function toggleSidebar() { sidebarOpen = !sidebarOpen; }
   function setAutocomplete(val) { autocomplete = val; localStorage.setItem('hearth-autocomplete', val); }
 
   let isBuilder = $derived(scopes.includes('builder') || scopes.includes('admin'));
+  // Map writes are Admin-tier (a PUT writes files on the server), so the Map
+  // builder entry is admin-only — a plain builder would load it and then fail
+  // on save. Reads/Admin panel stay builder-gated.
+  let isAdmin = $derived(scopes.includes('admin'));
   let inputBar;
 
   function handleKeydown(e) {
@@ -128,9 +139,24 @@
     {/snippet}
     {#snippet right()}
       {#if isBuilder}
-        <IconButton ariaLabel="Admin" size="sm" onclick={toggleAdmin}>
-          <DatabaseIcon size={14} />
-        </IconButton>
+        <div class="tools-menu">
+          <IconButton ariaLabel="Builder tools" size="sm" onclick={() => toolsOpen = !toolsOpen}>
+            <WrenchIcon size={14} />
+          </IconButton>
+          {#if toolsOpen}
+            <button class="tools-backdrop" aria-label="Close menu" onclick={() => toolsOpen = false}></button>
+            <div class="tools-dropdown" role="menu">
+              <button class="tools-item" role="menuitem" onclick={toggleAdmin}>
+                <DatabaseIcon size={14} /> World admin
+              </button>
+              {#if isAdmin}
+                <button class="tools-item" role="menuitem" onclick={openMaps}>
+                  <MapIcon size={14} /> Map builder
+                </button>
+              {/if}
+            </div>
+          {/if}
+        </div>
       {/if}
       <IconButton ariaLabel="Settings" size="sm" onclick={() => settingsOpen = true}>
         <SettingsIcon size={14} />
@@ -153,7 +179,16 @@
 
   <div class="main">
     <Output bind:this={output} oncommand={handleCommand} />
-    {#if adminOpen}
+    {#if mapsOpen}
+      <div class="maps-view">
+        <div class="maps-back">
+          <IconButton ariaLabel="Back to game" size="sm" onclick={closeMaps}>
+            <ArrowLeftIcon size={14} />
+          </IconButton>
+        </div>
+        <iframe class="maps-frame" src="/builder?embed=1" title="Map builder"></iframe>
+      </div>
+    {:else if adminOpen}
       <Admin onclose={() => adminOpen = false} />
     {:else if editingEntity}
       <Editor entity={editingEntity} onclose={closeEditor} />
@@ -197,6 +232,34 @@
     display: flex;
     min-height: 0;
   }
+
+  /* builder-tools dropdown in the top bar */
+  .tools-menu { position: relative; display: inline-flex; }
+  .tools-backdrop {
+    position: fixed; inset: 0; z-index: 40;
+    background: transparent; border: 0; padding: 0; cursor: default;
+  }
+  .tools-dropdown {
+    position: absolute; top: calc(100% + 6px); right: 0; z-index: 41;
+    min-width: 170px; padding: 4px;
+    display: flex; flex-direction: column; gap: 2px;
+    background: var(--bg-surface);
+    border: var(--border-width) solid var(--border-default);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-md);
+  }
+  .tools-item {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    padding: 7px 9px; border: 0; border-radius: var(--radius-sm);
+    background: transparent; color: var(--text-primary);
+    font-size: var(--font-size-md); text-align: left; cursor: pointer;
+  }
+  .tools-item:hover { background: var(--bg-surface-hover); }
+
+  /* embedded map builder fills the main area; the app supplies the back button */
+  .maps-view { position: relative; flex: 1; min-width: 0; display: flex; }
+  .maps-frame { flex: 1; width: 100%; height: 100%; border: 0; background: var(--bg-primary); }
+  .maps-back { position: absolute; top: 6px; left: 7px; z-index: 5; }
 
   @media (max-width: 700px) {
     .main :global(.sidebar),
