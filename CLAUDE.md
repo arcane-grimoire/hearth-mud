@@ -200,6 +200,19 @@ database — but libs, dialogue, themes, maps, and terrain are all missing, so
 anything touching them breaks at runtime rather than at startup. "The database
 is the source of truth" means world content, not code and spatial data.
 
+**`game_dir` is image content and read-only at runtime. Anything a user can
+edit belongs in the database.** Not merely because a container filesystem is
+ephemeral — a deploy can re-copy the game directory over a mounted volume, so
+even mounting one does not make it writable in practice. (The Last Stag's Fly
+entrypoint does exactly this: `/game/world` → `/data/world` on every deploy.)
+The failure is silent in the worst way — writes succeed, the edit looks saved,
+and it disappears at the next deploy rather than at the next restart, so it
+survives every test that only bounces the process.
+
+This is the general form of the rule the program-authoring plan works out for
+Programs, and it applies to any future editor — maps, themes, ink. If a feature
+lets someone change something from inside the game, its store is the database.
+
 ## Design decisions
 
 See `docs/adr/` (6 ADRs). See `CONTEXT.md` for domain glossary.
