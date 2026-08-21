@@ -80,6 +80,10 @@ header{
 .livedot{font-family:var(--font-mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--good); white-space:nowrap}
 #apiToken{font-family:var(--font-mono); font-size:12px; background:var(--surface-2); border:1px solid var(--warn); color:var(--ink); border-radius:6px; padding:5px 9px; width:150px}
 .hidden{display:none!important}
+/* embedded in the web client: the app frame provides brand + theme, so drop ours */
+body.embedded .brand{display:none}
+body.embedded #btnTheme{display:none}
+body.embedded header{padding-top:9px;padding-bottom:9px;padding-left:48px} /* room for the host's back button */
 .spacer{flex:1}
 .hbtns{display:flex; gap:8px; align-items:center}
 
@@ -1049,7 +1053,20 @@ function toast(t){ const el=$("#toast"); el.textContent=t; el.classList.add("sho
 /* theme toggle */
 function currentTheme(){ const s=document.documentElement.getAttribute("data-theme"); if(s) return s; return matchMedia("(prefers-color-scheme:dark)").matches?"dark":"light"; }
 $("#btnTheme").onclick=()=>{ const n=currentTheme()==="dark"?"light":"dark"; document.documentElement.setAttribute("data-theme",n); try{localStorage.setItem("mapwright:theme",n);}catch(e){} };
-try{const th=localStorage.getItem("mapwright:theme"); if(th) document.documentElement.setAttribute("data-theme",th);}catch(e){}
+/* embed mode: hosted in the web client's iframe (/builder?embed=1) — follow the
+   app's kit-ui theme and drop the redundant brand + theme toggle; standalone,
+   restore our own theme. Auth still falls through to a pasted token if the
+   shared session token (localStorage['hearth_token']) isn't there. */
+const EMBED = new URLSearchParams(location.search).get("embed")==="1";
+try{
+  if(EMBED){
+    document.body.classList.add("embedded");
+    const mode=localStorage.getItem("kit-ui-theme");           // light | dark | system
+    if(mode==="dark"||mode==="light") document.documentElement.setAttribute("data-theme",mode);
+  }else{
+    const th=localStorage.getItem("mapwright:theme"); if(th) document.documentElement.setAttribute("data-theme",th);
+  }
+}catch(e){}
 
 /* keyboard: 1/2/3 tools, esc closes modal */
 window.addEventListener("keydown",e=>{
@@ -1065,7 +1082,7 @@ window.addEventListener("keydown",e=>{
    the {action,...} envelope + a Bearer admin token (writes are Admin-gated). As
    a standalone artifact the probe fails and it silently stays in copy/paste mode. */
 let SERVER=false;
-const getToken=()=>{ try{return localStorage.getItem("mapwright:token")||"";}catch(e){return"";} };
+const getToken=()=>{ try{return localStorage.getItem("hearth_token")||localStorage.getItem("mapwright:token")||"";}catch(e){return"";} };
 const setToken=t=>{ try{localStorage.setItem("mapwright:token",t||"");}catch(e){} };
 async function apiPost(action, params){
   const headers={"Content-Type":"application/json"};
