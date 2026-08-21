@@ -9,6 +9,75 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## 0.1.0-rc.3 — 2026-08-21
+
+The map builder, and the durability loop that makes it safe to use.
+
+### Added
+
+- **DB-backed map builder.** Map and terrain sources live in a `file_sources`
+  table rather than being read from disk on every boot. On-disk `maps/*.toml`
+  and `terrain.toml` seed the table if absent; after that the database is
+  authoritative and edits are made through the builder, served at `/builder`.
+  Writes rebuild the live templates, so a change is visible without a restart.
+
+  Seeding rather than reloading is what makes edits durable in production. A
+  deploy can re-copy the game directory over a mounted volume — The Last Stag's
+  entrypoint does exactly that — so anything read from `game_dir` on each boot
+  is effectively image content, and an edit written there survives restarts and
+  then vanishes on deploy. Seed-if-absent is `load_world_files = false`
+  semantics applied unconditionally, which is where world content is heading.
+
+- **REST actions** `ListMaps`, `GetMap`, `GetTerrain`, `PutMap`, `PutTerrain`.
+  Writes require admin scope, not the generic builder write check, because they
+  write to the server's filesystem. Reads require a token and are deliberately
+  absent from the unauthenticated read set.
+
+- **`@export` covers maps and terrain**, emitting them in game-directory
+  layout alongside world content. That closes the loop — builder, database,
+  export, commit — so map work has a path back into git.
+
+- **`@import` covers maps**, resolving each source through the same three-way
+  comparison world content uses: the hash recorded at seed or last import,
+  the current copy, and the incoming one. Unchanged copies update silently;
+  a locally edited one is a conflict.
+
+  Conflicts **keep the local copy and report**, where a Program conflict
+  overwrites and preserves the replaced version in the version log. The
+  divergence is deliberate: Programs have history to recover from and maps do
+  not, so overwriting a map would be data loss. Unifying the two means giving
+  maps a version history first, then adopting overwrite-and-preserve — never
+  dropping keep-local while maps have no undo.
+
+### Fixed
+
+- **A malformed map or terrain file no longer aborts the entire world load.**
+  Every `.toml` under `game_dir` was walked as a world-content area file, so
+  `maps/*.toml` and `terrain.toml` were parsed as empty areas — harmless until
+  one of them is malformed, at which point the parse error propagates and *no*
+  game content loads at all. Boot logs that and continues, so the server comes
+  up looking healthy with nothing applied. Map sources are now skipped in the
+  area walk. `themes/*.toml` still has the same exposure.
+
+### Security
+
+- **Path traversal is closed at both ends.** Map names accept a bare
+  `[A-Za-z0-9_-]{1,64}` only, which makes a traversal path unrepresentable
+  rather than blocklisted, and the path is always built as `maps/<name>.toml`.
+  `@export` independently refuses to write any source whose stored path is
+  absolute or contains a non-normal component — the check belongs at the write
+  rather than distributed across everything that can insert a row, especially
+  as more writers are planned for that table.
+
+### Documentation
+
+- **`game_dir` is image content and read-only at runtime**; anything a user can
+  edit belongs in the database. Not merely because container filesystems are
+  ephemeral — a deploy re-copying the directory means even a mounted volume is
+  not writable in practice, and the failure is silent in the worst way: writes
+  succeed, survive restarts, and disappear on deploy. This is the general form
+  of the rule the program-authoring plan works out for Programs.
+
 ## 0.1.0-rc.2 — 2026-08-21
 
 Two resource guards and three bug fixes, one of which was introduced by
