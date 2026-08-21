@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::softcode::hooks::{self, ProgramOrigin};
-use crate::world::{GameObject, Kind, Script, Tag, World};
+use crate::world::{GameObject, Kind, Tag, World};
 
 fn hash_content(content: &str) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -21,6 +21,17 @@ pub struct LoadResult {
     pub skipped: u32,
     pub file_hashes: HashMap<PathBuf, u64>,
     pub changed_files: Vec<String>,
+    /// Every `(obj_ref, hook, source)` a file program was actually written
+    /// to during this load (excludes hooks skipped because an in-game edit
+    /// shadows the file version — see `install_programs`). The caller (the
+    /// `Engine`, which owns the `Database` handle) records each of these as
+    /// a program version — see docs/plans/program-authoring.md Stage 3's
+    /// "Which writes get versioned": the loader's file installs are an
+    /// authoring path too, giving a recorded baseline for a future
+    /// package-vs-local comparison. Content-addressed dedupe means
+    /// repeated boot installs of unchanged files cost nothing beyond a
+    /// lookup.
+    pub installed_programs: Vec<(String, String, String)>,
 }
 
 const MANAGED_TAG: Tag = Tag {
@@ -38,100 +49,106 @@ fn managed_tag() -> Tag {
 /// Attr key used to remember an object's `"<area>/<key>"` file identity, so
 /// reloads can find the same managed object again without relying on a
 /// stable ref_id (dbrefs are assigned once, at first creation).
-const FILE_KEY_ATTR: &str = "_file_key";
+///
+/// `pub(crate)`: `@import`/`@export` (`src/import_export.rs`, see
+/// docs/plans/program-authoring.md Stage 4) reuse this exact identity
+/// mechanism rather than inventing a second one — "keep that mechanism and
+/// drop only the ownership and reconcile semantics layered on top of it."
+pub(crate) const FILE_KEY_ATTR: &str = "_file_key";
 
-#[derive(Debug, Deserialize)]
-struct AreaFile {
-    #[serde(default)]
-    area: Option<String>,
-    #[serde(default)]
-    rooms: Vec<RoomDef>,
-    #[serde(default)]
-    objects: Vec<ObjectDef>,
-    #[serde(default)]
-    exits: Vec<ExitDef>,
-    #[serde(default)]
-    scripts: Vec<ScriptDef>,
+/// `pub(crate)` (with `Serialize` added below): `@export` builds these same
+/// structs from live DB objects and serializes them back to TOML, so import
+/// and export share one format definition by construction rather than two
+/// that could drift apart — see docs/plans/program-authoring.md Stage 4.
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct AreaFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) area: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) rooms: Vec<RoomDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) objects: Vec<ObjectDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) exits: Vec<ExitDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) scripts: Vec<ScriptDef>,
 }
 
-#[derive(Debug, Deserialize)]
-struct RoomDef {
-    key: String,
-    title: String,
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct RoomDef {
+    pub(crate) key: String,
+    pub(crate) title: String,
     #[serde(default)]
-    description: String,
-    #[serde(default)]
-    tags: Vec<String>,
-    #[serde(default)]
-    locks: std::collections::HashMap<String, String>,
-    #[serde(default)]
-    programs: std::collections::HashMap<String, ProgramSource>,
+    pub(crate) description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub(crate) locks: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub(crate) programs: std::collections::HashMap<String, ProgramSource>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ObjectDef {
-    key: String,
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ObjectDef {
+    pub(crate) key: String,
     #[serde(default = "default_kind")]
-    kind: String,
+    pub(crate) kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) title: Option<String>,
     #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    location: Option<String>,
-    #[serde(default)]
-    tags: Vec<String>,
-    #[serde(default)]
-    attrs: std::collections::HashMap<String, serde_json::Value>,
-    #[serde(default)]
-    locks: std::collections::HashMap<String, String>,
-    #[serde(default)]
-    programs: std::collections::HashMap<String, ProgramSource>,
+    pub(crate) description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) location: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub(crate) attrs: std::collections::HashMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub(crate) locks: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub(crate) programs: std::collections::HashMap<String, ProgramSource>,
 }
 
 fn default_kind() -> String {
     "item".into()
 }
 
-#[derive(Debug, Deserialize)]
-struct ExitDef {
-    from: String,
-    direction: String,
-    to: String,
-    #[serde(default)]
-    aliases: Vec<String>,
-    #[serde(default)]
-    locks: std::collections::HashMap<String, String>,
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ExitDef {
+    pub(crate) from: String,
+    pub(crate) direction: String,
+    pub(crate) to: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub(crate) locks: std::collections::HashMap<String, String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ScriptDef {
-    name: String,
-    #[serde(default = "default_entry")]
-    entry: String,
+/// A global tick script defined in an area file. Always runs at the
+/// `on_tick` hook — see `install_programs` call site below, where every
+/// `ScriptDef` becomes a `Kind::Code` object's `on_tick` Program.
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ScriptDef {
+    pub(crate) name: String,
     #[serde(default = "default_interval")]
-    interval: u64,
+    pub(crate) interval: u64,
     #[serde(flatten)]
-    source: ProgramSource,
-}
-
-fn default_entry() -> String {
-    "on_tick".into()
+    pub(crate) source: ProgramSource,
 }
 
 fn default_interval() -> u64 {
     1
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
-enum ProgramSource {
+pub(crate) enum ProgramSource {
     File { file: String },
     Inline { source: String },
 }
 
 impl ProgramSource {
-    fn resolve(&self, base_dir: &Path) -> Result<String, String> {
+    pub(crate) fn resolve(&self, base_dir: &Path) -> Result<String, String> {
         match self {
             ProgramSource::File { file } => {
                 let path = base_dir.join(file);
@@ -143,10 +160,49 @@ impl ProgramSource {
     }
 }
 
-struct ParsedArea {
-    area_name: String,
-    base_dir: PathBuf,
-    file: AreaFile,
+pub(crate) struct ParsedArea {
+    pub(crate) area_name: String,
+    pub(crate) base_dir: PathBuf,
+    pub(crate) file: AreaFile,
+}
+
+/// Parse every `.toml` area file under `dir` (recursively, same file
+/// discovery `load_game_dir` uses) into `ParsedArea`s, with no world
+/// interaction and no file-hash skip logic — always a fresh parse of
+/// everything found. Shared by `@import`/`@export`
+/// (`src/import_export.rs`), which read the same TOML+`.luau` format
+/// `load_game_dir` does but apply it under different semantics (see
+/// docs/plans/program-authoring.md Stage 4) — this keeps both readers
+/// backed by the exact same struct definitions rather than two formats that
+/// could drift.
+pub(crate) fn parse_area_dir(dir: &Path) -> Result<Vec<ParsedArea>, String> {
+    if !dir.exists() {
+        return Err(format!("Directory not found: {}", dir.display()));
+    }
+    let mut area_files: Vec<PathBuf> = Vec::new();
+    collect_toml_files(dir, &mut area_files);
+    area_files.sort();
+
+    let mut parsed = Vec::new();
+    for path in &area_files {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+        let area_file: AreaFile = toml::from_str(&contents)
+            .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
+        let area_name = area_file.area.clone().unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string()
+        });
+        let base_dir = path.parent().unwrap_or(dir).to_path_buf();
+        parsed.push(ParsedArea {
+            area_name,
+            base_dir,
+            file: area_file,
+        });
+    }
+    Ok(parsed)
 }
 
 /// Load or reload game content from files.
@@ -182,6 +238,7 @@ pub fn load_game_dir(
             skipped: 0,
             file_hashes: HashMap::new(),
             changed_files: Vec::new(),
+            installed_programs: Vec::new(),
         });
     }
 
@@ -227,6 +284,7 @@ pub fn load_game_dir(
     let managed = managed_tag();
     let mut created = 0u32;
     let mut updated = 0u32;
+    let mut installed_programs: Vec<(String, String, String)> = Vec::new();
 
     // -- Pass 0: seed the key map from already-loaded managed objects, so
     //    reload doesn't hand out new dbrefs for content that already has one.
@@ -270,7 +328,7 @@ pub fn load_game_dir(
                     existing.description = room.description.clone();
                     existing.locks = room.locks.clone();
                     sync_managed_tags(existing, &room.tags);
-                    install_programs(existing, &room.programs, base_dir)?;
+                    installed_programs.extend(install_programs(existing, &room.programs, base_dir)?);
                     updated += 1;
                 }
                 continue;
@@ -285,7 +343,7 @@ pub fn load_game_dir(
             }
             obj.locks = room.locks.clone();
             obj.attrs.insert(FILE_KEY_ATTR.into(), serde_json::json!(file_key));
-            install_programs(&mut obj, &room.programs, base_dir)?;
+            installed_programs.extend(install_programs(&mut obj, &room.programs, base_dir)?);
             world.add_object(obj);
             created += 1;
         }
@@ -315,7 +373,7 @@ pub fn load_game_dir(
                     existing.attrs.extend(object.attrs.clone());
                     existing.locks = object.locks.clone();
                     sync_managed_tags(existing, &object.tags);
-                    install_programs(existing, &object.programs, base_dir)?;
+                    installed_programs.extend(install_programs(existing, &object.programs, base_dir)?);
                     updated += 1;
                 }
                 continue;
@@ -337,7 +395,7 @@ pub fn load_game_dir(
             obj.attrs = object.attrs.clone();
             obj.attrs.insert(FILE_KEY_ATTR.into(), serde_json::json!(file_key));
             obj.locks = object.locks.clone();
-            install_programs(&mut obj, &object.programs, base_dir)?;
+            installed_programs.extend(install_programs(&mut obj, &object.programs, base_dir)?);
             world.add_object(obj);
             created += 1;
         }
@@ -380,19 +438,43 @@ pub fn load_game_dir(
             created += 1;
         }
 
+        // A file-defined global script is a `Kind::Code` object carrying an
+        // `on_tick` Program plus a `tick_interval` attr — the same shape
+        // `@script` produces at runtime (see docs/plans/program-authoring.md
+        // Stage 2). Identified and reconciled the same way rooms/objects/
+        // exits are: a `FILE_KEY_ATTR` identity plus `system:managed`, so
+        // reload updates it in place and an in-game edit to its Program
+        // survives (`install_programs` only touches `ProgramOrigin::File`
+        // programs).
         for script in &area.file.scripts {
-            let source = script.source.resolve(&area.base_dir)?;
-            if let Some(existing) = world.scripts.get_mut(&script.name) {
-                existing.source = source;
-                existing.entry = script.entry.clone();
-                existing.interval = script.interval;
-                updated += 1;
-                continue;
-            }
-            let mut s = Script::new(&script.name, &source);
-            s.entry = script.entry.clone();
-            s.interval = script.interval;
-            world.scripts.insert(script.name.clone(), s);
+            let file_key = format!("{}/script/{}", area_name, script.name);
+            let source = ProgramSource::Inline {
+                source: script.source.resolve(&area.base_dir)?,
+            };
+            let mut programs = std::collections::HashMap::new();
+            programs.insert("on_tick".to_string(), source);
+
+            if let Some(existing_ref) = key_map.get(&file_key).cloned()
+                && let Some(existing) = world.get_mut(&existing_ref) {
+                    if existing.tags.contains(&managed) {
+                        existing.attrs.insert(
+                            "tick_interval".into(),
+                            serde_json::json!(script.interval),
+                        );
+                        installed_programs.extend(install_programs(existing, &programs, &area.base_dir)?);
+                        updated += 1;
+                    }
+                    continue;
+                }
+
+            let ref_id = world.next_dbref();
+            key_map.insert(file_key.clone(), ref_id.clone());
+            let mut obj = GameObject::new(&ref_id, &script.name, Kind::Code);
+            obj.attrs.insert("tick_interval".into(), serde_json::json!(script.interval));
+            obj.tags.insert(managed.clone());
+            obj.attrs.insert(FILE_KEY_ATTR.into(), serde_json::json!(file_key));
+            installed_programs.extend(install_programs(&mut obj, &programs, &area.base_dir)?);
+            world.add_object(obj);
             created += 1;
         }
     }
@@ -437,6 +519,7 @@ pub fn load_game_dir(
         skipped,
         file_hashes: new_hashes,
         changed_files,
+        installed_programs,
     })
 }
 
@@ -458,11 +541,16 @@ fn sync_managed_tags(obj: &mut GameObject, file_tags: &[String]) {
 /// an override that shadows the file version until the builder removes it.
 /// Reconciling those away would destroy them on every `@reload-world` — and,
 /// because startup loads with no previous file hashes, on every restart.
+/// Returns every `(obj_ref, hook, source)` this call actually wrote to a
+/// File-origin Program — the caller threads these into `LoadResult::installed_programs`
+/// so the `Engine` can record a version for each (see docs/plans/program-authoring.md
+/// Stage 3). Hooks skipped because an in-game edit shadows the file version
+/// are not included — they aren't a write.
 fn install_programs(
     obj: &mut GameObject,
     programs: &std::collections::HashMap<String, ProgramSource>,
     base_dir: &Path,
-) -> Result<(), String> {
+) -> Result<Vec<(String, String, String)>, String> {
     let stale: Vec<String> = obj
         .programs
         .iter()
@@ -474,6 +562,7 @@ fn install_programs(
     for hook in stale {
         hooks::remove_program(obj, &hook);
     }
+    let mut installed = Vec::new();
     for (hook, source) in programs {
         if obj
             .programs
@@ -483,9 +572,10 @@ fn install_programs(
             continue;
         }
         let code = source.resolve(base_dir)?;
-        hooks::set_program_with_origin(obj, hook, code, ProgramOrigin::File)?;
+        hooks::set_program_with_origin(obj, hook, code.clone(), ProgramOrigin::File)?;
+        installed.push((obj.ref_id.clone(), hook.clone(), code));
     }
-    Ok(())
+    Ok(installed)
 }
 
 /// Resolve a `"<area>/<key>"` file identity to the dbref the managed object
@@ -508,7 +598,7 @@ pub fn resolve_file_key(world: &World, file_key: &str) -> Option<String> {
 /// Resolve a file-level reference (a bare key like `"crossroads"`, or a
 /// cross-area key like `"forest/edge"`) to the dbref it was assigned in
 /// pass 1/2.
-fn resolve_key(area: &str, reference: &str, key_map: &HashMap<String, String>) -> Result<String, String> {
+pub(crate) fn resolve_key(area: &str, reference: &str, key_map: &HashMap<String, String>) -> Result<String, String> {
     let file_key = if reference.contains('/') {
         reference.to_string()
     } else {
@@ -596,7 +686,7 @@ fn collect_ink_files(base: &Path, dir: &Path, out: &mut HashMap<String, String>)
     }
 }
 
-fn collect_toml_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+pub(crate) fn collect_toml_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -905,6 +995,172 @@ mod tests {
         load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
 
         assert!(!world.get(&ref_id).unwrap().programs.contains_key("on_enter"));
+    }
+
+    /// `[[scripts]]` in an area file becomes a `Kind::Code` object carrying
+    /// an `on_tick` Program and a `tick_interval` attr — the same shape
+    /// `@script` produces at runtime.
+    #[test]
+    fn file_defined_script_becomes_code_object() {
+        let dir = TempGameDir::new();
+        dir.write_area(
+            "town",
+            "town.toml",
+            r#"
+                area = "town"
+
+                [[scripts]]
+                name = "weather"
+                interval = 10
+                source = "function on_tick(this, state, room) end"
+            "#,
+        );
+
+        let mut world = World::new();
+        load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+
+        let script = world
+            .objects
+            .values()
+            .find(|o| o.kind == Kind::Code && o.key == "weather")
+            .expect("file-defined script should become a Kind::Code object");
+        assert_eq!(script.attrs["tick_interval"], serde_json::json!(10));
+        let program = script.programs.get("on_tick").expect("on_tick Program");
+        assert_eq!(program.origin, ProgramOrigin::File);
+        assert!(program.source.contains("function on_tick"));
+    }
+
+    /// `LoadResult::installed_programs` reports every `(obj_ref, hook,
+    /// source)` a file program was actually written to — the caller (the
+    /// `Engine`) threads these into `Database::record_program_version` so
+    /// file installs get a recorded baseline too (see
+    /// docs/plans/program-authoring.md Stage 3's "Which writes get
+    /// versioned"). Covers a room, an object, and a script in one load.
+    #[test]
+    fn load_result_reports_every_installed_program() {
+        let dir = TempGameDir::new();
+        dir.write_area(
+            "town",
+            "town.toml",
+            r#"
+                area = "town"
+
+                [[rooms]]
+                key = "square"
+                title = "Square"
+                [rooms.programs]
+                on_look = { source = "function on_look() end" }
+
+                [[objects]]
+                key = "gem"
+                kind = "item"
+                location = "square"
+                [objects.programs]
+                on_get = { source = "function on_get() end" }
+
+                [[scripts]]
+                name = "weather"
+                source = "function on_tick(this, state, room) end"
+            "#,
+        );
+
+        let mut world = World::new();
+        let result = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+
+        assert_eq!(result.installed_programs.len(), 3);
+        let hooks: std::collections::HashSet<&str> = result
+            .installed_programs
+            .iter()
+            .map(|(_, hook, _)| hook.as_str())
+            .collect();
+        assert!(hooks.contains("on_look"));
+        assert!(hooks.contains("on_get"));
+        assert!(hooks.contains("on_tick"));
+
+        // Every reported obj_ref should resolve to a real object, and the
+        // reported source should match what actually landed on it.
+        for (obj_ref, hook, source) in &result.installed_programs {
+            let obj = world.get(obj_ref).expect("installed_programs obj_ref should resolve");
+            assert_eq!(&obj.programs[hook].source, source);
+        }
+    }
+
+    /// Reloading with unchanged files skips them entirely (existing
+    /// content-hash behavior) — so nothing already installed shows up in
+    /// `installed_programs` again, and repeated boot installs stay free at
+    /// the loader level too, not just via DB-side dedupe.
+    #[test]
+    fn load_result_installed_programs_empty_on_unchanged_reload() {
+        let dir = TempGameDir::new();
+        dir.write_area(
+            "town",
+            "town.toml",
+            r#"
+                area = "town"
+
+                [[rooms]]
+                key = "square"
+                title = "Square"
+                [rooms.programs]
+                on_look = { source = "function on_look() end" }
+            "#,
+        );
+
+        let mut world = World::new();
+        let first = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+        assert_eq!(first.installed_programs.len(), 1);
+
+        let second = load_game_dir(&dir.path, &mut world, &first.file_hashes).unwrap();
+        assert!(second.installed_programs.is_empty());
+    }
+
+    /// Reloading a file-defined script updates its source and interval in
+    /// place (same dbref) and preserves an in-game edit to its Program,
+    /// exactly like `reload_preserves_in_game_programs_on_managed_objects`
+    /// does for ordinary objects.
+    #[test]
+    fn reload_updates_file_script_and_preserves_in_game_override() {
+        let dir = TempGameDir::new();
+        let area = |interval: u64| {
+            format!(
+                r#"
+                area = "town"
+
+                [[scripts]]
+                name = "weather"
+                interval = {interval}
+                source = "function on_tick(this, state, room) end"
+                "#
+            )
+        };
+        dir.write_area("town", "town.toml", &area(10));
+
+        let mut world = World::new();
+        load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+        let ref_id = world
+            .objects
+            .values()
+            .find(|o| o.kind == Kind::Code && o.key == "weather")
+            .unwrap()
+            .ref_id
+            .clone();
+
+        // An in-game edit shadows the file version on reload.
+        let obj = world.get_mut(&ref_id).unwrap();
+        hooks::set_program(obj, "on_tick", "function on_tick(this, state, room) state.x = 1 end".into()).unwrap();
+
+        dir.write_area("town", "town.toml", &area(20));
+        load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+
+        let obj = world.get(&ref_id).unwrap();
+        assert_eq!(
+            obj.attrs["tick_interval"],
+            serde_json::json!(20),
+            "file-owned tick_interval still reconciles"
+        );
+        let program = obj.programs.get("on_tick").unwrap();
+        assert_eq!(program.origin, ProgramOrigin::InGame);
+        assert!(program.source.contains("state.x = 1"), "in-game Program survives reload");
     }
 
     /// An in-game edit to a hook the files also define shadows the file

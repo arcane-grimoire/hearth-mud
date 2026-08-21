@@ -94,6 +94,24 @@ fn parse_tag(spec: &str) -> mlua::Result<Tag> {
     Tag::parse(spec).map_err(mlua::Error::RuntimeError)
 }
 
+/// Refuse writing a `lib_<name>` Program whose `<name>` collides with a
+/// shipped module (embedded stdlib or `<game_dir>/lib`) — loud and early
+/// beats a library silently shadowing `str` server-wide. See
+/// docs/plans/program-authoring.md Stage 2, "`require` resolution".
+fn refuse_if_shipped_lib(lua: &Lua, hook: &str) -> mlua::Result<()> {
+    let Some(name) = hook.strip_prefix("lib_") else {
+        return Ok(());
+    };
+    let sources: Table = lua.named_registry_value(crate::softcode::MODULE_SOURCES_KEY)?;
+    if sources.contains_key(name)? {
+        return Err(mlua::Error::RuntimeError(format!(
+            "set_program: '{}' is a shipped module — choose a different library name",
+            name
+        )));
+    }
+    Ok(())
+}
+
 /// Build the table representation of the Object at `ref_id`, or `nil` if it
 /// doesn't exist. This is a snapshot taken at call time — mutating it in
 /// Lua does not touch the world; only the write API does that.
@@ -468,6 +486,17 @@ pub fn install<'scope, 'env>(
                     out.set(i, object_to_table(lua, obj)?)?;
                     i += 1;
                 }
+            }
+            Ok(out)
+        })?,
+    )?;
+
+    env.set(
+        "all_objects",
+        scope.create_function(move |lua, ()| {
+            let out = lua.create_table()?;
+            for (i, ref_id) in world.objects.keys().enumerate() {
+                out.set(i + 1, ref_id.clone())?;
             }
             Ok(out)
         })?,
@@ -897,6 +926,11 @@ pub fn install<'scope, 'env>(
                     "spawn: cannot spawn kind 'player'".into(),
                 ));
             }
+            if kind == Kind::Code {
+                return Err(mlua::Error::RuntimeError(
+                    "spawn: cannot spawn kind 'code' — use @script/@lib to author scripts and libraries".into(),
+                ));
+            }
             let title: Option<String> = opts.get("title").ok();
             let description: Option<String> = opts.get("description").ok();
             let location: Option<Value> = opts.get("location").ok();
@@ -1019,8 +1053,9 @@ pub fn install<'scope, 'env>(
     let b = Rc::clone(&batch);
     env.set(
         "set_program",
-        scope.create_function(move |_, (r, hook, source): (Value, String, String)| {
+        scope.create_function(move |lua, (r, hook, source): (Value, String, String)| {
             let target = ref_of(&r)?;
+            refuse_if_shipped_lib(lua, &hook)?;
             b.borrow_mut().push(Intent::SetProgram { target, hook, source });
             Ok(())
         })?,
@@ -1342,9 +1377,10 @@ pub fn install<'scope, 'env>(
     let b = Rc::clone(&batch);
     env.set(
         "apply_template",
-        scope.create_function(move |_, (r, template): (Value, Table)| {
+        scope.create_function(move |lua, (r, template): (Value, Table)| {
             let target = ref_of(&r)?;
             for (hook, source) in template.pairs::<String, String>().flatten() {
+                refuse_if_shipped_lib(lua, &hook)?;
                 b.borrow_mut().push(Intent::SetProgram {
                     target: target.clone(),
                     hook,

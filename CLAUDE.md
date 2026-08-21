@@ -18,7 +18,7 @@ are built on. The game (The Last Stag) lives in `../the-last-stag-mud/`.
 ```sh
 cargo run                                    # default config (hearth.toml)
 cargo run -- ../the-last-stag-mud/hearth.toml  # game-specific config
-cargo test                                   # 121 tests
+cargo test                                   # 229 tests
 
 # Web client (Svelte)
 cd web && npm install                        # first time
@@ -83,6 +83,8 @@ src/
   main.rs              tokio entrypoint, wires engine + telnet + web
   accounts.rs          Account, Scope (player/builder/admin), AccountStore
   ansi.rs              BBCode-style markup helpers (room_title, exit_list, etc.)
+  cli.rs               Command-line client (hearth eval/program/import/export)
+  import_export.rs     Bundle install/emit — @import, @export, three-way upgrade
   markup.rs            BBCode → ANSI (telnet) and BBCode → HTML (web) converters
   config.rs            hearth.toml deserialization
   db.rs                SQLite persistence (save/load world + accounts)
@@ -140,7 +142,7 @@ docs/
 
 - **Everything is an object** — rooms, items, NPCs, players, exits all share `GameObject`
 - **32 hooks** — can_get, on_get, can_drop, on_drop, can_put, on_put, can_use, on_use, can_traverse, can_enter, on_enter, on_leave, can_look, on_look, can_say, on_say, can_see, on_move, on_destroy, on_connect, on_disconnect, on_whisper, on_emote, on_receive, on_damage, on_death, on_tick, on_startup, on_shutdown, on_reload, on_save, on_create
-- **77 Luau API functions** — read (20), predicates (9), write (20 incl. emit_data), spatial (4), utility (5), noise (5), seeded RNG (4), coordinate math (6), grid (1), ink (7)
+- **78 Luau API functions** — read (21, incl. all_objects), predicates (9), write (20 incl. emit_data), spatial (4), utility (5), noise (5), seeded RNG (4), coordinate math (6), grid (1), ink (7)
 - **Luau modules** — `require()` loads shared .luau files from `<game_dir>/lib/`
 - **Grid2D userdata** — Rust-backed spatial grid: get/set, A* pathfinding, LOS, FOV, Dijkstra, flood fill
 - **Ownership** — `owner_ref` on every object, auto-set on creation, `@chown` admin command, builder permission enforcement
@@ -186,10 +188,9 @@ See `docs/adr/` (6 ADRs). See `CONTEXT.md` for domain glossary.
 
 ## Testing
 
-130 tests across: accounts (12), db round-trips (7), engine API (8),
-locks DSL (9), softcode (37), ink (9), grid (14), loader (6), dungeon (4),
-theme (1), lock validator (7), map templates (9), markup (6),
-game softcode (1 harness).
+229 tests across: softcode (57), engine (53), db (18), grid (16),
+loader (14), accounts (12), import/export (11), cli (10), ink (9),
+map templates (9), locks (9), markup (6), dungeon (4), world (1).
 
 Softcode tests also discover and run `*.test.luau` files from the game
 directory (21 Luau tests across str and collections modules).

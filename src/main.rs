@@ -4,10 +4,12 @@
 
 mod accounts;
 mod ansi;
+mod cli;
 mod config;
 mod db;
 mod dungeon;
 mod grid;
+mod import_export;
 mod loader;
 mod engine;
 mod locks;
@@ -70,8 +72,32 @@ async fn shutdown_signal() {
     }
 }
 
-#[tokio::main]
-async fn main() {
+/// Dispatches on argv[1]: a known `hearth` CLI subcommand (`eval`,
+/// `program`) runs synchronously against an already-running server and
+/// exits, everything else — including no arguments at all — is the
+/// existing behaviour, unchanged: argv[1] as a config path (or
+/// `hearth.toml` if absent), and the server starts.
+///
+/// This is a plain `fn main`, not `#[tokio::main]`, specifically so the CLI
+/// path never spins up a tokio runtime it has no use for — it makes a
+/// couple of blocking HTTP calls and exits. The server path builds a
+/// runtime itself, matching what `#[tokio::main]` would have set up.
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if let Some(first) = args.first()
+        && cli::is_known_subcommand(first)
+    {
+        std::process::exit(cli::run(&args));
+    }
+
+    let config_path = args.into_iter().next().unwrap_or_else(|| "hearth.toml".into());
+    tokio::runtime::Runtime::new()
+        .expect("Failed to start Tokio runtime")
+        .block_on(run_server(config_path));
+}
+
+async fn run_server(config_path: String) {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -79,9 +105,6 @@ async fn main() {
         )
         .init();
 
-    let config_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "hearth.toml".into());
     let config = Config::load(Path::new(&config_path));
 
     let db = Database::open(Path::new(&config.db_path)).expect("Failed to open database");

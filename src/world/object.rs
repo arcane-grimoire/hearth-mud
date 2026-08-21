@@ -14,6 +14,15 @@ pub enum Kind {
     Npc,
     Player,
     Exit,
+    /// Code, not a physical thing: a global tick script (`on_tick` Program
+    /// plus a `tick_interval` attr), a library (`lib_<name>` Programs,
+    /// requireable via `require("<name>")`), or both at once.
+    ///
+    /// The property this Kind buys is exclusion, not behaviour — a `Code`
+    /// object must never appear in room contents, `look`, inventory,
+    /// `get`/`put`, or a container. See `World::objects_in`, which is the
+    /// single choke point that enforces it.
+    Code,
 }
 
 impl std::fmt::Display for Kind {
@@ -24,6 +33,7 @@ impl std::fmt::Display for Kind {
             Kind::Npc => write!(f, "npc"),
             Kind::Player => write!(f, "player"),
             Kind::Exit => write!(f, "exit"),
+            Kind::Code => write!(f, "code"),
         }
     }
 }
@@ -36,6 +46,7 @@ impl Kind {
             "npc" => Some(Kind::Npc),
             "player" => Some(Kind::Player),
             "exit" => Some(Kind::Exit),
+            "code" => Some(Kind::Code),
             _ => None,
         }
     }

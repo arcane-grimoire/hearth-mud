@@ -69,7 +69,7 @@ pub fn format_look(
                 }
                 Kind::Npc => format!("{} is here.", obj.display_name()),
                 Kind::Item => format!("{}{}{} is here.", ansi::DIM, obj.display_name(), ansi::RESET),
-                Kind::Room | Kind::Exit => continue,
+                Kind::Room | Kind::Exit | Kind::Code => continue,
             };
             out.push_str(&label);
             out.push_str("\r\n");
@@ -375,8 +375,13 @@ pub fn do_help_with_roles(is_builder: bool, is_admin: bool) -> String {
             "  @set <ref>/<attr> = <value>      - Set an attribute\r\n",
             "  @teleport <room_ref>             - Teleport to a room\r\n",
             "  @program <ref>/<hook> = <luau>   - Attach a Luau program to a hook\r\n",
+            "                                     (leave <luau> blank for multi-line entry)\r\n",
             "  @programs [<ref>]                - List programs (default: room)\r\n",
             "  @rmprogram <ref>/<hook>          - Remove a program\r\n",
+            "  @program/history <ref>/<hook>    - List a program's version history\r\n",
+            "  @program/restore <ref>/<hook> <n> - Restore version <n> as a new version\r\n",
+            "  @program/diff <ref>/<hook> <n> [<m>]\r\n",
+            "                                   - Diff version <n> against <m> (or current)\r\n",
             "  @reload <ref>/<hook>             - Re-validate and re-enable a program\r\n",
             "  @tag <ref> = <tag_spec>          - Add a tag\r\n",
             "  @untag <ref> = <tag_spec>        - Remove a tag\r\n",
@@ -384,6 +389,9 @@ pub fn do_help_with_roles(is_builder: bool, is_admin: bool) -> String {
             "  @scripts                        - List global scripts\r\n",
             "  @rmscript <name>                - Remove a global script\r\n",
             "  @script-interval <name> = <N>   - Set tick interval\r\n",
+            "  @lib <name> = <luau>             - Create/update a library\r\n",
+            "  @libs                            - List libraries\r\n",
+            "  @rmlib <name>                    - Remove a library\r\n",
             "  @dialogue <ref> [show|edit|test|clear|export]\r\n",
             "                                   - Manage ink dialogue on an object\r\n",
             "  @test [<path>]                   - Run softcode tests\r\n",
@@ -404,6 +412,9 @@ pub fn do_help_with_roles(is_builder: bool, is_admin: bool) -> String {
             "  @boot <user>                     - Disconnect a player\r\n",
             "  @save                            - Save world to database\r\n",
             "  @shutdown                        - Graceful server shutdown\r\n",
+            "  @eval <luau>                     - Run a one-shot Luau script (blank for editor)\r\n",
+            "  @import <path> [--dry-run]       - Install a TOML+.luau bundle into the DB\r\n",
+            "  @export <path>                   - Write DB-owned content back to files\r\n",
         ));
     }
 

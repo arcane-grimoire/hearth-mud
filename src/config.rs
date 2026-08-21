@@ -14,6 +14,21 @@ pub struct Config {
     pub game_dir: Option<String>,
     pub game_web_dir: Option<String>,
     pub max_characters: u8,
+    /// Whether to load `game_dir`'s TOML+`.luau` content into the world at
+    /// boot, same as it always has. Defaults to `true` — the current
+    /// behaviour — so existing configs are unaffected.
+    ///
+    /// See docs/plans/program-authoring.md Stage 4: once `@import` /
+    /// `hearth import` cover installing world content into the DB
+    /// explicitly, a maintainer can flip this to `false` so boot reads the
+    /// DB only and files become a pure distribution format. That switch is
+    /// deliberately *not* made here — this option exists so it is a
+    /// one-line config change when a maintainer decides to make it, not a
+    /// silent behaviour change bundled with Stage 4. Shipped lib modules
+    /// (`lib/`, embedded stdlib) and `.ink` files are unaffected either way;
+    /// they are never persisted to the DB (see Stage 2's "`require`
+    /// resolution").
+    pub load_world_files: bool,
 }
 
 impl Default for Config {
@@ -28,6 +43,7 @@ impl Default for Config {
             game_dir: None,
             game_web_dir: None,
             max_characters: 3,
+            load_world_files: true,
         }
     }
 }

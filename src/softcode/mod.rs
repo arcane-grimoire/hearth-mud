@@ -159,6 +159,24 @@ pub enum Intent {
 #[derive(Debug, Clone, Default)]
 pub struct IntentBatch {
     pub intents: Vec<Intent>,
+    /// The human (or system) that caused this batch to run — e.g. the
+    /// builder whose command invoked a `cmd_*` hook. `None` for ticks and
+    /// scheduled hooks, which genuinely have no actor.
+    ///
+    /// Not used for program-version authorship: softcode's `Intent::SetProgram`
+    /// is instantiation, not authoring (see
+    /// docs/plans/program-authoring.md Stage 3, "Instantiation is not
+    /// authoring"), and is never versioned. This field exists for the
+    /// future permission work described alongside `authority` below.
+    pub actor_ref: Option<String>,
+    /// The owner of the object the running Program is attached to — the
+    /// authority code should execute *as*, per the plan's "MUSH-level UGC"
+    /// note: a builder's command should run with the object's authority,
+    /// not the caller's. Nothing reads or enforces this field yet —
+    /// `apply_to` still only validates that intent targets exist — it is
+    /// recorded now so that enforcement is a change inside `apply_to` later
+    /// rather than a retrofit through every call site.
+    pub authority: Option<String>,
 }
 
 impl IntentBatch {
@@ -354,6 +372,15 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 if world.get(location).is_none() {
                     return Err(format!("spawn: no location '{}'", location));
                 }
+                if *kind == Kind::Code {
+                    // Belt and suspenders: the Lua `spawn()` wrapper already
+                    // refuses kind "code" (Code objects are never physical
+                    // things and always require a location here), but this
+                    // is the one place every Intent::Spawn producer funnels
+                    // through, so it's the right place to make the
+                    // invariant unconditional.
+                    return Err("spawn: cannot spawn kind 'code'".into());
+                }
                 let mut obj = GameObject::new(ref_id.clone(), key.clone(), kind.clone())
                     .with_location(location.clone());
                 if let Some(t) = title {
@@ -542,6 +569,19 @@ impl Budget {
     pub fn new(max_instructions: u64) -> Self {
         Self { max_instructions }
     }
+
+    /// Budget for a one-shot `@eval`. The default is sized so a runaway hook
+    /// dies well inside a tick, which is far too small for the job `@eval`
+    /// exists to do — sweeping every object in the world to migrate it. This
+    /// is deliberately orders of magnitude larger, but still finite: `@eval`
+    /// runs on the single-writer engine loop, so while it runs the world is
+    /// frozen. Large enough for a real migration, short enough that a mistake
+    /// costs seconds rather than requiring a restart.
+    pub fn for_eval() -> Self {
+        Self {
+            max_instructions: 50_000_000,
+        }
+    }
 }
 
 impl Default for Budget {
@@ -604,6 +644,37 @@ pub struct ProgramResult {
     pub state: HashMap<String, serde_json::Value>,
 }
 
+/// The outcome of a one-shot `@eval` run — see [`SoftcodeRuntime::run_eval`].
+#[derive(Debug, Default)]
+pub struct EvalResult {
+    pub batch: IntentBatch,
+    /// A human-readable rendering of whatever the script's top-level
+    /// `return` produced. `None` when the script didn't return anything.
+    pub returned: Option<String>,
+}
+
+/// Render a Luau return value for display to the `@eval` caller. Tables are
+/// rendered as JSON where they convert cleanly; anything else falls back to
+/// a `<type>` placeholder rather than failing the whole eval over a value
+/// that can't be shown.
+fn describe_lua_value(lua: &Lua, value: LuaValue) -> Option<String> {
+    match value {
+        LuaValue::Nil => None,
+        LuaValue::Boolean(b) => Some(b.to_string()),
+        LuaValue::Integer(i) => Some(i.to_string()),
+        LuaValue::Number(n) => Some(n.to_string()),
+        LuaValue::String(s) => Some(s.to_string_lossy()),
+        LuaValue::Table(_) => {
+            let json: Result<serde_json::Value, _> = lua.from_value(value);
+            match json {
+                Ok(v) => serde_json::to_string(&v).ok(),
+                Err(_) => Some("<table>".to_string()),
+            }
+        }
+        other => Some(format!("<{}>", other.type_name())),
+    }
+}
+
 /// Owns the Luau VM. One `SoftcodeRuntime` is enough for the whole engine —
 /// each [`SoftcodeRuntime::run_hook`] call isolates a Program in its own
 /// environment table so unrelated Programs never see each other's globals.
@@ -616,11 +687,19 @@ pub struct SoftcodeRuntime {
     ink: RefCell<ink::InkRuntime>,
 }
 
-const MODULE_SOURCES_KEY: &str = "_hearth_module_sources";
+pub(crate) const MODULE_SOURCES_KEY: &str = "_hearth_module_sources";
 const MODULE_CACHE_KEY: &str = "_hearth_module_cache";
 /// Array of module names currently mid-`require`, innermost last. Used to
 /// detect cycles and to render the chain in the error message.
 const MODULE_LOADING_KEY: &str = "_hearth_module_loading";
+/// User-authored library sources — `Kind::Code` objects' `lib_<name>`
+/// Programs, keyed by `<name>`. Re-synced from `World` at the start of every
+/// Program execution (`SoftcodeRuntime::sync_user_lib_sources`), unlike
+/// [`MODULE_SOURCES_KEY`] which is file-owned and only changes on
+/// `@reload-world`. Checked by `require` as a fallback after shipped
+/// modules — see `install_require` and `docs/plans/program-authoring.md`
+/// Stage 2.
+pub(crate) const USER_LIB_SOURCES_KEY: &str = "_hearth_user_lib_sources";
 
 impl SoftcodeRuntime {
     pub fn new() -> Self {
@@ -634,6 +713,9 @@ impl SoftcodeRuntime {
         let loading = lua.create_table().expect("create module loading table");
         lua.set_named_registry_value(MODULE_LOADING_KEY, loading)
             .expect("store module loading stack");
+        let user_lib_sources = lua.create_table().expect("create user lib sources table");
+        lua.set_named_registry_value(USER_LIB_SOURCES_KEY, user_lib_sources)
+            .expect("store user lib sources");
 
         Self::install_require(&lua);
         crate::grid::Grid2D::install_globals(&lua);
@@ -659,6 +741,19 @@ impl SoftcodeRuntime {
                 let sources: mlua::Table =
                     lua.named_registry_value(MODULE_SOURCES_KEY)?;
                 let source: Option<String> = sources.get(name.as_str())?;
+                // Shipped modules (embedded stdlib, <game_dir>/lib) win ties
+                // over a same-named user library — but that can't happen in
+                // practice, since authoring a lib_<name> that collides with
+                // a shipped module is refused at write time. See
+                // docs/plans/program-authoring.md Stage 2.
+                let source = match source {
+                    Some(s) => Some(s),
+                    None => {
+                        let user_sources: mlua::Table =
+                            lua.named_registry_value(USER_LIB_SOURCES_KEY)?;
+                        user_sources.get(name.as_str())?
+                    }
+                };
                 let source = source.ok_or_else(|| {
                     mlua::Error::RuntimeError(format!("module '{}' not found", name))
                 })?;
@@ -706,6 +801,23 @@ impl SoftcodeRuntime {
         for (name, source) in modules {
             sources.set(name, source).expect("set module source");
         }
+        self.invalidate_module_cache();
+    }
+
+    /// Clear the `require()` result cache and the loading stack, so the next
+    /// `require("<name>")` anywhere re-evaluates from source instead of
+    /// returning a memoized module result. Used both by `load_modules`
+    /// (shipped sources changed, e.g. `@reload-world`) and whenever a
+    /// `lib_<name>` Program is written or removed (user library changed) —
+    /// see docs/plans/program-authoring.md Stage 2. Coarse on purpose: since
+    /// modules re-evaluate lazily on next `require`, clearing the whole
+    /// cache needs no transitive dependency tracking.
+    ///
+    /// Does *not* touch [`MODULE_SOURCES_KEY`] — that table is file-owned
+    /// and only [`Self::load_modules`]/[`Self::invalidate_cache`] repopulate
+    /// it. Clearing it here without a reload would make shipped modules
+    /// unresolvable until the next `@reload-world`.
+    pub fn invalidate_module_cache(&self) {
         let cache: mlua::Table = self
             .lua
             .named_registry_value(MODULE_CACHE_KEY)
@@ -716,6 +828,44 @@ impl SoftcodeRuntime {
             .named_registry_value(MODULE_LOADING_KEY)
             .expect("module loading table");
         clear_table(&loading);
+    }
+
+    /// Whether `name` is a shipped module — embedded stdlib or
+    /// `<game_dir>/lib` — as of the last `load_modules`/`@reload-world`.
+    /// Used to refuse authoring a same-named user library at write time.
+    pub fn is_shipped_module(&self, name: &str) -> bool {
+        let sources: mlua::Table = self
+            .lua
+            .named_registry_value(MODULE_SOURCES_KEY)
+            .expect("module sources table");
+        sources.contains_key(name).unwrap_or(false)
+    }
+
+    /// Refresh the user-library source table from `world` — every enabled
+    /// `lib_<name>` Program on a `Kind::Code` object, keyed by `<name>`.
+    /// Called at the start of every Program execution so `require` always
+    /// sees the current DB state; combined with `invalidate_module_cache`
+    /// at write time, an edit takes effect on the *next* `require` call
+    /// without needing to track who required what.
+    fn sync_user_lib_sources(&self, world: &World) {
+        let table: mlua::Table = self
+            .lua
+            .named_registry_value(USER_LIB_SOURCES_KEY)
+            .expect("user lib sources table");
+        clear_table(&table);
+        for obj in world.objects.values() {
+            if obj.kind != Kind::Code {
+                continue;
+            }
+            for program in obj.programs.values() {
+                if !program.enabled {
+                    continue;
+                }
+                if let Some(name) = program.hook.strip_prefix("lib_") {
+                    let _ = table.set(name, program.source.clone());
+                }
+            }
+        }
     }
 
     fn source_hash(source: &str) -> u64 {
@@ -802,8 +952,18 @@ impl SoftcodeRuntime {
         scheduled_hooks: &[ScheduledHook],
         tick_count: u64,
     ) -> Result<ProgramResult, SoftcodeError> {
+        self.sync_user_lib_sources(world);
         self.install_budget(budget);
         let batch = Rc::new(RefCell::new(IntentBatch::default()));
+        {
+            // Stamp who caused this run (`actor_ref`) and whose authority
+            // it runs under (`this_ref`'s owner) before the script gets a
+            // chance to push anything — see the `IntentBatch` field docs
+            // and docs/plans/program-authoring.md Stage 3.
+            let mut b = batch.borrow_mut();
+            b.actor_ref = Some(actor_ref.to_string());
+            b.authority = world.get(this_ref).and_then(|o| o.owner_ref.clone());
+        }
         let default_location = room_ref.map(|s| s.to_string()).or_else(|| {
             world
                 .get(actor_ref)
@@ -889,9 +1049,19 @@ impl SoftcodeRuntime {
             .map(|cell| cell.into_inner())
             .unwrap_or_else(|rc| rc.borrow().clone());
 
+        // `Rc::try_unwrap` only succeeds when this is the last reference.
+        // `state_writer` (the clone used inside the `lua.scope` closure
+        // above) is captured *by reference*, not by value — closures only
+        // capture what a use actually requires, and `.borrow_mut()` needs
+        // just `&state_writer` — so it's still alive here as a local
+        // variable in this function, and `try_unwrap` always sees a strong
+        // count of (at least) 2. Read through the `Rc` instead of assuming
+        // exclusive ownership, matching how `batch` is unwrapped above;
+        // `unwrap_or_default()` here would silently discard every write a
+        // tick made to `state`, which is exactly the bug this replaced.
         let state = Rc::try_unwrap(state_capture)
             .map(|cell| cell.into_inner())
-            .unwrap_or_default();
+            .unwrap_or_else(|rc| rc.borrow().clone());
 
         Ok(ProgramResult {
             batch,
@@ -900,26 +1070,45 @@ impl SoftcodeRuntime {
         })
     }
 
-    /// Run a global script — no `this` object, just `(state)`.
+    /// Run a one-shot `@eval` script — an admin running arbitrary Luau
+    /// against the live world (Evennia's `@batchcode`, MUSH's
+    /// paste-a-command-script). Modeled on [`Self::run_hook`], but simpler
+    /// in two ways that follow from being one-shot rather than scheduled:
+    ///
+    /// - No named entry-point function to look up. The chunk body itself is
+    ///   the whole program, so whatever it top-level `return`s is the result
+    ///   — the same shape `check_syntax`'s `into_function()` already compiles
+    ///   for.
+    /// - No persistent `state` table, since there is nothing to remember
+    ///   between runs.
+    ///
+    /// World writes still only ever happen through the returned
+    /// [`IntentBatch`] — `@eval` gets no special access the write API
+    /// doesn't already offer.
     #[allow(clippy::too_many_arguments)]
-    pub fn run_global_script(
+    pub fn run_eval(
         &self,
         world: &World,
         source: &str,
-        entry: &str,
-        state: &HashMap<String, serde_json::Value>,
+        actor_ref: &str,
+        room_ref: Option<&str>,
         budget: Budget,
         dbref_counter: Rc<Cell<u64>>,
         themes: &HashMap<String, Theme>,
         map_templates: &HashMap<String, crate::map_template::MapTemplateFile>,
         scheduled_hooks: &[ScheduledHook],
         tick_count: u64,
-    ) -> Result<ProgramResult, SoftcodeError> {
+    ) -> Result<EvalResult, SoftcodeError> {
+        let compiled = self
+            .lua
+            .load(source)
+            .set_name("@eval")
+            .into_function()
+            .map_err(|e| SoftcodeError::Compile(e.to_string()))?;
+
+        self.sync_user_lib_sources(world);
         self.install_budget(budget);
         let batch = Rc::new(RefCell::new(IntentBatch::default()));
-        let state_capture: Rc<RefCell<HashMap<String, serde_json::Value>>> =
-            Rc::new(RefCell::new(HashMap::new()));
-        let state_writer = Rc::clone(&state_capture);
 
         let run_result: mlua::Result<LuaValue> = self.lua.scope(|scope| {
             let env = self.lua.create_table()?;
@@ -930,7 +1119,7 @@ impl SoftcodeRuntime {
                 &env,
                 world,
                 Rc::clone(&batch),
-                None,
+                room_ref.map(|s| s.to_string()),
                 Rc::clone(&dbref_counter),
                 themes,
                 map_templates,
@@ -939,31 +1128,12 @@ impl SoftcodeRuntime {
                 &self.ink,
             )?;
 
-            let compiled = self.get_or_compile(source, entry)
-                .map_err(|e| e.clone())?;
-            compiled.set_environment(env.clone())?;
-            compiled.call::<()>(())?;
+            // The caller running the eval, for convenience — same name a
+            // hook's `actor` parameter would use.
+            env.set("actor", api::object_to_value(&self.lua, world, actor_ref)?)?;
 
-            let func: Option<mlua::Function> = env.get(entry)?;
-            let func = match func {
-                Some(f) => f,
-                None => return Ok(LuaValue::Nil),
-            };
-
-            let state_tbl = self.lua.create_table()?;
-            for (k, v) in state {
-                state_tbl.set(k.clone(), self.lua.to_value(v)?)?;
-            }
-            let ret = func.call::<LuaValue>(state_tbl.clone())?;
-            // Read state back before scope ends
-            let mut map = state_writer.borrow_mut();
-            for pair in state_tbl.pairs::<String, LuaValue>() {
-                if let Ok((k, v)) = pair
-                    && let Ok(json_val) = self.lua.from_value::<serde_json::Value>(v) {
-                        map.insert(k, json_val);
-                    }
-            }
-            Ok(ret)
+            compiled.set_environment(env)?;
+            compiled.call::<LuaValue>(())
         });
 
         self.lua.remove_interrupt();
@@ -977,14 +1147,9 @@ impl SoftcodeRuntime {
             .map(|cell| cell.into_inner())
             .unwrap_or_else(|rc| rc.borrow().clone());
 
-        let new_state = Rc::try_unwrap(state_capture)
-            .map(|cell| cell.into_inner())
-            .unwrap_or_else(|rc| rc.borrow().clone());
-
-        Ok(ProgramResult {
+        Ok(EvalResult {
+            returned: describe_lua_value(&self.lua, ret),
             batch,
-            denied: matches!(ret, LuaValue::Boolean(false)),
-            state: new_state,
         })
     }
 }
@@ -1259,15 +1424,6 @@ impl SoftcodeRuntime {
         names.map_err(classify_lua_error)
     }
 
-    fn clear_module_cache(&self) {
-        if let Ok(cache) = self
-            .lua
-            .named_registry_value::<mlua::Table>(MODULE_CACHE_KEY)
-        {
-            clear_table(&cache);
-        }
-    }
-
     pub fn run_tests(
         &self,
         source: &str,
@@ -1278,9 +1434,13 @@ impl SoftcodeRuntime {
         let test_names = self.discover_test_names(source, file_name)?;
         let mut results = Vec::new();
 
+        if let Some(w) = world {
+            self.sync_user_lib_sources(w);
+        }
+
         for test_name in &test_names {
             if world.is_some() {
-                self.clear_module_cache();
+                self.invalidate_module_cache();
             }
             self.install_budget(budget);
 
@@ -1386,8 +1546,8 @@ mod tests {
     use crate::world::{GameObject, Kind};
 
     /// Dbref counter for a test run, seeded from the world's current
-    /// `next_id` — mirrors what the engine hands to
-    /// `run_hook`/`run_global_script` in production.
+    /// `next_id` — mirrors what the engine hands to `run_hook`/`run_eval`
+    /// in production.
     fn counter(world: &World) -> Rc<Cell<u64>> {
         Rc::new(Cell::new(world.next_id))
     }
@@ -1670,6 +1830,138 @@ mod tests {
     }
 
     #[test]
+    fn run_eval_applies_world_writes() {
+        // @eval's whole point: a one-shot script's writes land through the
+        // same Intent/batch path as any hook, not a shortcut around it.
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let result = runtime
+            .run_eval(
+                &world,
+                r##"set_attr("#5", "eval_touched", true)"##,
+                "#3",
+                Some("#1"),
+                Budget::default(),
+                counter(&world),
+                &test_themes(), &test_map_templates(), &[], 0,
+            )
+            .expect("eval should run");
+
+        assert_eq!(result.batch.len(), 1);
+        let mut world = world;
+        apply_batch(&mut world, &result.batch).unwrap();
+        assert_eq!(world.get("#5").unwrap().attrs["eval_touched"], true);
+    }
+
+    #[test]
+    fn run_eval_reports_compile_error() {
+        let runtime = SoftcodeRuntime::new();
+        let world = test_world();
+        let err = runtime
+            .run_eval(
+                &world,
+                "this is not valid luau (((",
+                "#3",
+                Some("#1"),
+                Budget::default(),
+                counter(&world),
+                &test_themes(), &test_map_templates(), &[], 0,
+            )
+            .expect_err("garbage source should not compile");
+        assert!(matches!(err, SoftcodeError::Compile(_)));
+    }
+
+    #[test]
+    fn run_eval_reports_runtime_error_without_panicking() {
+        let runtime = SoftcodeRuntime::new();
+        let world = test_world();
+        let err = runtime
+            .run_eval(
+                &world,
+                r#"error("boom")"#,
+                "#3",
+                Some("#1"),
+                Budget::default(),
+                counter(&world),
+                &test_themes(), &test_map_templates(), &[], 0,
+            )
+            .expect_err("error() should surface as a runtime error, not a panic");
+        assert!(matches!(err, SoftcodeError::Runtime(_)));
+    }
+
+    #[test]
+    fn run_eval_hits_budget_on_runaway_loop() {
+        let runtime = SoftcodeRuntime::new();
+        let world = test_world();
+        let err = runtime
+            .run_eval(
+                &world,
+                "local i = 0 while true do i = i + 1 end",
+                "#3",
+                Some("#1"),
+                Budget::new(1000),
+                counter(&world),
+                &test_themes(), &test_map_templates(), &[], 0,
+            )
+            .expect_err("infinite loop should hit the budget");
+        assert!(matches!(err, SoftcodeError::BudgetExceeded));
+    }
+
+    #[test]
+    fn run_eval_reports_returned_value() {
+        let runtime = SoftcodeRuntime::new();
+        let world = test_world();
+        let result = runtime
+            .run_eval(
+                &world,
+                "return 1 + 1",
+                "#3",
+                Some("#1"),
+                Budget::default(),
+                counter(&world),
+                &test_themes(), &test_map_templates(), &[], 0,
+            )
+            .expect("eval should run");
+        assert_eq!(result.returned.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn run_eval_exposes_the_caller_as_actor() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let result = runtime
+            .run_eval(
+                &world,
+                "return actor.ref_id",
+                "#3",
+                Some("#1"),
+                Budget::default(),
+                counter(&world),
+                &test_themes(), &test_map_templates(), &[], 0,
+            )
+            .expect("eval should run");
+        assert_eq!(result.returned.as_deref(), Some("#3"));
+    }
+
+    #[test]
+    fn run_eval_can_enumerate_every_object() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let result = runtime
+            .run_eval(
+                &world,
+                "return #all_objects()",
+                "#3",
+                Some("#1"),
+                Budget::default(),
+                counter(&world),
+                &test_themes(), &test_map_templates(), &[], 0,
+            )
+            .expect("eval should run");
+        assert_eq!(result.returned.as_deref(), Some(world.objects.len().to_string().as_str()));
+    }
+
+    #[test]
     fn spawn_intent_can_be_referenced_by_later_intents_in_batch() {
         let mut world = test_world();
         let runtime = SoftcodeRuntime::new();
@@ -1798,6 +2090,28 @@ mod tests {
         let mut w = world.clone();
         apply_batch(&mut w, &result.batch).unwrap();
         assert_eq!(w.get("#5").unwrap().attrs["room_count"], 2);
+    }
+
+    #[test]
+    fn all_objects_returns_every_ref() {
+        let world = test_world();
+        let result = run_script(&world, r##"
+            function on_get(this, actor, room)
+                local all = all_objects()
+                set_attr(this, "count", #all)
+                local found_room = false
+                for _, ref_id in ipairs(all) do
+                    if ref_id == "#1" then
+                        found_room = true
+                    end
+                end
+                set_attr(this, "found_room", found_room)
+            end
+        "##);
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        assert_eq!(w.get("#5").unwrap().attrs["count"], w.objects.len() as u64);
+        assert_eq!(w.get("#5").unwrap().attrs["found_room"], true);
     }
 
     #[test]
@@ -2369,7 +2683,7 @@ mod tests {
     }
 
     #[test]
-    fn require_works_in_global_scripts() {
+    fn require_works_in_on_tick_hooks() {
         let world = test_world();
         let runtime = SoftcodeRuntime::new();
         let mut modules = HashMap::new();
@@ -2384,26 +2698,187 @@ mod tests {
         );
         runtime.load_modules(modules);
 
+        let program = ProgramRecord::new(
+            "on_tick",
+            r#"
+                function on_tick(this, state, room)
+                    local m = require("math_ext")
+                    state.sum = m.add(3, 4)
+                end
+            "#,
+        );
+
         let result = runtime
-            .run_global_script(
+            .run_hook(
                 &world,
-                r#"
-                    function on_tick(state)
-                        local m = require("math_ext")
-                        state.sum = m.add(3, 4)
-                    end
-                "#,
-                "on_tick",
-                &HashMap::new(),
+                &program,
+                "#1",
+                "#1",
+                None,
+                None,
                 Budget::default(),
                 counter(&world),
                 &test_themes(), &test_map_templates(), &[], 0,
             )
-            .expect("global script should run");
+            .expect("on_tick hook should run");
 
         assert_eq!(
             result.state.get("sum").unwrap(),
             &serde_json::json!(7)
+        );
+    }
+
+    /// A `require("<name>")` for a `Kind::Code` object's `lib_<name>`
+    /// Program resolves — the user-library half of `require` resolution,
+    /// separate from the shipped-module table above. See
+    /// docs/plans/program-authoring.md Stage 2.
+    #[test]
+    fn require_resolves_user_library() {
+        let mut world = test_world();
+        let lib_ref = world.next_dbref();
+        let mut lib_obj = GameObject::new(&lib_ref, "greet", Kind::Code);
+        hooks::set_program(
+            &mut lib_obj,
+            "lib_greet",
+            r#"
+                local M = {}
+                function M.hello() return "hi" end
+                return M
+            "#
+            .into(),
+        )
+        .unwrap();
+        world.add_object(lib_obj);
+
+        let runtime = SoftcodeRuntime::new();
+        let program = ProgramRecord::new(
+            "on_tick",
+            r#"
+                function on_tick(this, state, room)
+                    local m = require("greet")
+                    state.greeting = m.hello()
+                end
+            "#,
+        );
+
+        let result = runtime
+            .run_hook(
+                &world,
+                &program,
+                "#1",
+                "#1",
+                None,
+                None,
+                Budget::default(),
+                counter(&world),
+                &test_themes(), &test_map_templates(), &[], 0,
+            )
+            .expect("on_tick hook should run");
+
+        assert_eq!(
+            result.state.get("greeting").unwrap(),
+            &serde_json::json!("hi")
+        );
+    }
+
+    /// Editing a `lib_<name>` Program takes effect on the *next* `require`
+    /// once the module cache is invalidated — without invalidation the
+    /// stale cached module keeps being returned.
+    #[test]
+    fn lib_edit_takes_effect_after_cache_invalidation() {
+        let mut world = test_world();
+        let lib_ref = world.next_dbref();
+        let mut lib_obj = GameObject::new(&lib_ref, "greet", Kind::Code);
+        hooks::set_program(&mut lib_obj, "lib_greet", "return { version = 1 }".into()).unwrap();
+        world.add_object(lib_obj);
+
+        let runtime = SoftcodeRuntime::new();
+        let program = ProgramRecord::new(
+            "on_tick",
+            r#"
+                function on_tick(this, state, room)
+                    state.version = require("greet").version
+                end
+            "#,
+        );
+
+        fn run(runtime: &SoftcodeRuntime, world: &World, program: &ProgramRecord) -> ProgramResult {
+            runtime
+                .run_hook(
+                    world,
+                    program,
+                    "#1",
+                    "#1",
+                    None,
+                    None,
+                    Budget::default(),
+                    counter(world),
+                    &test_themes(), &test_map_templates(), &[], 0,
+                )
+                .expect("on_tick hook should run")
+        }
+
+        let first = run(&runtime, &world, &program);
+        assert_eq!(first.state.get("version").unwrap(), &serde_json::json!(1));
+
+        // Edit the library's source without invalidating — require() should
+        // keep returning the cached (stale) module.
+        let obj = world.get_mut(&lib_ref).unwrap();
+        hooks::set_program(obj, "lib_greet", "return { version = 2 }".into()).unwrap();
+        let stale = run(&runtime, &world, &program);
+        assert_eq!(
+            stale.state.get("version").unwrap(),
+            &serde_json::json!(1),
+            "require should still return the cached module before invalidation"
+        );
+
+        // Invalidating the module cache makes the next require() re-evaluate.
+        runtime.invalidate_module_cache();
+        let fresh = run(&runtime, &world, &program);
+        assert_eq!(
+            fresh.state.get("version").unwrap(),
+            &serde_json::json!(2),
+            "require should pick up the edit after cache invalidation"
+        );
+    }
+
+    /// Authoring a `lib_<name>` Program whose name collides with a shipped
+    /// module is refused at write time, from softcode's own `set_program`.
+    #[test]
+    fn set_program_refuses_lib_name_colliding_with_shipped_module() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let mut modules = HashMap::new();
+        modules.insert("str".into(), "return {}".into());
+        runtime.load_modules(modules);
+
+        let program = ProgramRecord::new(
+            "cmd_shadow",
+            r#"
+                function cmd_shadow(this, actor, room)
+                    set_program(this, "lib_str", "return {}")
+                end
+            "#,
+        );
+
+        let result = runtime
+            .run_hook(
+                &world,
+                &program,
+                "#1",
+                "#3",
+                Some("#1"),
+                None,
+                Budget::default(),
+                counter(&world),
+                &test_themes(), &test_map_templates(), &[], 0,
+            )
+            .expect_err("set_program should refuse a shipped-module-colliding lib name");
+        let message = result.to_string();
+        assert!(
+            message.contains("shipped module"),
+            "unexpected error: {}",
+            message
         );
     }
 

@@ -197,6 +197,7 @@ changes immediately within the same script.
 | `get_inventory(ref)` | table | List items carried by an object |
 | `get_players_in_room(room)` | table | Online players in a room |
 | `get_all_by_kind(kind)` | table | All objects of a kind (`"room"`, `"npc"`, etc.) |
+| `all_objects()` | table | Every object ref in the world, regardless of kind. World enumeration for batch fixups — see `@eval` in [Command Reference](commands.md) |
 | `match_name(name, input)` | boolean | Partial name matching — `match_name("iron sword", "ir")` returns `true`. Matches start of full name or any word. |
 
 ### Spatial queries
@@ -518,12 +519,19 @@ end
 
 ## Global scripts
 
-Global scripts are standalone Luau programs not attached to any object. They're
-for game systems — weather, combat, economy, respawns — that don't belong
-on a specific object.
+A global script is a Luau program not conceptually attached to any *physical*
+object — for game systems like weather, combat, economy, respawns. Under the
+hood it's an ordinary `on_tick` Program on a `Kind::Code` object: a kind of
+object that exists purely to hold code, and that is guaranteed to never show
+up in room contents, `look`, inventory, `get`, or a container — see
+[Libraries](#libraries) below, which uses the same kind for the other
+kind of code that isn't tied to a physical thing.
+
+Because it's an ordinary `on_tick` Program, it has the same signature as any
+other object's tick hook — `this` is the Code object itself:
 
 ```lua
-function on_tick(state)
+function on_tick(this, state, room)
   state.counter = (state.counter or 0) + 1
   if state.counter % 60 == 0 then
     local weathers = {"clear", "cloudy", "rainy", "stormy"}
@@ -532,18 +540,29 @@ function on_tick(state)
 end
 ```
 
-Global scripts have their own persistent state table, their own tick interval,
-and full access to the read/write API. They don't receive `this`, `actor`, or
-`room` — just `state`.
+`room` is `nil` for a global script — it has no location. `state` persists
+between ticks exactly like a per-object `on_tick`'s state does.
 
 ### Builder commands for global scripts
 
 ```
-@script weather = function on_tick(state) ... end
+@script weather = function on_tick(this, state, room) ... end
 @script-interval weather = 60
 @scripts
 @rmscript weather
 ```
+
+`[[scripts]]` blocks in area TOML files define global scripts the same way —
+see `docs/getting-started.md`/loader docs for the TOML shape. A script's
+source and tick interval reconcile on `@reload-world` like any other
+file-owned Program; an in-game edit via `@script` shadows the file version,
+same as `@program` does everywhere else.
+
+`@script`/`@rmscript` are versioned exactly like `@program`/`@rmprogram` —
+see [Program version history](#program-version-history) above. Use
+`@program/history <ref>/on_tick` (find `<ref>` via `@scripts` or `examine`)
+to see a script's edit history; `@script-interval` doesn't create a version
+since it only touches the `tick_interval` attr.
 
 ## Locks
 
@@ -613,6 +632,75 @@ All `@` commands require the `builder` scope.
 The source is syntax-checked before being installed. If there's a compile
 error, the program is rejected and the error is shown.
 
+Leaving out `<luau source>` (`@program <ref>/<hook> =`) opens a multi-line
+editor instead of requiring everything on one line — the same editor `@eval`
+uses: type source across as many lines as you need, then a bare `.` on its
+own line to install it, or `@abort` to cancel without writing anything. The
+buffer lives on your player object's attrs, so it survives a disconnect
+mid-edit.
+
+### Program version history
+
+Every `@program` and `@lib` write — and every program a Program-carrying
+file installs at boot or `@reload-world` — is recorded as a numbered version
+in SQLite, content-addressed so identical source is stored once no matter how
+many versions reference it. This is *versions, not version control*: a
+numbered list of prior sources per `(ref, hook)`, no branching or merging —
+closer to Smalltalk's `.changes` file than to git.
+
+```
+@program/history <ref>/<hook>          -- list versions: number, timestamp, author
+@program/restore <ref>/<hook> <n>      -- write version <n>'s source back as a NEW version
+@program/diff <ref>/<hook> <n> [<m>]   -- diff version <n> against <m>, or the current source
+```
+
+```
+@program/history #42/on_look
+History for #42/on_look:
+    1  2026-08-14 09:12:03 UTC  Alice
+    2  2026-08-15 16:40:51 UTC  Alice
+    3  2026-08-19 11:02:17 UTC  Bob         (deleted)
+```
+
+**Restore is non-destructive.** `@program/restore <ref>/<hook> <n>` writes
+version `<n>`'s source back as a brand-new version rather than rewinding
+history — restoring can never make the history worse, which is the property
+that makes it safe to use freely. If version `<n>` was a deletion (see
+below), restoring it re-deletes the program (also as a new version, not a
+rewind).
+
+**Deleting a program is recorded too.** `@rmprogram`, `@rmlib`, and
+`@rmscript` write a tombstone version rather than just erasing the row —
+otherwise deletion would be the one path where "versions make it safe" is
+false, since the last real source would simply vanish from the list with no
+record anything happened.
+
+**Retention.** Up to 50 versions are kept per `(ref, hook)`; past that, the
+oldest rolls off (VMS-style). Saving source identical to the newest existing
+version is a no-op — it doesn't consume a retention slot — so re-running
+`@reload-world` or reinstalling an unchanged file program costs nothing.
+
+**Author.** Recorded as a stable ref (an object ref for
+`@program`/`@lib`/`@script`, an account id for the REST API's `set_program`
+action), resolved to a display name only when you actually list history — a
+stale cached name would be worse than none. `(system)` means no human
+triggered the write (a boot-time file install).
+
+**What does *not* get versioned:** softcode's own `set_program()` — called
+from a hook, a global script, or `@eval` — is never versioned, even though it
+writes a Program exactly like `@program` does. That's deliberate: it's used
+to attach behavior to *procedurally generated* objects (a spawned NPC, a
+generated dungeon room), and its source is already a string constant living
+in a `.luau` file under git. Versioning it would write a database row for
+every generated object with no corresponding benefit — the git history for
+that source already exists. Only the genuine *authoring* paths are
+versioned: `@program`, `@lib`, `@script` (a global script is exactly
+`@program <ref>/on_tick = ...` with friendlier ergonomics — see
+[Global scripts](#global-scripts) below), the REST API's `set_program`
+action, and the loader's file installs. `@script-interval` is the one
+exception among the `@script` family: it only changes the `tick_interval`
+attr, not the Program's source, so it does not create a version.
+
 ### Ticks (per-object)
 
 ```
@@ -620,10 +708,66 @@ error, the program is rejected and the error is shown.
 @program <ref>/on_tick = function on_tick(this, state, room) ... end
 ```
 
+### `@eval` (admin only)
+
+Unlike the rest of this section, `@eval` requires the `admin` scope, not
+`builder` — it runs arbitrary Luau against the live world with no attached
+object, hook, or lock check standing between the script and the write API.
+
+```
+@eval <luau>       -- run one line immediately
+@eval               -- open a multi-line editor; '.' alone on a line runs it, '@abort' cancels
+```
+
+It has the same read/write API as any hook (see above), runs under the same
+instruction [Budget](#sandboxing) as any hook, and world writes still go
+through the normal Intent batch. Its `return` value, if any, is echoed back
+to you, along with a count of the writes it applied. This is the mechanism
+for fixing up existing objects when a Program changes — pair it with
+`all_objects()` to sweep the whole world:
+
+```lua
+@eval for _, ref in ipairs(all_objects()) do if is_npc(ref) then set_attr(ref, "hp", 100) end end
+```
+
+### `@import` / `@export` (admin only)
+
+`@import`/`@export` cross the file/database boundary explicitly, in each
+direction, instead of the boot loader's automatic (and, by default, still
+running) reconcile. They're not softcode APIs — there's no Luau involved —
+but they're what makes the Programs this section describes portable between
+a git checkout and a running database: `@import` installs `.luau` sources
+(and the TOML that attaches them to hooks) the same way `@program`/`@lib`
+would, one write per Program, each versioned exactly like an authored write
+— see [Program version history](#program-version-history) above. Use
+
+```
+@import <path> [--dry-run]
+@export <path>
+```
+
+Full semantics — the four-case upgrade reconciliation, the recorded/current/
+incoming three-way comparison that resolves a conflicting edit, and why a
+conflict is always non-destructive — are in
+[the Command Reference](commands.md#import--export) and
+`docs/plans/program-authoring.md` Stage 4. The short version for softcode
+authors: a Program you write by hand in `@import`'s bundle and a Program you
+author with `@program`/`@lib` end up completely indistinguishable once
+installed — same version log, same `origin`-free representation. Re-importing
+a bundle after editing one of its Programs in-game never silently discards
+that edit; at worst it's reported as a conflict, with the edit preserved in
+history.
+
 ## Modules (require)
 
-Shared Luau code lives in `<game_dir>/lib/*.luau`. Any hook or global script
-can load a module with `require("name")`:
+Shared Luau code comes from two places, resolved the same way through
+`require("name")` — a hook, global script, or `@eval` doesn't need to know
+which kind it got:
+
+- **Shipped modules** — files under `<game_dir>/lib/*.luau` (plus a small
+  embedded stdlib). File-owned: edit the file and `@reload-world`.
+- **User libraries** — authored in-game with `@lib`, stored in the database
+  like any other Program. See [Libraries](#libraries) below.
 
 ```lua
 local random = require("random")
@@ -640,8 +784,9 @@ return M
 ```
 
 Modules can require other modules (transitive deps). Module return values are
-cached — the source only runs once per engine lifetime. Cache clears on
-`@reload-world`.
+cached — the source only runs once per engine lifetime (or, for a user
+library, until its Program is next edited — see below). Cache clears
+wholesale on `@reload-world`.
 
 Circular requires are rejected rather than looping forever. If `a` requires
 `b` and `b` requires `a`, the inner call errors with
@@ -650,6 +795,38 @@ shared piece into a third module.
 
 Modules have stdlib access (string, table, math, require) but **not** the
 game write API (emit, set_attr, etc.). They're for pure utility code.
+
+### Libraries
+
+A library is a user-authored module — the in-game, database-backed
+counterpart to a shipped `lib/*.luau` file. Like a global script, it's a
+`Kind::Code` object under the hood, but its Program is named `lib_<name>`
+instead of `on_tick`; an object can carry both if it's genuinely both a
+global script and a library, though that's unusual.
+
+```
+@lib combat_utils = local M = {} function M.roll_damage(base, bonus) return base + math.random(1, bonus) end return M
+@libs
+@rmlib combat_utils
+```
+
+Once created, `require("combat_utils")` resolves it exactly like a shipped
+module — from any hook, global script, or `@eval`, anywhere in the game.
+
+**Name collisions with a shipped module are refused at write time** —
+`@lib str = ...` when `str` is already a shipped module (embedded stdlib or
+`<game_dir>/lib/str.luau`) fails immediately with an error, rather than
+silently shadowing it. This applies on every path that can set a
+`lib_<name>` Program: `@lib`, `@program <ref>/lib_<name> = ...`, the REST
+API's `set_program` action, and softcode's own `set_program()`.
+
+**Editing a library takes effect on the next `require`, not the current
+one.** `require()`'s result is cached for the lifetime of the module (like
+any module) — editing `lib_combat_utils`'s Program invalidates that cache,
+so the *next* `require("combat_utils")` anywhere re-evaluates the new
+source. Anything that already called `require("combat_utils")` and holds
+the old table keeps using it; there's no live-patching of in-flight
+references, same as shipped modules on `@reload-world`.
 
 ### Bundled modules
 

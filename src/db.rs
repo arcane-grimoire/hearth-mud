@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::accounts::{Account, AccountStore, Scope};
 use crate::softcode::hooks::ProgramRecord;
@@ -9,6 +9,28 @@ use crate::world::{GameObject, Kind, Tag, World};
 
 pub struct Database {
     conn: Connection,
+}
+
+/// How many `program_versions` rows are kept per `(obj_ref, hook)` before the
+/// oldest rolls off — see docs/plans/program-authoring.md Stage 3. 50 is
+/// generous for the "oops, undo my last few edits" case a version log is
+/// mainly for, without letting a program edited in a tight loop (a builder
+/// iterating on a hook line-by-line) grow its history unboundedly. VMS's
+/// default file version limit was in the same range.
+pub const PROGRAM_VERSION_RETENTION: i64 = 50;
+
+/// One row of a program's version history, joined against its blob so the
+/// source is ready to display or restore without a second query.
+#[derive(Debug, Clone)]
+pub struct ProgramVersionRow {
+    /// Row id in `program_versions` — stable, but *not* the number shown to
+    /// players (`@program/history` numbers 1..N within the (obj_ref, hook)
+    /// series so it reads as a version count, not a database id).
+    pub id: i64,
+    pub created_at: i64,
+    pub author: Option<String>,
+    pub deleted: bool,
+    pub source: String,
 }
 
 impl Database {
@@ -98,7 +120,83 @@ impl Database {
 
         let _ = self.conn.execute("ALTER TABLE api_tokens ADD COLUMN expires_at INTEGER", []);
 
+        // Program version history — see docs/plans/program-authoring.md
+        // Stage 3. Content-addressed: `program_blobs` stores each distinct
+        // source once no matter how many versions across how many
+        // (obj_ref, hook) pairs reference it, so a restore or a repeated
+        // loader install costs zero new bytes. `program_versions.deleted`
+        // marks a tombstone row recording that the program was removed —
+        // its `blob_hash` points at the empty-string blob, which is itself
+        // deduped to one row. Written at edit time by the Engine (which
+        // owns the `Database` handle), never at checkpoint — see
+        // `record_program_version` / `record_program_tombstone` below and
+        // the plan's "write at edit time, not at checkpoint" note.
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS program_blobs (
+                hash   TEXT PRIMARY KEY,
+                source TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS program_versions (
+                id         INTEGER PRIMARY KEY,
+                obj_ref    TEXT NOT NULL,
+                hook       TEXT NOT NULL,
+                blob_hash  TEXT NOT NULL REFERENCES program_blobs(hash),
+                created_at INTEGER NOT NULL,
+                author     TEXT,
+                deleted    INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_program_versions_lookup
+                ON program_versions (obj_ref, hook, id);",
+        )?;
+
+        // `@import`'s upgrade path (docs/plans/program-authoring.md Stage 4)
+        // needs a baseline independent of `program_versions`: the hash of the
+        // source *an import last installed* for `(obj_ref, hook)`, so a later
+        // re-import can tell "recorded vs current vs incoming" apart — the
+        // three-way comparison dpkg uses for conffiles. `program_versions`
+        // can't serve this role by itself because it also grows from
+        // ordinary in-game authoring (`@program`, `@lib`) that has nothing to
+        // do with any import.
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS import_hashes (
+                obj_ref TEXT NOT NULL,
+                hook    TEXT NOT NULL,
+                hash    TEXT NOT NULL,
+                PRIMARY KEY (obj_ref, hook)
+            );",
+        )?;
+
         Ok(())
+    }
+
+    /// Record the blake3 hash of the source `@import` most recently
+    /// installed for `(obj_ref, hook)` — the "recorded" side of the
+    /// recorded/current/incoming comparison in
+    /// docs/plans/program-authoring.md Stage 4. Overwrites any previous
+    /// value: only the *last* import's hash matters for the next one.
+    pub fn set_import_hash(&self, obj_ref: &str, hook: &str, hash: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO import_hashes (obj_ref, hook, hash) VALUES (?1, ?2, ?3)
+             ON CONFLICT(obj_ref, hook) DO UPDATE SET hash = excluded.hash",
+            params![obj_ref, hook, hash],
+        )?;
+        Ok(())
+    }
+
+    /// The hash the last `@import` recorded for `(obj_ref, hook)`, if any.
+    /// `None` means this hook has never been written by an import — either
+    /// it's brand new, or it was authored in-game with no import baseline to
+    /// compare against.
+    pub fn get_import_hash(&self, obj_ref: &str, hook: &str) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT hash FROM import_hashes WHERE obj_ref = ?1 AND hook = ?2",
+                params![obj_ref, hook],
+                |row| row.get(0),
+            )
+            .optional()
     }
 
     pub fn save_accounts(&self, accounts: &AccountStore) -> rusqlite::Result<()> {
@@ -236,24 +334,6 @@ impl Database {
             }
         }
 
-        {
-            let mut script_stmt = tx.prepare(
-                "INSERT INTO scripts (name, source, entry, interval, enabled, state_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )?;
-            for script in world.scripts.values() {
-                let state_json =
-                    serde_json::to_string(&script.state).unwrap_or_else(|_| "{}".into());
-                script_stmt.execute(params![
-                    script.name,
-                    script.source,
-                    script.entry,
-                    script.interval,
-                    script.enabled as i32,
-                    state_json,
-                ])?;
-            }
-        }
-
         tx.commit()
     }
 
@@ -294,6 +374,7 @@ impl Database {
                 "npc" => Kind::Npc,
                 "player" => Kind::Player,
                 "exit" => Kind::Exit,
+                "code" => Kind::Code,
                 _ => Kind::Item,
             };
             let attrs: HashMap<String, serde_json::Value> =
@@ -341,35 +422,6 @@ impl Database {
             }
         }
 
-        // Load global scripts
-        let mut script_stmt = self.conn.prepare(
-            "SELECT name, source, entry, interval, enabled, state_json FROM scripts",
-        )?;
-        let script_rows = script_stmt.query_map([], |row| {
-            let name: String = row.get(0)?;
-            let source: String = row.get(1)?;
-            let entry: String = row.get(2)?;
-            let interval: u64 = row.get(3)?;
-            let enabled: bool = row.get(4)?;
-            let state_json: String = row.get(5)?;
-            Ok((name, source, entry, interval, enabled, state_json))
-        })?;
-        for row in script_rows {
-            let (name, source, entry, interval, enabled, state_json) = row?;
-            let state: HashMap<String, serde_json::Value> =
-                serde_json::from_str(&state_json).unwrap_or_default();
-            use crate::world::Script;
-            let script = Script {
-                name: name.clone(),
-                source,
-                entry,
-                interval,
-                enabled,
-                state,
-            };
-            world.scripts.insert(name, script);
-        }
-
         let next_id: u64 = self
             .conn
             .query_row("SELECT value FROM meta WHERE key = 'next_id'", [], |row| {
@@ -379,6 +431,51 @@ impl Database {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         world.next_id = next_id;
+
+        // Migrate legacy `scripts` rows (pre-`Kind::Code`, see
+        // docs/plans/program-authoring.md Stage 2) into `Kind::Code`
+        // objects carrying an `on_tick` Program — the same object shape a
+        // freshly-authored `@script` produces. This is a Rust-side
+        // migration, not an `@eval` job: softcode has no access to this
+        // table. `next_id` is read above so the dbrefs handed out here
+        // continue the existing counter rather than colliding with it.
+        //
+        // `save_world` never writes to `scripts` anymore (it only deletes
+        // from it, to keep old rows from resurrecting), so after the first
+        // save following this migration the table is empty and this loop
+        // is a no-op on every subsequent boot.
+        let mut legacy_stmt = self
+            .conn
+            .prepare("SELECT name, source, entry, interval, enabled, state_json FROM scripts")?;
+        let legacy_rows = legacy_stmt.query_map([], |row| {
+            let name: String = row.get(0)?;
+            let source: String = row.get(1)?;
+            let entry: String = row.get(2)?;
+            let interval: u64 = row.get(3)?;
+            let enabled: bool = row.get(4)?;
+            let state_json: String = row.get(5)?;
+            Ok((name, source, entry, interval, enabled, state_json))
+        })?;
+        for row in legacy_rows {
+            let (name, source, entry, interval, enabled, state_json) = row?;
+            if entry != "on_tick" {
+                tracing::warn!(
+                    script = %name, entry = %entry,
+                    "Migrating legacy global script with non-on_tick entry; only on_tick runs on Kind::Code objects"
+                );
+            }
+            let state: HashMap<String, serde_json::Value> =
+                serde_json::from_str(&state_json).unwrap_or_default();
+            let ref_id = world.next_dbref();
+            let mut obj = GameObject::new(&ref_id, &name, Kind::Code);
+            obj.attrs.insert("tick_interval".into(), serde_json::json!(interval));
+            let mut program = ProgramRecord::new("on_tick", source);
+            program.enabled = enabled;
+            program.state = state;
+            obj.programs.insert("on_tick".to_string(), program);
+            world.add_object(obj);
+            tracing::info!(script = %name, ref_id = %ref_id, "Migrated legacy global script to Kind::Code object");
+        }
 
         Ok(world)
     }
@@ -468,6 +565,150 @@ impl Database {
         })?;
         rows.collect()
     }
+
+    /// Record a new version of `(obj_ref, hook)`'s source, content-addressed
+    /// by a blake3 hash — see docs/plans/program-authoring.md Stage 3.
+    ///
+    /// Not `source_hash` (`src/softcode/mod.rs`'s `DefaultHasher`-based
+    /// helper): that hash is explicitly unstable across Rust versions, and
+    /// persisting a content-addressed key with it would orphan every blob on
+    /// a toolchain bump.
+    ///
+    /// A no-op if the newest existing version for `(obj_ref, hook)` already
+    /// has this exact source (dedupe on content) — makes repeated installs
+    /// of unchanged file programs free and removes any need to special-case
+    /// where a write came from.
+    pub fn record_program_version(
+        &self,
+        obj_ref: &str,
+        hook: &str,
+        source: &str,
+        author: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        self.write_program_version(obj_ref, hook, source, author, false)
+    }
+
+    /// Record a tombstone version marking `(obj_ref, hook)` as deleted — see
+    /// the plan's "record deletions as tombstone versions" note. Without
+    /// this, deletion is the one program-history path where "versions make
+    /// it safe" would be false: the last real source would simply vanish
+    /// from the list with no record that anything happened.
+    pub fn record_program_tombstone(
+        &self,
+        obj_ref: &str,
+        hook: &str,
+        author: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        self.write_program_version(obj_ref, hook, "", author, true)
+    }
+
+    fn write_program_version(
+        &self,
+        obj_ref: &str,
+        hook: &str,
+        source: &str,
+        author: Option<&str>,
+        deleted: bool,
+    ) -> rusqlite::Result<()> {
+        let hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
+        // Dedupe on the newest row for this (obj_ref, hook): same content
+        // *and* same deleted-ness is a no-op. Comparing `deleted` too (the
+        // plan's rule is content-only) keeps a tombstone from being
+        // indistinguishable from a program whose author genuinely saved an
+        // empty source, which would otherwise share the empty-string blob.
+        let newest: Option<(String, i64)> = self
+            .conn
+            .query_row(
+                "SELECT blob_hash, deleted FROM program_versions
+                 WHERE obj_ref = ?1 AND hook = ?2
+                 ORDER BY id DESC LIMIT 1",
+                params![obj_ref, hook],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((newest_hash, newest_deleted)) = newest
+            && newest_hash == hash
+            && (newest_deleted != 0) == deleted
+        {
+            return Ok(());
+        }
+
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO program_blobs (hash, source) VALUES (?1, ?2)",
+            params![hash, source],
+        )?;
+        let created_at = Self::now_secs();
+        tx.execute(
+            "INSERT INTO program_versions (obj_ref, hook, blob_hash, created_at, author, deleted)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![obj_ref, hook, hash, created_at, author, deleted as i64],
+        )?;
+
+        // Retention cap: keep only the newest PROGRAM_VERSION_RETENTION rows
+        // for this (obj_ref, hook) — oldest rolls off, VMS-style.
+        tx.execute(
+            "DELETE FROM program_versions
+             WHERE obj_ref = ?1 AND hook = ?2 AND id NOT IN (
+                 SELECT id FROM program_versions
+                 WHERE obj_ref = ?1 AND hook = ?2
+                 ORDER BY id DESC LIMIT ?3
+             )",
+            params![obj_ref, hook, PROGRAM_VERSION_RETENTION],
+        )?;
+
+        tx.commit()
+    }
+
+    /// Every version of `(obj_ref, hook)`, oldest first — the order
+    /// `@program/history` numbers 1..N and `@program/restore <n>` /
+    /// `@program/diff <n>` index into.
+    pub fn list_program_versions(
+        &self,
+        obj_ref: &str,
+        hook: &str,
+    ) -> rusqlite::Result<Vec<ProgramVersionRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT pv.id, pv.created_at, pv.author, pv.deleted, pb.source
+             FROM program_versions pv
+             JOIN program_blobs pb ON pv.blob_hash = pb.hash
+             WHERE pv.obj_ref = ?1 AND pv.hook = ?2
+             ORDER BY pv.id ASC",
+        )?;
+        let rows = stmt.query_map(params![obj_ref, hook], |row| {
+            Ok(ProgramVersionRow {
+                id: row.get(0)?,
+                created_at: row.get(1)?,
+                author: row.get(2)?,
+                deleted: row.get::<_, i64>(3)? != 0,
+                source: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// The `n`th version (1-based, oldest first — matching
+    /// `list_program_versions`'s order) of `(obj_ref, hook)`, if it exists.
+    pub fn get_program_version(
+        &self,
+        obj_ref: &str,
+        hook: &str,
+        n: usize,
+    ) -> rusqlite::Result<Option<ProgramVersionRow>> {
+        if n == 0 {
+            return Ok(None);
+        }
+        let versions = self.list_program_versions(obj_ref, hook)?;
+        Ok(versions.into_iter().nth(n - 1))
+    }
+
+    fn now_secs() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
@@ -475,7 +716,6 @@ mod tests {
     use super::*;
     use crate::accounts::Scope;
     use crate::softcode::hooks::ProgramRecord;
-    use crate::world::Script;
     use std::path::Path;
 
     fn temp_db() -> Database {
@@ -571,22 +811,81 @@ mod tests {
     }
 
     #[test]
-    fn world_round_trip_scripts() {
+    fn world_round_trip_code_object_script() {
         let db = temp_db();
         let mut world = World::new();
 
-        let mut script = Script::new("weather", "function on_tick(state) end");
-        script.interval = 60;
-        script.state.insert("weather".into(), serde_json::json!("clear"));
-        world.scripts.insert("weather".into(), script);
+        let ref_id = world.next_dbref();
+        let mut obj = GameObject::new(&ref_id, "weather", Kind::Code);
+        obj.attrs.insert("tick_interval".into(), serde_json::json!(60));
+        let mut program = ProgramRecord::new("on_tick", "function on_tick(this, state, room) end");
+        program.state.insert("weather".into(), serde_json::json!("clear"));
+        obj.programs.insert("on_tick".to_string(), program);
+        world.add_object(obj);
 
         db.save_world(&world).unwrap();
         let loaded = db.load_world().unwrap();
 
-        assert!(loaded.scripts.contains_key("weather"));
-        let s = &loaded.scripts["weather"];
-        assert_eq!(s.interval, 60);
-        assert_eq!(s.state.get("weather").unwrap(), "clear");
+        let s = loaded.get(&ref_id).unwrap();
+        assert_eq!(s.kind, Kind::Code);
+        assert_eq!(s.attrs["tick_interval"], serde_json::json!(60));
+        let program = &s.programs["on_tick"];
+        assert_eq!(program.state.get("weather").unwrap(), "clear");
+    }
+
+    /// A world saved by a pre-`Kind::Code` build of Hearth has its global
+    /// scripts sitting in the legacy `scripts` table. `load_world` must
+    /// migrate those rows into `Kind::Code` objects in memory — softcode
+    /// has no access to that table, so this has to be a Rust-side
+    /// migration (see docs/plans/program-authoring.md Stage 2) — and the
+    /// migrated object must still be tickable through the normal
+    /// per-object `on_tick` path.
+    #[test]
+    fn load_world_migrates_legacy_scripts_table_to_code_objects() {
+        let db = temp_db();
+        // Simulate a pre-migration database: write directly to the legacy
+        // `scripts` table, bypassing `save_world` (which no longer writes
+        // to it at all).
+        db.conn
+            .execute(
+                "INSERT INTO scripts (name, source, entry, interval, enabled, state_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    "weather",
+                    "function on_tick(state) state.ticks = (state.ticks or 0) + 1 end",
+                    "on_tick",
+                    5,
+                    1,
+                    r#"{"ticks": 3}"#,
+                ],
+            )
+            .unwrap();
+
+        let world = db.load_world().unwrap();
+
+        let migrated = world
+            .objects
+            .values()
+            .find(|o| o.kind == Kind::Code && o.key == "weather")
+            .expect("legacy script should migrate to a Kind::Code object");
+        assert_eq!(migrated.attrs["tick_interval"], serde_json::json!(5));
+        let program = migrated
+            .programs
+            .get("on_tick")
+            .expect("migrated object should carry an on_tick Program");
+        assert!(program.enabled);
+        assert_eq!(program.state.get("ticks").unwrap(), &serde_json::json!(3));
+        assert!(program.source.contains("state.ticks"));
+
+        // Saving and reloading should not re-migrate (the legacy table is
+        // emptied on save) or lose the object.
+        db.save_world(&world).unwrap();
+        let reloaded = db.load_world().unwrap();
+        let count = reloaded
+            .objects
+            .values()
+            .filter(|o| o.kind == Kind::Code && o.key == "weather")
+            .count();
+        assert_eq!(count, 1, "reload after save should not duplicate the migrated object");
     }
 
     #[test]
@@ -641,5 +940,162 @@ mod tests {
         let mut loaded = loaded;
         let ref3 = loaded.next_dbref();
         assert_eq!(ref3, "#3");
+    }
+
+    // -- Program version history (Stage 3) --
+
+    #[test]
+    fn record_program_version_writes_a_row() {
+        let db = temp_db();
+        db.record_program_version("#1", "on_tick", "return 1", Some("#7"))
+            .unwrap();
+
+        let versions = db.list_program_versions("#1", "on_tick").unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].source, "return 1");
+        assert_eq!(versions[0].author.as_deref(), Some("#7"));
+        assert!(!versions[0].deleted);
+    }
+
+    #[test]
+    fn record_program_version_dedupes_identical_resave() {
+        let db = temp_db();
+        db.record_program_version("#1", "on_tick", "return 1", Some("#7"))
+            .unwrap();
+        // Saving the exact same source again should not create a second
+        // version — this is what makes repeated loader installs of an
+        // unchanged file program free.
+        db.record_program_version("#1", "on_tick", "return 1", Some("#7"))
+            .unwrap();
+        db.record_program_version("#1", "on_tick", "return 1", Some("#9"))
+            .unwrap();
+
+        let versions = db.list_program_versions("#1", "on_tick").unwrap();
+        assert_eq!(versions.len(), 1, "identical content should dedupe, even with a different author");
+    }
+
+    #[test]
+    fn record_program_version_does_not_dedupe_changed_content() {
+        let db = temp_db();
+        db.record_program_version("#1", "on_tick", "return 1", None)
+            .unwrap();
+        db.record_program_version("#1", "on_tick", "return 2", None)
+            .unwrap();
+
+        let versions = db.list_program_versions("#1", "on_tick").unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].source, "return 1");
+        assert_eq!(versions[1].source, "return 2");
+    }
+
+    #[test]
+    fn program_version_content_is_deduped_across_objects() {
+        // Content-addressing means identical source shared by two different
+        // (obj_ref, hook) pairs is stored once in program_blobs, no matter
+        // how many program_versions rows reference it.
+        let db = temp_db();
+        db.record_program_version("#1", "on_tick", "return 1", None)
+            .unwrap();
+        db.record_program_version("#2", "on_tick", "return 1", None)
+            .unwrap();
+
+        let blob_count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM program_blobs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(blob_count, 1);
+
+        let version_count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM program_versions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version_count, 2);
+    }
+
+    #[test]
+    fn program_version_retention_rolls_off_oldest() {
+        let db = temp_db();
+        let total = PROGRAM_VERSION_RETENTION + 5;
+        for i in 0..total {
+            db.record_program_version("#1", "on_tick", &format!("return {}", i), None)
+                .unwrap();
+        }
+
+        let versions = db.list_program_versions("#1", "on_tick").unwrap();
+        assert_eq!(versions.len(), PROGRAM_VERSION_RETENTION as usize);
+        // The oldest surviving version should be the one written 5 edits
+        // in — the first 5 should have rolled off.
+        assert_eq!(versions[0].source, "return 5");
+        assert_eq!(versions.last().unwrap().source, format!("return {}", total - 1));
+    }
+
+    #[test]
+    fn program_version_tombstone_records_deletion() {
+        let db = temp_db();
+        db.record_program_version("#1", "on_tick", "return 1", Some("#7"))
+            .unwrap();
+        db.record_program_tombstone("#1", "on_tick", Some("#7")).unwrap();
+
+        let versions = db.list_program_versions("#1", "on_tick").unwrap();
+        assert_eq!(versions.len(), 2);
+        assert!(!versions[0].deleted);
+        assert!(versions[1].deleted);
+        assert_eq!(versions[1].source, "");
+    }
+
+    #[test]
+    fn program_version_restore_writes_a_new_version_not_a_rewind() {
+        // "Restore" at the db layer is nothing more than re-recording an
+        // old source — the caller (Engine::cmd_program_restore) reads the
+        // old version and calls record_program_version again, rather than
+        // any kind of in-place rewrite. Assert that shape directly: after
+        // "restoring" v1 on top of v2, history has 3 rows, not 2, and the
+        // original v1/v2 rows are untouched.
+        let db = temp_db();
+        db.record_program_version("#1", "on_tick", "return 1", None)
+            .unwrap();
+        db.record_program_version("#1", "on_tick", "return 2", None)
+            .unwrap();
+
+        let before = db.list_program_versions("#1", "on_tick").unwrap();
+        let v1_source = before[0].source.clone();
+        db.record_program_version("#1", "on_tick", &v1_source, Some("#7"))
+            .unwrap();
+
+        let after = db.list_program_versions("#1", "on_tick").unwrap();
+        assert_eq!(after.len(), 3, "restore must append, never rewind history");
+        assert_eq!(after[0].source, "return 1");
+        assert_eq!(after[1].source, "return 2");
+        assert_eq!(after[2].source, "return 1");
+        assert_eq!(after[2].author.as_deref(), Some("#7"));
+    }
+
+    // -- Import hashes (Stage 4) --
+
+    #[test]
+    fn import_hash_round_trips_and_updates() {
+        let db = temp_db();
+        assert_eq!(db.get_import_hash("#1", "on_look").unwrap(), None);
+
+        db.set_import_hash("#1", "on_look", "abc123").unwrap();
+        assert_eq!(db.get_import_hash("#1", "on_look").unwrap().as_deref(), Some("abc123"));
+
+        // A second import overwrites, it does not accumulate a history.
+        db.set_import_hash("#1", "on_look", "def456").unwrap();
+        assert_eq!(db.get_import_hash("#1", "on_look").unwrap().as_deref(), Some("def456"));
+    }
+
+    #[test]
+    fn get_program_version_indexes_one_based_oldest_first() {
+        let db = temp_db();
+        db.record_program_version("#1", "on_tick", "return 1", None)
+            .unwrap();
+        db.record_program_version("#1", "on_tick", "return 2", None)
+            .unwrap();
+
+        assert_eq!(db.get_program_version("#1", "on_tick", 1).unwrap().unwrap().source, "return 1");
+        assert_eq!(db.get_program_version("#1", "on_tick", 2).unwrap().unwrap().source, "return 2");
+        assert!(db.get_program_version("#1", "on_tick", 0).unwrap().is_none());
+        assert!(db.get_program_version("#1", "on_tick", 3).unwrap().is_none());
     }
 }

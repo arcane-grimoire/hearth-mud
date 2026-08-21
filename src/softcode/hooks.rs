@@ -51,12 +51,16 @@ pub const KNOWN_HOOKS: &[&str] = &[
 
 /// Whether `name` is a hook the engine will accept on `@program`.
 ///
-/// Any `can_` hook must be one of [`KNOWN_HOOKS`]. `on_` and `cmd_`-prefixed
-/// names are open-ended — `on_reply`, `on_buy`, `cmd_talk` are all valid.
+/// Any `can_` hook must be one of [`KNOWN_HOOKS`]. `on_`, `cmd_`, and
+/// `lib_`-prefixed names are open-ended — `on_reply`, `on_buy`, `cmd_talk`,
+/// `lib_inventory` are all valid. `lib_<name>` is how a `Kind::Code` object
+/// (see `crate::world::Kind`) exposes a module `require("<name>")` can load
+/// — see `crate::softcode::mod::install_require`.
 pub fn is_valid_hook_name(name: &str) -> bool {
     KNOWN_HOOKS.contains(&name)
         || (name.starts_with("cmd_") && name.len() > 4)
         || (name.starts_with("on_") && name.len() > 3)
+        || (name.starts_with("lib_") && name.len() > 4)
 }
 
 /// A short human-readable description of a hook, for `@programs` output and
@@ -95,6 +99,7 @@ pub fn describe_hook(name: &str) -> &'static str {
         "on_reload" => "runs after @reload-world completes",
         "on_save" => "runs before each world save (autosave or manual)",
         "on_create" => "runs when this object is first created at runtime",
+        _ if name.starts_with("lib_") => "a library module, loaded via require(\"<name>\")",
         _ => "a custom player command (cmd_<name>)",
     }
 }

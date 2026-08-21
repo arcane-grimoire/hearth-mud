@@ -28,3 +28,6 @@ rand = "0.8"
 noise = "0.9"
 bladeink = "2.0.0"
 bladeink-compiler = "2.0.0"
+blake3 = "1"
+similar = "2"
+ureq = { version = "2", features = ["json"] }

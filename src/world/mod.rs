@@ -1,9 +1,7 @@
 mod object;
-mod script;
 mod tag;
 
 pub use object::{GameObject, Kind};
-pub use script::Script;
 pub use tag::Tag;
 
 use std::collections::HashMap;
@@ -11,7 +9,6 @@ use std::collections::HashMap;
 #[derive(Clone)]
 pub struct World {
     pub objects: HashMap<String, GameObject>,
-    pub scripts: HashMap<String, Script>,
     pub next_id: u64,
 }
 
@@ -19,7 +16,6 @@ impl World {
     pub fn new() -> Self {
         Self {
             objects: HashMap::new(),
-            scripts: HashMap::new(),
             next_id: 0,
         }
     }
@@ -57,12 +53,54 @@ impl World {
         })
     }
 
+    /// Objects located at `location_ref` — a room, an actor's inventory, or
+    /// a container. Excludes `Exit` (navigation, not contents) and `Code`
+    /// (never a physical thing — see [`Kind::Code`]) so every caller that
+    /// builds room contents, inventory, or container listings gets the
+    /// exclusion for free.
     pub fn objects_in(&self, location_ref: &str) -> Vec<&GameObject> {
         self.objects
             .values()
             .filter(|o| {
-                o.location_ref.as_deref() == Some(location_ref) && o.kind != Kind::Exit
+                o.location_ref.as_deref() == Some(location_ref)
+                    && o.kind != Kind::Exit
+                    && o.kind != Kind::Code
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Kind::Code` objects are never physical things — a global script or
+    /// a library must never show up in room contents, inventory, or a
+    /// container, no matter how its `location_ref` ends up set. This is the
+    /// single choke point every such caller (`do_look`, `do_inventory`,
+    /// `get`, container listings, the web client's Room message, ...)
+    /// relies on — see docs/plans/program-authoring.md Stage 2.
+    #[test]
+    fn objects_in_excludes_code_objects() {
+        let mut world = World::new();
+        let room_ref = world.next_dbref();
+        world.add_object(GameObject::new(&room_ref, "room", Kind::Room));
+
+        let item_ref = world.next_dbref();
+        world.add_object(
+            GameObject::new(&item_ref, "sword", Kind::Item).with_location(&room_ref),
+        );
+
+        // A Code object should never appear in objects_in, even if
+        // something mistakenly gives it a location_ref matching a room.
+        let code_ref = world.next_dbref();
+        world.add_object(
+            GameObject::new(&code_ref, "weather", Kind::Code).with_location(&room_ref),
+        );
+
+        let contents = world.objects_in(&room_ref);
+        let refs: Vec<&str> = contents.iter().map(|o| o.ref_id.as_str()).collect();
+        assert!(refs.contains(&item_ref.as_str()), "ordinary item should still be listed");
+        assert!(!refs.contains(&code_ref.as_str()), "Code object must be excluded");
     }
 }
