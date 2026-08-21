@@ -297,7 +297,7 @@ impl Engine {
             softcode.load_modules(crate::loader::load_modules(game_path));
             softcode.ink_runtime().borrow_mut().set_ink_dir(game_path.to_path_buf());
             let ink_files = crate::loader::load_ink_files(game_path);
-            for (_, source) in &ink_files {
+            for source in ink_files.values() {
                 if let Err(e) = softcode.ink_runtime().borrow_mut().compile(source) {
                     tracing::warn!(error = %e, "Failed to pre-compile ink file");
                 }
@@ -1135,10 +1135,7 @@ impl Engine {
             ApiRequest::InkSave { ref_id, source } => {
                 match self.world.get_mut(&ref_id) {
                     Some(obj) => {
-                        let errors = match self.softcode.ink_runtime().borrow_mut().compile(&source) {
-                            Ok(_) => None,
-                            Err(e) => Some(e),
-                        };
+                        let errors = self.softcode.ink_runtime().borrow_mut().compile(&source).err();
                         obj.attrs.insert("_ink_source".into(), serde_json::json!(source));
                         if let Some(ref e) = errors {
                             obj.attrs.insert("_ink_errors".into(), serde_json::json!(e));
@@ -1757,7 +1754,7 @@ impl Engine {
             }) => (actor_ref.clone(), puppet_ref.clone()),
             _ => return,
         };
-        let effective_ref = puppet_ref.as_deref().unwrap_or(&actor_ref).to_string();
+        let _effective_ref = puppet_ref.as_deref().unwrap_or(&actor_ref).to_string();
 
         // Check for pending prompt — intercept input before command dispatch
         if let Some(actor) = self.world.get(&actor_ref) {
@@ -1785,12 +1782,11 @@ impl Engine {
         }
 
         // Check for multi-line ink editor mode
-        if let Some(actor) = self.world.get(&actor_ref) {
-            if actor.attrs.contains_key("_ink_editing") {
+        if let Some(actor) = self.world.get(&actor_ref)
+            && actor.attrs.contains_key("_ink_editing") {
                 self.handle_ink_editor_input(session_id, &actor_ref, input);
                 return;
             }
-        }
 
         // Check for multi-line @eval editor mode
         if let Some(actor) = self.world.get(&actor_ref)
@@ -4005,7 +4001,7 @@ impl Engine {
         self.softcode
             .load_modules(crate::loader::load_modules(game_path));
         let ink_files = crate::loader::load_ink_files(game_path);
-        for (_, source) in &ink_files {
+        for source in ink_files.values() {
             if let Err(e) = self.softcode.ink_runtime().borrow_mut().compile(source) {
                 tracing::warn!(error = %e, "Failed to pre-compile ink file on reload");
             }
@@ -5351,11 +5347,10 @@ impl Engine {
 
         let target_name = target.display_name().to_string();
 
-        if let Some(session) = self.sessions.get_mut(session_id) {
-            if let SessionState::Playing { puppet_ref, .. } = &mut session.state {
+        if let Some(session) = self.sessions.get_mut(session_id)
+            && let SessionState::Playing { puppet_ref, .. } = &mut session.state {
                 *puppet_ref = Some(target_ref.to_string());
             }
-        }
 
         format!("You are now puppeting {}. Use @unpuppet to return.\r\n", target_name)
     }

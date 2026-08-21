@@ -312,7 +312,7 @@ fn parse_json_value(s: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    
 
     fn test_actor(tags: &[&str], attrs: &[(&str, serde_json::Value)]) -> GameObject {
         let mut actor = GameObject::new("player/test", "test", Kind::Player);

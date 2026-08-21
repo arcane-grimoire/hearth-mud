@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn grant_and_revoke_scope() {
         let mut store = AccountStore::new();
-        let id = store.create("first", "password123").unwrap().id.clone();
+        let _id = store.create("first", "password123").unwrap().id.clone();
         store.create("second", "password123").unwrap();
         let second_id = store.get_id_by_username("second").unwrap();
         store.grant_scope(&second_id, Scope::Builder);

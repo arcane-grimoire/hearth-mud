@@ -696,11 +696,10 @@ mod tests {
         seen.insert(result.entrance_ref.clone());
         while let Some(room) = queue.pop() {
             for exit in world.exits_from(&room) {
-                if let Some(target) = exit.target_ref.clone() {
-                    if seen.insert(target.clone()) {
+                if let Some(target) = exit.target_ref.clone()
+                    && seen.insert(target.clone()) {
                         queue.push(target);
                     }
-                }
             }
         }
 

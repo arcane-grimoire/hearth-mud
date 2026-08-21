@@ -672,8 +672,8 @@ fn collect_ink_files(base: &Path, dir: &Path, out: &mut HashMap<String, String>)
         let path = entry.path();
         if path.is_dir() {
             collect_ink_files(base, &path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("ink") {
-            if let Ok(source) = std::fs::read_to_string(&path) {
+        } else if path.extension().and_then(|e| e.to_str()) == Some("ink")
+            && let Ok(source) = std::fs::read_to_string(&path) {
                 let relative = path
                     .strip_prefix(base)
                     .unwrap_or(&path)
@@ -682,7 +682,6 @@ fn collect_ink_files(base: &Path, dir: &Path, out: &mut HashMap<String, String>)
                     .replace('\\', "/");
                 out.insert(relative, source);
             }
-        }
     }
 }
 
