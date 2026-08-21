@@ -216,6 +216,79 @@ pub fn load_terrain_palette(game_dir: &Path) -> HashMap<String, TerrainDef> {
     }
 }
 
+/// Parse one map template from TOML source — the DB-backed counterpart of
+/// reading a single file in [`load_map_templates`].
+pub fn parse_map_template(toml: &str) -> Result<MapTemplateFile, String> {
+    toml::from_str::<MapTemplateFile>(toml).map_err(|e| e.to_string())
+}
+
+/// Parse a terrain palette from TOML source — the DB-backed counterpart of
+/// [`load_terrain_palette`]. Unparseable source yields an empty palette.
+pub fn parse_terrain_palette(toml: &str) -> HashMap<String, TerrainDef> {
+    toml::from_str::<TerrainPaletteFile>(toml)
+        .map(|p| p.terrain)
+        .unwrap_or_default()
+}
+
+/// Validate terrain-palette TOML without keeping the result — the builder
+/// write path uses this so a bad paste is rejected before it reaches the DB.
+pub fn validate_terrain_toml(toml: &str) -> Result<(), String> {
+    toml::from_str::<TerrainPaletteFile>(toml).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Read on-disk map + terrain sources as `(game-dir-relative-path, contents)`
+/// pairs, for seeding the DB at boot: `terrain.toml` and every
+/// `maps/<name>.toml`. Missing files/dirs are skipped.
+pub fn read_map_source_files(game_dir: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Ok(c) = std::fs::read_to_string(game_dir.join("terrain.toml")) {
+        out.push(("terrain.toml".to_string(), c));
+    }
+    if let Ok(entries) = std::fs::read_dir(game_dir.join("maps")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "toml") {
+                if let (Some(name), Ok(c)) = (
+                    path.file_name().and_then(|s| s.to_str()),
+                    std::fs::read_to_string(&path),
+                ) {
+                    out.push((format!("maps/{}", name), c));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Build the runtime `map.name -> MapTemplateFile` set from DB-stored sources,
+/// folding the palette (the `"terrain.toml"` source) into each map — the
+/// DB-backed replacement for `load_map_templates` + `load_terrain_palette` +
+/// the boot-time fold.
+pub fn build_templates_from_sources(
+    sources: &HashMap<String, String>,
+) -> HashMap<String, MapTemplateFile> {
+    let palette = sources
+        .get("terrain.toml")
+        .map(|s| parse_terrain_palette(s))
+        .unwrap_or_default();
+    let mut templates = HashMap::new();
+    for (path, toml) in sources {
+        if !path.starts_with("maps/") {
+            continue;
+        }
+        match parse_map_template(toml) {
+            Ok(mut mt) => {
+                if !palette.is_empty() {
+                    mt.terrain = mt.effective_terrain(&palette);
+                }
+                templates.insert(mt.map.name.clone(), mt);
+            }
+            Err(e) => tracing::warn!(path = %path, error = %e, "failed to parse map source from DB"),
+        }
+    }
+    templates
+}
+
 /// A parsed grid: `cells[y][x]` is `Some(ch)` for a named terrain cell, or
 /// `None` for blank/absent space. Rows may be ragged in the source TOML
 /// (trailing whitespace trimmed by editors, etc.) — short rows are padded

@@ -1,0 +1,1125 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body>
+<title>Mapwright</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+:root{
+  --ground:#e5e7e2; --surface:#f2f3ef; --surface-2:#fbfbf8; --raise:#ffffff;
+  --ink:#20242a; --muted:#616861; --faint:#8b9189;
+  --line:#ccd0c8; --line-strong:#b6bcb2;
+  --accent:#a23b34; --accent-ink:#fff; --accent-soft:rgba(162,59,52,.12); --accent-line:rgba(162,59,52,.4);
+  --good:#3a6a2e; --warn:#9a6b1f;
+  --shadow:0 1px 2px rgba(30,34,28,.06),0 8px 24px rgba(30,34,28,.08);
+  --grid-line:rgba(60,66,58,.16);
+  --font-display:"Fraunces",Georgia,serif;
+  --font-ui:"IBM Plex Sans",system-ui,sans-serif;
+  --font-mono:"IBM Plex Mono",ui-monospace,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#13161a; --surface:#1a1e23; --surface-2:#22272d; --raise:#262c33;
+    --ink:#e7e9e3; --muted:#99a19a; --faint:#727a73;
+    --line:#333a40; --line-strong:#434b52;
+    --accent:#d76a5f; --accent-ink:#17110f; --accent-soft:rgba(215,106,95,.16); --accent-line:rgba(215,106,95,.5);
+    --good:#79b45e; --warn:#d0a24e;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px rgba(0,0,0,.4);
+    --grid-line:rgba(200,210,196,.14);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#13161a; --surface:#1a1e23; --surface-2:#22272d; --raise:#262c33;
+  --ink:#e7e9e3; --muted:#99a19a; --faint:#727a73;
+  --line:#333a40; --line-strong:#434b52;
+  --accent:#d76a5f; --accent-ink:#17110f; --accent-soft:rgba(215,106,95,.16); --accent-line:rgba(215,106,95,.5);
+  --good:#79b45e; --warn:#d0a24e;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px rgba(0,0,0,.4);
+  --grid-line:rgba(200,210,196,.14);
+}
+
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:var(--font-ui); font-size:14px; line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+  display:flex; flex-direction:column;
+}
+button{font-family:inherit; cursor:pointer}
+input,select,textarea{font-family:inherit; color:inherit}
+:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:3px}
+
+/* ---------- header ---------- */
+header{
+  display:flex; align-items:center; gap:18px;
+  padding:12px 20px; background:var(--surface);
+  border-bottom:1px solid var(--line);
+}
+.brand{display:flex; align-items:baseline; gap:10px; min-width:0}
+.brand h1{
+  font-family:var(--font-display); font-weight:600; font-size:22px;
+  letter-spacing:-.01em; margin:0; line-height:1;
+}
+.brand .tag{
+  font-family:var(--font-mono); font-size:10.5px; letter-spacing:.14em;
+  text-transform:uppercase; color:var(--faint); white-space:nowrap;
+}
+.mapname-wrap{display:flex; align-items:center; gap:8px; margin-left:6px}
+.mapname-wrap label{font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted)}
+#mapName{
+  font-family:var(--font-mono); font-size:13px; font-weight:500;
+  background:var(--surface-2); border:1px solid var(--line); color:var(--ink);
+  border-radius:6px; padding:5px 9px; width:150px;
+}
+#mapPicker{
+  font-family:var(--font-mono); font-size:13px; font-weight:500;
+  background:var(--surface-2); border:1px solid var(--line); color:var(--ink);
+  border-radius:6px; padding:5px 9px; max-width:180px;
+}
+.livedot{font-family:var(--font-mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--good); white-space:nowrap}
+#apiToken{font-family:var(--font-mono); font-size:12px; background:var(--surface-2); border:1px solid var(--warn); color:var(--ink); border-radius:6px; padding:5px 9px; width:150px}
+.hidden{display:none!important}
+.spacer{flex:1}
+.hbtns{display:flex; gap:8px; align-items:center}
+
+button.btn{
+  border:1px solid var(--line-strong); background:var(--surface-2); color:var(--ink);
+  border-radius:7px; padding:7px 12px; font-size:12.5px; font-weight:500;
+  display:inline-flex; align-items:center; gap:6px; transition:background .12s,border-color .12s;
+}
+button.btn:hover{background:var(--raise); border-color:var(--faint)}
+button.btn.primary{background:var(--accent); border-color:var(--accent); color:var(--accent-ink)}
+button.btn.primary:hover{filter:brightness(1.06)}
+button.icon{
+  border:1px solid var(--line-strong); background:var(--surface-2); color:var(--ink);
+  width:34px; height:34px; border-radius:7px; display:grid; place-items:center; font-size:15px;
+}
+button.icon:hover{background:var(--raise)}
+
+/* ---------- main layout ---------- */
+main{
+  flex:1; min-height:0; display:grid;
+  grid-template-columns:236px minmax(0,1fr) 340px;
+}
+.rail{
+  background:var(--surface); overflow-y:auto; padding:16px 14px;
+  display:flex; flex-direction:column; gap:20px;
+}
+.rail.left{border-right:1px solid var(--line)}
+.rail.right{border-left:1px solid var(--line)}
+.stage{
+  min-width:0; overflow:auto; padding:28px;
+  background:
+    radial-gradient(circle at 1px 1px, var(--grid-line) 1px, transparent 0) 0 0/22px 22px,
+    var(--ground);
+  display:grid; place-items:center; align-content:center;
+}
+
+.section-label{
+  font-family:var(--font-mono); font-size:10.5px; letter-spacing:.14em;
+  text-transform:uppercase; color:var(--muted); margin:0 0 10px;
+  display:flex; align-items:center; justify-content:space-between; gap:8px;
+}
+.section-label .add{
+  border:1px solid var(--line); background:var(--surface-2); color:var(--muted);
+  width:20px; height:20px; border-radius:5px; font-size:14px; line-height:1; display:grid; place-items:center;
+}
+.section-label .add:hover{color:var(--accent); border-color:var(--accent-line)}
+
+/* ---------- tools ---------- */
+.tools{display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px}
+.tool{
+  border:1px solid var(--line); background:var(--surface-2); color:var(--muted);
+  border-radius:7px; padding:8px 4px 6px; display:flex; flex-direction:column;
+  align-items:center; gap:3px; font-size:10.5px; font-weight:500;
+}
+.tool .g{font-size:16px; line-height:1}
+.tool:hover{color:var(--ink)}
+.tool[aria-pressed="true"]{
+  background:var(--accent-soft); border-color:var(--accent-line); color:var(--accent);
+}
+
+/* ---------- palette ---------- */
+.swatches{display:flex; flex-direction:column; gap:5px}
+.swatch{
+  display:flex; align-items:center; gap:10px; width:100%;
+  border:1px solid var(--line); background:var(--surface-2); color:var(--ink);
+  border-radius:8px; padding:6px 8px; text-align:left; transition:border-color .12s,background .12s;
+}
+.swatch:hover{border-color:var(--faint)}
+.swatch[aria-pressed="true"]{border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset}
+.swatch .chip{
+  width:26px; height:26px; border-radius:6px; flex:none; position:relative;
+  border:1px solid rgba(0,0,0,.18); display:grid; place-items:center;
+  font-family:var(--font-mono); font-weight:600; font-size:13px; color:rgba(0,0,0,.62);
+}
+.swatch .meta{min-width:0; flex:1}
+.swatch .nm{font-weight:600; font-size:12.5px; line-height:1.25; text-transform:capitalize}
+.swatch .sub{font-family:var(--font-mono); font-size:10px; color:var(--muted); letter-spacing:.02em}
+.swatch .imp{
+  font-size:9px; font-family:var(--font-mono); text-transform:uppercase; letter-spacing:.06em;
+  color:var(--warn); border:1px solid var(--warn); border-radius:4px; padding:1px 4px; flex:none;
+}
+
+/* ---------- grid canvas ---------- */
+.canvas-frame{
+  background:var(--surface-2); border:1px solid var(--line-strong); border-radius:12px;
+  box-shadow:var(--shadow); padding:14px; display:inline-grid; gap:12px;
+}
+.gridwrap{display:inline-grid; grid-template-columns:auto auto; grid-template-rows:auto auto; gap:4px}
+.corner{}
+.axis{display:grid; font-family:var(--font-mono); font-size:10px; color:var(--faint)}
+.axis.cols{grid-auto-flow:column}
+.axis.cols div,.axis.rows div{display:grid; place-items:center}
+.axis.rows{grid-auto-flow:row}
+.grid{
+  display:grid; background:var(--line-strong);
+  border:1px solid var(--line-strong); gap:1px; touch-action:none; user-select:none;
+}
+.cell{
+  position:relative; display:grid; place-items:center;
+  font-family:var(--font-mono); font-weight:600; font-size:14px;
+  color:rgba(0,0,0,.5); background:var(--surface); cursor:pointer;
+}
+.cell.empty{background:repeating-linear-gradient(45deg,transparent,transparent 5px,var(--grid-line) 5px,var(--grid-line) 6px); color:transparent}
+.cell.impass::after{
+  content:""; position:absolute; inset:0;
+  background:repeating-linear-gradient(45deg,rgba(0,0,0,.18) 0 2px,transparent 2px 6px);
+  pointer-events:none;
+}
+.cell .ov{
+  position:absolute; top:3px; right:3px; width:7px; height:7px; border-radius:50%;
+  background:var(--accent); box-shadow:0 0 0 1.5px var(--surface-2);
+}
+.cell .fx{
+  position:absolute; bottom:2px; left:3px; font-size:8px; color:rgba(0,0,0,.55); line-height:1;
+}
+.cell.sel{box-shadow:0 0 0 3px var(--accent); z-index:2}
+.hint{font-family:var(--font-mono); font-size:11px; color:var(--faint); text-align:center}
+
+/* grid size controls */
+.dims{display:flex; align-items:center; gap:14px; flex-wrap:wrap}
+.stepper{display:flex; align-items:center; gap:6px}
+.stepper span{font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted)}
+.stepper .val{font-family:var(--font-mono); font-weight:600; min-width:20px; text-align:center}
+.stepper button{
+  border:1px solid var(--line-strong); background:var(--surface-2); color:var(--ink);
+  width:24px; height:24px; border-radius:6px; font-size:15px; line-height:1; display:grid; place-items:center;
+}
+.stepper button:hover{background:var(--raise)}
+
+/* ---------- inspector ---------- */
+.insp-empty{color:var(--muted); font-size:13px; line-height:1.6}
+.insp-empty b{color:var(--ink)}
+.cell-head{display:flex; align-items:center; gap:10px; margin-bottom:4px}
+.cell-head .coord{font-family:var(--font-mono); font-weight:600; font-size:15px}
+.cell-head .terr{
+  font-family:var(--font-mono); font-size:11px; color:var(--muted);
+  display:inline-flex; align-items:center; gap:6px;
+}
+.cell-head .terr i{width:12px; height:12px; border-radius:3px; display:inline-block; border:1px solid rgba(0,0,0,.2)}
+.field{display:flex; flex-direction:column; gap:5px; margin-bottom:13px}
+.field label{font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); font-weight:600}
+.field input[type=text],.field textarea,.field select,.field input[type=number]{
+  background:var(--surface-2); border:1px solid var(--line); border-radius:7px;
+  padding:8px 10px; font-size:13px; width:100%; color:var(--ink);
+}
+.field textarea{resize:vertical; min-height:66px; line-height:1.5}
+.field input[type=color]{height:38px; padding:3px; cursor:pointer; background:var(--surface-2)}
+.field.mono input{font-family:var(--font-mono); font-size:12.5px}
+.row2{display:grid; grid-template-columns:1fr 1fr; gap:10px}
+.check{display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--ink)}
+.check input{width:15px; height:15px; accent-color:var(--accent)}
+
+.sub-block{border-top:1px solid var(--line); padding-top:13px; margin-top:3px}
+.sub-block h4{
+  margin:0 0 9px; font-family:var(--font-mono); font-size:10.5px; letter-spacing:.12em;
+  text-transform:uppercase; color:var(--muted); display:flex; justify-content:space-between; align-items:center;
+}
+.mini{
+  border:1px solid var(--line); background:var(--surface-2); border-radius:8px;
+  padding:9px; margin-bottom:8px; display:flex; flex-direction:column; gap:7px; position:relative;
+}
+.mini .del{
+  position:absolute; top:6px; right:6px; border:none; background:none; color:var(--faint);
+  font-size:15px; width:20px; height:20px; border-radius:5px; line-height:1;
+}
+.mini .del:hover{color:var(--accent); background:var(--accent-soft)}
+.mini input,.mini select{
+  background:var(--raise); border:1px solid var(--line); border-radius:6px; padding:5px 7px; font-size:12px; width:100%; color:var(--ink);
+}
+.mini .enc-row{display:grid; grid-template-columns:1fr 46px 46px; gap:6px; align-items:center}
+.mini .lbl{font-size:10px; color:var(--muted); font-family:var(--font-mono); letter-spacing:.04em}
+.tybadge{font-family:var(--font-mono); font-size:8.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--accent); background:var(--accent-soft); border:1px solid var(--accent-line); border-radius:4px; padding:0 4px; margin-left:4px; vertical-align:1px}
+.mini .svals{margin-top:2px}
+.addbtn{
+  border:1px dashed var(--line-strong); background:transparent; color:var(--muted);
+  border-radius:7px; padding:6px; font-size:11.5px; font-weight:500; width:100%;
+}
+.addbtn:hover{color:var(--accent); border-color:var(--accent-line)}
+.danger-clear{
+  margin-top:6px; border:1px solid var(--line); background:transparent; color:var(--muted);
+  border-radius:7px; padding:7px; font-size:11.5px; width:100%;
+}
+.danger-clear:hover{color:var(--accent); border-color:var(--accent-line)}
+
+/* ---------- modal ---------- */
+.overlay{
+  position:fixed; inset:0; background:rgba(15,18,15,.5); backdrop-filter:blur(2px);
+  display:none; place-items:center; padding:24px; z-index:50;
+}
+.overlay.open{display:grid}
+.modal{
+  background:var(--surface); border:1px solid var(--line-strong); border-radius:14px;
+  box-shadow:var(--shadow); width:min(680px,100%); max-height:min(86vh,760px);
+  display:flex; flex-direction:column; overflow:hidden;
+}
+.modal header{background:transparent; border-bottom:1px solid var(--line); gap:12px}
+.modal header h3{margin:0; font-family:var(--font-display); font-weight:600; font-size:18px}
+.modal .tabs{display:flex; gap:4px}
+.modal .tabs button{
+  border:1px solid transparent; background:transparent; color:var(--muted);
+  border-radius:7px; padding:5px 11px; font-size:12.5px; font-weight:500;
+}
+.modal .tabs button[aria-pressed="true"]{background:var(--surface-2); color:var(--ink); border-color:var(--line)}
+.modal .body{padding:16px 18px; overflow:auto}
+.modal textarea{
+  width:100%; min-height:300px; background:var(--surface-2); color:var(--ink);
+  border:1px solid var(--line); border-radius:9px; padding:12px;
+  font-family:var(--font-mono); font-size:12px; line-height:1.6; resize:vertical; white-space:pre; tab-size:2;
+}
+.modal .foot{padding:12px 18px; border-top:1px solid var(--line); display:flex; gap:10px; align-items:center}
+.modal .foot .msg{font-size:12px; color:var(--muted); flex:1}
+.modal .foot .msg.err{color:var(--accent)}
+.modal .foot .msg.ok{color:var(--good)}
+
+.toast{
+  position:fixed; bottom:20px; left:50%; transform:translateX(-50%) translateY(20px);
+  background:var(--ink); color:var(--ground); padding:9px 16px; border-radius:8px;
+  font-size:13px; font-weight:500; opacity:0; pointer-events:none; transition:opacity .2s,transform .2s; z-index:60;
+  box-shadow:var(--shadow);
+}
+.toast.show{opacity:1; transform:translateX(-50%) translateY(0)}
+
+@media (max-width:920px){
+  main{grid-template-columns:1fr; grid-template-rows:auto auto auto}
+  .rail{max-height:none}
+  .rail.left{border-right:none; border-bottom:1px solid var(--line)}
+  .rail.right{border-left:none; border-top:1px solid var(--line)}
+  .stage{padding:20px; min-height:52vh}
+  header{flex-wrap:wrap; gap:10px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<header>
+  <div class="brand">
+    <h1>Mapwright</h1>
+    <span class="tag">Hearth&nbsp;·&nbsp;world&nbsp;map&nbsp;builder</span>
+    <span class="livedot hidden" id="serverDot" title="Connected to a running map server">● live</span>
+  </div>
+  <div class="mapname-wrap">
+    <select id="mapPicker" class="hidden" title="Open a map from the game"></select>
+    <label for="mapName">map</label>
+    <input id="mapName" type="text" spellcheck="false" value="iron_hills">
+  </div>
+  <div class="spacer"></div>
+  <div class="hbtns">
+    <input id="apiToken" class="hidden" type="password" spellcheck="false" placeholder="admin token" title="Paste an admin API token to save to the running game">
+    <button class="btn primary hidden" id="btnSaveServer" title="Write this map back to the game">💾 Save to game</button>
+    <button class="btn" id="btnImport" title="Load a map from TOML">⇩ Import</button>
+    <button class="btn primary" id="btnExport" title="Export map + palette as TOML">⇧ Export TOML</button>
+    <button class="icon" id="btnTheme" title="Toggle light / dark" aria-label="Toggle theme">◐</button>
+  </div>
+</header>
+
+<main>
+  <!-- LEFT: tools + palette -->
+  <aside class="rail left">
+    <div>
+      <p class="section-label">Tool</p>
+      <div class="tools" id="tools">
+        <button class="tool" data-tool="paint" aria-pressed="true"><span class="g">🖌</span>Paint</button>
+        <button class="tool" data-tool="erase" aria-pressed="false"><span class="g">⌫</span>Erase</button>
+        <button class="tool" data-tool="inspect" aria-pressed="false"><span class="g">⌖</span>Inspect</button>
+      </div>
+    </div>
+    <div>
+      <p class="section-label">Terrain palette <button class="add" id="btnAddTerrain" title="Add terrain type">+</button></p>
+      <div class="swatches" id="swatches"></div>
+    </div>
+    <div>
+      <p class="section-label">Attribute types</p>
+      <button class="btn" id="btnSchema" style="width:100%; justify-content:center">⚙ Manage attribute types</button>
+    </div>
+    <div>
+      <p class="section-label">Canvas</p>
+      <div class="dims">
+        <div class="stepper"><span>cols</span><button data-dim="w" data-d="-1">−</button><span class="val" id="dimW">6</span><button data-dim="w" data-d="1">+</button></div>
+        <div class="stepper"><span>rows</span><button data-dim="h" data-d="-1">−</button><span class="val" id="dimH">6</span><button data-dim="h" data-d="1">+</button></div>
+      </div>
+      <button class="danger-clear" id="btnReset" style="margin-top:12px">↺ Reset to Iron Hills sample</button>
+    </div>
+  </aside>
+
+  <!-- CENTER: the map -->
+  <section class="stage">
+    <div class="canvas-frame">
+      <div class="gridwrap">
+        <div class="corner"></div>
+        <div class="axis cols" id="axisCols"></div>
+        <div class="axis rows" id="axisRows"></div>
+        <div class="grid" id="grid"></div>
+      </div>
+      <p class="hint" id="stageHint">click &amp; drag to paint · switch to Inspect to edit a room</p>
+    </div>
+  </section>
+
+  <!-- RIGHT: inspector -->
+  <aside class="rail right">
+    <p class="section-label">Room inspector</p>
+    <div id="inspector"></div>
+  </aside>
+</main>
+
+<!-- Import/Export modal -->
+<div class="overlay" id="overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <header>
+      <h3 id="modalTitle">TOML</h3>
+      <div class="spacer"></div>
+      <div class="tabs" id="modalTabs">
+        <button data-doc="map" aria-pressed="true">Map file</button>
+        <button data-doc="palette" aria-pressed="false">terrain.toml</button>
+      </div>
+    </header>
+    <div class="body">
+      <textarea id="tomlArea" spellcheck="false"></textarea>
+    </div>
+    <div class="foot">
+      <span class="msg" id="modalMsg"></span>
+      <button class="btn primary hidden" id="btnSaveDoc" title="Write this file into the game">💾 Save to game</button>
+      <button class="btn" id="btnCopy">Copy</button>
+      <button class="btn" id="btnLoad" style="display:none">Load into builder</button>
+      <button class="btn" id="btnCloseModal">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Terrain editor modal -->
+<div class="overlay" id="terrainOverlay">
+  <div class="modal" style="width:min(460px,100%)" role="dialog" aria-modal="true" aria-labelledby="terrTitle">
+    <header>
+      <h3 id="terrTitle">Terrain type</h3>
+      <div class="spacer"></div>
+      <button class="icon" id="terrClose" aria-label="Close">×</button>
+    </header>
+    <div class="body">
+      <div class="row2">
+        <div class="field mono"><label for="tCh">Character</label><input id="tCh" type="text" maxlength="1" spellcheck="false" placeholder="f"></div>
+        <div class="field"><label for="tColor">Swatch color</label><input id="tColor" type="color" value="#88aa66"></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label for="tTheme">Theme</label><input id="tTheme" type="text" spellcheck="false" placeholder="forest"></div>
+        <div class="field"><label for="tPrefix">Title prefix</label><input id="tPrefix" type="text" placeholder="Forest"></div>
+      </div>
+      <label class="check" style="margin-bottom:6px"><input type="checkbox" id="tPass" checked> Passable — players can walk here</label>
+      <div class="sub-block">
+        <h4>Attributes <span style="text-transform:none;letter-spacing:0;color:var(--faint);font-family:var(--font-ui)">read by your spawn / populate hooks</span></h4>
+        <div id="tAttrList"></div>
+        <button class="addbtn" id="tAddAttr">+ attribute</button>
+      </div>
+    </div>
+    <div class="foot">
+      <button class="btn" id="tDelete" style="color:var(--accent); border-color:var(--accent-line)">Delete</button>
+      <div class="spacer"></div>
+      <button class="btn" id="tCancel">Cancel</button>
+      <button class="btn primary" id="tSave">Save terrain</button>
+    </div>
+  </div>
+</div>
+
+<!-- Attribute schema modal -->
+<div class="overlay" id="schemaOverlay">
+  <div class="modal" style="width:min(560px,100%)" role="dialog" aria-modal="true" aria-labelledby="schemaTitle">
+    <header>
+      <h3 id="schemaTitle">Attribute types</h3>
+      <div class="spacer"></div>
+      <button class="icon" id="schemaClose" aria-label="Close">×</button>
+    </header>
+    <div class="body">
+      <p style="margin:0 0 14px; color:var(--muted); font-size:12.5px; line-height:1.6">Declare the attributes your spawn / populate hooks read. A defined attribute gets a typed input wherever you use it — a dropdown for <b>enums</b>, a checkbox for <b>booleans</b>, a number field for <b>ints</b>. Anything undeclared stays free text. Exports as <span style="font-family:var(--font-mono); font-size:11.5px">[[terrain_attr]]</span> blocks in <span style="font-family:var(--font-mono); font-size:11.5px">terrain.toml</span>.</p>
+      <div id="schemaList"></div>
+      <button class="addbtn" id="addSchema">+ define attribute</button>
+    </div>
+    <div class="foot"><div class="spacer"></div><button class="btn primary" id="schemaDone">Done</button></div>
+  </div>
+</div>
+<datalist id="attrKeys"></datalist>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
+
+/* ---------------- sample data (the real Iron Hills, slimmed schema) ---------------- */
+const SAMPLE_PALETTE={
+  ".":{theme:"plains",title_prefix:"Plains",passable:true,color:"#9bbf6a"},
+  "f":{theme:"forest",title_prefix:"Forest",passable:true,color:"#3a6a2e"},
+  "m":{theme:"mountain",title_prefix:"Mountain",passable:true,color:"#7d756b"},
+  "r":{theme:"river",title_prefix:"River",passable:false,color:"#3a6ea5"},
+  "T":{theme:"town",title_prefix:"Town",passable:true,color:"#b08d57"}
+};
+const SAMPLE_GRID=["..fmmm",".ff.mm","f..T.m","...rr.","..rrr.",".....f"];
+const SAMPLE_CELLS={
+ "3,2":{title:"The Crossroads",description:"A weathered crossroads where four dirt paths converge beneath an ancient oak. A carved wooden stag watches from atop a leaning signpost.",fixed_room:"town/crossroads"},
+ "2,0":{title:"The Whispering Pines",description:"Tall pines sway and creak in the wind. Their whispered conversations sound almost like words."},
+ "4,0":{title:"Iron Peak Pass",description:"A narrow pass between jagged peaks. The wind howls through the gap, carrying flecks of rust-colored stone.",encounters:[{monster:"orc",count:[2,3]}]},
+ "5,0":{title:"The High Crag",description:"A windswept crag overlooking the world below. An old watchtower, half-collapsed, clings to the edge.",objects:[{key:"watchtower",kind:"item",title:"a crumbling watchtower",description:"Stone walls worn smooth by centuries of wind. Someone carved tally marks near the door — hundreds of them."}]},
+ "0,2":{title:"The Old Grove",description:"Ancient oaks with trunks wider than a cart. The canopy is so thick it feels like twilight even at noon.",objects:[{key:"hermit",kind:"npc",title:"Moss the Hermit",description:"A gaunt figure wrapped in bark-cloth. They watch you with bright, curious eyes."}]},
+ "0,5":{title:"The Standing Stone",description:"A single standing stone rises from the grass, covered in spiraling runes. The air hums faintly."},
+ "5,5":{title:"The Sunken Grove",description:"The forest floor dips into a mossy hollow. A spring bubbles up from between the roots of a dead tree."}
+};
+
+/* ---------------- state ---------------- */
+let state;
+function freshFromSample(){
+  return {
+    name:"iron_hills",
+    palette:structuredClone(SAMPLE_PALETTE),
+    grid:SAMPLE_GRID.map(r=>r.split("").map(c=>c===" "?null:c)),
+    cells:structuredClone(SAMPLE_CELLS),
+    schema:[
+      {key:"spawn_table",type:"text"},
+      {key:"danger",type:"int"},
+      {key:"biome",type:"enum",values:["plains","forest","mountain","river","marsh"]}
+    ],
+    tool:"paint", brush:"f", selected:null
+  };
+}
+const ATTR_TYPES=["text","int","float","bool","enum","list"];
+function schemaFor(key){ return (state.schema||[]).find(d=>d.key===key); }
+function load(){
+  try{const raw=localStorage.getItem("mapwright:v1"); if(raw){const s=JSON.parse(raw); s.tool="paint"; s.selected=null; if(!s.schema) s.schema=freshFromSample().schema; return s;}}catch(e){}
+  return freshFromSample();
+}
+function save(){
+  try{
+    const {name,palette,grid,cells,schema}=state;
+    localStorage.setItem("mapwright:v1",JSON.stringify({name,palette,grid,cells,schema,brush:state.brush,tool:"paint"}));
+  }catch(e){}
+}
+state=load();
+state.brush=state.brush&&state.palette[state.brush]?state.brush:Object.keys(state.palette)[0];
+
+/* ---------------- helpers ---------------- */
+const H=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const readable=hex=>{ // choose dark/light glyph ink for a tile color
+  const m=/^#?([0-9a-f]{6})$/i.exec(hex||""); if(!m) return "rgba(0,0,0,.5)";
+  const n=parseInt(m[1],16), r=(n>>16)&255,g=(n>>8)&255,b=n&255;
+  const L=(0.299*r+0.587*g+0.114*b);
+  return L>150?"rgba(0,0,0,.62)":"rgba(255,255,255,.82)";
+};
+const dims=()=>({h:state.grid.length, w:state.grid.reduce((m,r)=>Math.max(m,r.length),0)});
+
+/* ---------------- render: palette ---------------- */
+function renderPalette(){
+  const box=$("#swatches"); box.innerHTML="";
+  for(const [ch,t] of Object.entries(state.palette)){
+    const b=document.createElement("button");
+    b.className="swatch"; b.setAttribute("aria-pressed", state.tool==="paint"&&state.brush===ch?"true":"false");
+    b.innerHTML=`<span class="chip" style="background:${H(t.color||"#ccc")};color:${readable(t.color)}">${H(ch)}</span>
+      <span class="meta"><span class="nm">${H(t.theme||ch)}</span><span class="sub">'${H(ch)}' · ${H(t.title_prefix||t.theme||"")}</span></span>
+      ${t.passable===false?'<span class="imp">wall</span>':""}`;
+    b.title="Click to paint · double-click to edit";
+    b.onclick=()=>{ state.brush=ch; state.tool="paint"; syncTools(); renderPalette(); };
+    b.ondblclick=()=>openTerrain(ch);
+    b.oncontextmenu=e=>{ e.preventDefault(); openTerrain(ch); };
+    box.appendChild(b);
+  }
+}
+
+/* ---------------- render: grid ---------------- */
+function renderGrid(){
+  const {w,h}=dims();
+  $("#dimW").textContent=w; $("#dimH").textContent=h;
+  const cell=42;
+  const grid=$("#grid");
+  grid.style.gridTemplateColumns=`repeat(${w},${cell}px)`;
+  grid.style.gridTemplateRows=`repeat(${h},${cell}px)`;
+  grid.innerHTML="";
+  // axes
+  const ac=$("#axisCols"); ac.style.gridTemplateColumns=`repeat(${w},${cell}px)`; ac.innerHTML="";
+  for(let x=0;x<w;x++){const d=document.createElement("div");d.textContent=x;d.style.height="14px";ac.appendChild(d);}
+  const ar=$("#axisRows"); ar.style.gridTemplateRows=`repeat(${h},${cell}px)`; ar.innerHTML="";
+  for(let y=0;y<h;y++){const d=document.createElement("div");d.textContent=y;d.style.width="14px";ar.appendChild(d);}
+
+  for(let y=0;y<h;y++){
+    for(let x=0;x<w;x++){
+      const ch=(state.grid[y]||[])[x]??null;
+      const t=ch!=null?state.palette[ch]:null;
+      const c=document.createElement("div");
+      c.className="cell"+(ch==null?" empty":"")+(t&&t.passable===false?" impass":"");
+      const key=x+","+y;
+      const ov=state.cells[key];
+      if(ch!=null){
+        c.style.background=t?t.color:"#bbb";
+        c.style.color=t?readable(t.color):"rgba(0,0,0,.5)";
+        c.textContent=ch;
+      }
+      if(state.selected===key) c.classList.add("sel");
+      if(ov){
+        const dot=document.createElement("span"); dot.className="ov"; c.appendChild(dot);
+        if(ov.fixed_room){const f=document.createElement("span"); f.className="fx"; f.textContent="⚓"; c.appendChild(f);}
+      }
+      c.dataset.x=x; c.dataset.y=y;
+      grid.appendChild(c);
+    }
+  }
+}
+
+/* ---------------- painting interaction ---------------- */
+let painting=false;
+function applyAt(x,y){
+  const {w,h}=dims(); if(x<0||y<0||x>=w||y>=h) return;
+  if(!state.grid[y]) state.grid[y]=[];
+  while(state.grid[y].length<w) state.grid[y].push(null);
+  if(state.tool==="paint"){ state.grid[y][x]=state.brush; }
+  else if(state.tool==="erase"){ state.grid[y][x]=null; }
+  renderGrid(); save();
+}
+function selectCell(x,y){ state.selected=x+","+y; renderGrid(); renderInspector(); }
+
+$("#grid").addEventListener("pointerdown",e=>{
+  const c=e.target.closest(".cell"); if(!c) return;
+  const x=+c.dataset.x, y=+c.dataset.y;
+  selectCell(x,y);
+  if(state.tool!=="inspect"){ painting=true; $("#grid").setPointerCapture(e.pointerId); applyAt(x,y); selectCell(x,y); }
+});
+$("#grid").addEventListener("pointerover",e=>{
+  if(!painting) return;
+  const c=e.target.closest(".cell"); if(!c) return;
+  applyAt(+c.dataset.x,+c.dataset.y);
+});
+window.addEventListener("pointerup",()=>{painting=false;});
+
+/* reusable, schema-aware key/value attribute editor. A key that matches a
+   schema definition renders a typed widget (enum→dropdown, bool→select,
+   int/float→number); anything else is free text (type inferred on export).
+   Rebuilds its object from the live rows so renaming a key just works. */
+function valueWidgetHTML(key,val){
+  const def=schemaFor(key), type=def?def.type:"text";
+  if(type==="bool"){ const on=String(val)==="true";
+    return `<select class="av"><option value="true"${on?" selected":""}>true</option><option value="false"${!on?" selected":""}>false</option></select>`; }
+  if(type==="enum"){ const vals=def.values||[]; const known=vals.includes(val);
+    return `<select class="av">${(!known&&val!=="")?`<option value="${H(val)}" selected>${H(val)} (?)</option>`:""}${vals.map(v=>`<option${v===val?" selected":""}>${H(v)}</option>`).join("")}${vals.length===0?`<option value="">— define values —</option>`:""}</select>`; }
+  if(type==="int"||type==="float"){ return `<input class="av" type="number" step="${type==="int"?"1":"any"}" value="${H(val)}">`; }
+  return `<input class="av" type="text" spellcheck="false" value="${H(val)}" placeholder="${def?"":"value"}">`;
+}
+function keyLabelHTML(key){ const def=schemaFor(key); return `key${def?` <span class="tybadge">${H(def.type)}</span>`:""}`; }
+function attrEditor(container, initial, onChange){
+  container.innerHTML="";
+  const read=()=>{ const o={}; container.querySelectorAll(".attr-row").forEach(r=>{
+    const k=r.querySelector(".ak").value.trim(); if(!k) return;
+    const w=r.querySelector(".av"); o[k]=w?w.value:""; }); return o; };
+  const fire=()=>onChange&&onChange(read());
+  const addRow=(k="",v="")=>{
+    const d=document.createElement("div"); d.className="mini attr-row";
+    d.innerHTML=`<button class="del" title="remove">×</button>
+      <div class="enc-row" style="grid-template-columns:1fr 1.25fr">
+        <div><div class="lbl klbl">${keyLabelHTML(k)}</div><input class="ak" list="attrKeys" spellcheck="false" value="${H(k)}" placeholder="spawn_table"></div>
+        <div><div class="lbl">value</div><span class="valwrap">${valueWidgetHTML(k,v)}</span></div>
+      </div>`;
+    const bindVal=()=>{ const w=d.querySelector(".av"); if(w) w.oninput=w.onchange=fire; };
+    d.querySelector(".del").onclick=()=>{ d.remove(); fire(); };
+    d.querySelector(".ak").oninput=fire; // live-save while typing the key
+    d.querySelector(".ak").onchange=()=>{ // key committed: upgrade to the schema's typed widget
+      const key=d.querySelector(".ak").value.trim();
+      d.querySelector(".klbl").innerHTML=keyLabelHTML(key);
+      d.querySelector(".valwrap").innerHTML=valueWidgetHTML(key,"");
+      bindVal(); fire();
+    };
+    bindVal();
+    container.appendChild(d);
+    return d;
+  };
+  Object.entries(initial||{}).forEach(([k,v])=>addRow(k,v));
+  return {addRow:(k,v)=>{ const d=addRow(k,v); d.querySelector(".ak").focus(); }, read};
+}
+
+/* ---------------- inspector ---------------- */
+function renderInspector(){
+  const box=$("#inspector");
+  const key=state.selected;
+  if(!key){
+    box.innerHTML=`<p class="insp-empty">No room selected.<br><br>Switch to <b>Inspect</b> and click a tile to give it a hand-written <b>title</b>, <b>description</b>, a linked <b>fixed room</b>, monster <b>encounters</b>, or placed <b>objects</b>. Tiles without overrides use their terrain theme's generated text.</p>`;
+    return;
+  }
+  const [x,y]=key.split(",").map(Number);
+  const ch=(state.grid[y]||[])[x]??null;
+  const t=ch!=null?state.palette[ch]:null;
+  const cell=state.cells[key]||{};
+  const enc=cell.encounters||[], objs=cell.objects||[];
+  box.innerHTML=`
+    <div class="cell-head">
+      <span class="coord">${x},${y}</span>
+      <span class="terr">${ch!=null?`<i style="background:${H(t?t.color:'#ccc')}"></i>${H(t?t.theme:ch)}`:"empty tile"}</span>
+    </div>
+    ${ch==null?`<p class="insp-empty" style="margin-top:8px">Paint a terrain onto this tile first.</p>`:`
+    <div class="field"><label for="fTitle">Title</label><input id="fTitle" type="text" value="${H(cell.title||"")}" placeholder="${H((t&&t.title_prefix||'')+' ('+x+','+y+')')}"></div>
+    <div class="field"><label for="fDesc">Description</label><textarea id="fDesc" placeholder="Leave blank to use the ${H(t?t.theme:'')} theme's generated text.">${H(cell.description||"")}</textarea></div>
+    <div class="field mono"><label for="fFixed">Fixed room link <span style="text-transform:none;color:var(--faint)">— area/key</span></label><input id="fFixed" type="text" value="${H(cell.fixed_room||"")}" placeholder="town/crossroads"></div>
+    <label class="check"><input type="checkbox" id="fPass" ${cell.passable===false?"checked":""}> Force impassable (override terrain)</label>
+
+    <div class="sub-block">
+      <h4>Encounters <span style="color:var(--faint)">${enc.length||""}</span></h4>
+      <div id="encList"></div>
+      <button class="addbtn" id="addEnc">+ encounter</button>
+    </div>
+    <div class="sub-block">
+      <h4>Objects <span style="color:var(--faint)">${objs.length||""}</span></h4>
+      <div id="objList"></div>
+      <button class="addbtn" id="addObj">+ object</button>
+    </div>
+    <div class="sub-block">
+      <h4>Attributes <span style="color:var(--faint)">${(cell.attrs?Object.keys(cell.attrs).length:0)||""}</span></h4>
+      <div id="attrList"></div>
+      <button class="addbtn" id="addAttr">+ attribute</button>
+    </div>
+    <button class="danger-clear" id="clearCell">Clear all overrides on this tile</button>
+    `}`;
+  if(ch==null) return;
+
+  const cur=()=>{ const c=state.cells[key]||(state.cells[key]={}); return c; };
+  const clean=()=>{ // drop empty override object
+    const c=state.cells[key]; if(!c) return;
+    if(!c.title&&!c.description&&!c.fixed_room&&c.passable===undefined&&!(c.encounters&&c.encounters.length)&&!(c.objects&&c.objects.length)&&!(c.attrs&&Object.keys(c.attrs).length)) delete state.cells[key];
+  };
+  const commit=(rerender)=>{ clean(); save(); renderGrid(); if(rerender) renderInspector(); };
+
+  $("#fTitle").oninput=e=>{ cur().title=e.target.value||undefined; commit(); };
+  $("#fDesc").oninput=e=>{ cur().description=e.target.value||undefined; commit(); };
+  $("#fFixed").oninput=e=>{ cur().fixed_room=e.target.value||undefined; commit(); };
+  $("#fPass").onchange=e=>{ if(e.target.checked) cur().passable=false; else if(state.cells[key]) delete state.cells[key].passable; commit(); };
+
+  // encounters
+  const encBox=$("#encList");
+  enc.forEach((en,i)=>{
+    const d=document.createElement("div"); d.className="mini";
+    d.innerHTML=`<button class="del" title="remove">×</button>
+      <div class="enc-row">
+        <div><div class="lbl">monster</div><input value="${H(en.monster||"")}" data-k="monster"></div>
+        <div><div class="lbl">min</div><input type="number" min="1" value="${en.count?en.count[0]:1}" data-k="min"></div>
+        <div><div class="lbl">max</div><input type="number" min="1" value="${en.count?en.count[1]:1}" data-k="max"></div>
+      </div>`;
+    d.querySelector(".del").onclick=()=>{ enc.splice(i,1); cur().encounters=enc.length?enc:undefined; commit(true); };
+    d.querySelectorAll("input").forEach(inp=>inp.oninput=()=>{
+      const k=inp.dataset.k;
+      if(k==="monster") en.monster=inp.value;
+      else{ en.count=en.count||[1,1]; en.count[k==="min"?0:1]=Math.max(1,+inp.value||1); }
+      cur().encounters=enc; commit();
+    });
+    encBox.appendChild(d);
+  });
+  $("#addEnc").onclick=()=>{ const c=cur(); c.encounters=c.encounters||[]; c.encounters.push({monster:"goblin",count:[1,2]}); commit(true); };
+
+  // objects
+  const objBox=$("#objList");
+  objs.forEach((ob,i)=>{
+    const d=document.createElement("div"); d.className="mini";
+    d.innerHTML=`<button class="del" title="remove">×</button>
+      <div class="enc-row" style="grid-template-columns:1fr 74px">
+        <div><div class="lbl">key</div><input value="${H(ob.key||"")}" data-k="key"></div>
+        <div><div class="lbl">kind</div><select data-k="kind"><option ${ob.kind==="npc"?"selected":""}>npc</option><option ${ob.kind==="item"?"selected":""}>item</option></select></div>
+      </div>
+      <div><div class="lbl">title</div><input value="${H(ob.title||"")}" data-k="title"></div>
+      <div><div class="lbl">description</div><input value="${H(ob.description||"")}" data-k="description"></div>`;
+    d.querySelector(".del").onclick=()=>{ objs.splice(i,1); cur().objects=objs.length?objs:undefined; commit(true); };
+    d.querySelectorAll("input,select").forEach(inp=>inp.oninput=inp.onchange=()=>{ ob[inp.dataset.k]=inp.value; cur().objects=objs; commit(); });
+    objBox.appendChild(d);
+  });
+  $("#addObj").onclick=()=>{ const c=cur(); c.objects=c.objects||[]; c.objects.push({key:"",kind:"npc",title:"",description:""}); commit(true); };
+
+  // custom attributes (read by the game's spawn / populate hooks)
+  const aEd=attrEditor($("#attrList"), cell.attrs, o=>{
+    if(Object.keys(o).length) cur().attrs=o; else if(state.cells[key]) delete state.cells[key].attrs;
+    commit();
+  });
+  $("#addAttr").onclick=()=>aEd.addRow();
+
+  $("#clearCell").onclick=()=>{ delete state.cells[key]; save(); renderGrid(); renderInspector(); toast("Overrides cleared"); };
+}
+
+/* ---------------- tools ---------------- */
+function syncTools(){ $$("#tools .tool").forEach(b=>b.setAttribute("aria-pressed",b.dataset.tool===state.tool?"true":"false")); renderPalette(); $("#stageHint").textContent = state.tool==="inspect"?"click a tile to edit its room details":(state.tool==="erase"?"click & drag to clear tiles":"click & drag to paint · switch to Inspect to edit a room"); }
+$$("#tools .tool").forEach(b=>b.onclick=()=>{ state.tool=b.dataset.tool; syncTools(); });
+
+/* ---------------- dims ---------------- */
+$$(".stepper button").forEach(b=>b.onclick=()=>{
+  const {w,h}=dims(); const d=+b.dataset.d;
+  if(b.dataset.dim==="w"){ const nw=Math.max(1,Math.min(40,w+d));
+    state.grid.forEach(r=>{ if(d>0) r.push(null); else if(r.length>=w) r.length=nw; });
+    if(d<0) pruneCells(nw,h);
+  }else{ const nh=Math.max(1,Math.min(40,h+d));
+    if(d>0) state.grid.push(new Array(w).fill(null)); else { state.grid.length=nh; pruneCells(w,nh); }
+  }
+  renderGrid(); save();
+});
+function pruneCells(w,h){ for(const k of Object.keys(state.cells)){ const [x,y]=k.split(",").map(Number); if(x>=w||y>=h) delete state.cells[k]; } if(state.selected){ const [x,y]=state.selected.split(",").map(Number); if(x>=w||y>=h){ state.selected=null; renderInspector(); } } }
+
+/* ---------------- add / edit terrain (modal) ---------------- */
+let editingCh=null, terrAttrEd=null;
+function openTerrain(ch){
+  editingCh=ch;
+  const t=ch?state.palette[ch]:{theme:"",title_prefix:"",passable:true,color:"#88aa66",attrs:{}};
+  $("#terrTitle").textContent = ch?`Edit terrain ‘${ch}’`:"New terrain type";
+  $("#tCh").value=ch||"";
+  $("#tColor").value=/^#[0-9a-f]{6}$/i.test(t.color||"")?t.color:"#88aa66";
+  $("#tTheme").value=t.theme||""; $("#tPrefix").value=t.title_prefix||"";
+  $("#tPass").checked=t.passable!==false;
+  $("#tDelete").style.display=ch?"":"none";
+  terrAttrEd=attrEditor($("#tAttrList"), t.attrs||{}, null);
+  $("#terrainOverlay").classList.add("open");
+  setTimeout(()=>$("#tCh").focus(),30);
+}
+$("#btnAddTerrain").onclick=()=>openTerrain(null);
+$("#tAddAttr").onclick=()=>terrAttrEd&&terrAttrEd.addRow();
+const closeTerr=()=>$("#terrainOverlay").classList.remove("open");
+$("#tCancel").onclick=closeTerr; $("#terrClose").onclick=closeTerr;
+$("#terrainOverlay").onclick=e=>{ if(e.target===$("#terrainOverlay")) $("#terrainOverlay").classList.remove("open"); };
+$("#tDelete").onclick=()=>{
+  if(!editingCh) return;
+  delete state.palette[editingCh];
+  if(state.brush===editingCh) state.brush=Object.keys(state.palette)[0]||"f";
+  $("#terrainOverlay").classList.remove("open");
+  renderPalette(); renderGrid(); save(); toast(`Terrain ‘${editingCh}’ removed`);
+};
+$("#tSave").onclick=()=>{
+  const key=$("#tCh").value.trim().slice(0,1);
+  if(!key){ toast("A terrain needs a single character"); $("#tCh").focus(); return; }
+  const attrs=terrAttrEd.read();
+  if(editingCh && editingCh!==key){
+    delete state.palette[editingCh];
+    // rename: repoint any painted tiles from the old char to the new one
+    for(const row of state.grid) for(let x=0;x<row.length;x++) if(row[x]===editingCh) row[x]=key;
+  }
+  state.palette[key]={
+    theme:$("#tTheme").value.trim(),
+    title_prefix:$("#tPrefix").value.trim(),
+    passable:$("#tPass").checked,
+    color:$("#tColor").value,
+    attrs
+  };
+  state.brush=key; state.tool="paint"; syncTools();
+  renderPalette(); renderGrid(); save();
+  $("#terrainOverlay").classList.remove("open");
+}
+
+/* ---------------- attribute schema editor ---------------- */
+function refreshAttrKeys(){ const dl=$("#attrKeys"); if(dl) dl.innerHTML=(state.schema||[]).map(d=>`<option value="${H(d.key)}"></option>`).join(""); }
+function renderSchemaRows(){
+  const box=$("#schemaList"); box.innerHTML="";
+  (state.schema||[]).forEach((d,i)=>{
+    const row=document.createElement("div"); row.className="mini";
+    row.innerHTML=`<button class="del" title="remove">×</button>
+      <div class="enc-row" style="grid-template-columns:1fr 96px">
+        <div><div class="lbl">attribute key</div><input class="sk" spellcheck="false" value="${H(d.key)}" placeholder="danger"></div>
+        <div><div class="lbl">type</div><select class="st">${ATTR_TYPES.map(t=>`<option${t===d.type?" selected":""}>${t}</option>`).join("")}</select></div>
+      </div>
+      <div class="svals" style="${d.type==="enum"?"":"display:none"}"><div class="lbl">enum values (comma-separated)</div><input class="sv" spellcheck="false" value="${H((d.values||[]).join(", "))}" placeholder="arid, temperate, alpine"></div>`;
+    const sync=()=>{
+      d.key=row.querySelector(".sk").value.trim();
+      d.type=row.querySelector(".st").value;
+      row.querySelector(".svals").style.display=d.type==="enum"?"":"none";
+      d.values=d.type==="enum"?row.querySelector(".sv").value.split(",").map(s=>s.trim()).filter(Boolean):undefined;
+      save(); refreshAttrKeys();
+    };
+    row.querySelector(".del").onclick=()=>{ state.schema.splice(i,1); renderSchemaRows(); save(); refreshAttrKeys(); };
+    row.querySelectorAll("input,select").forEach(el=>{ el.oninput=sync; el.onchange=sync; });
+    box.appendChild(row);
+  });
+}
+$("#btnSchema").onclick=()=>{ renderSchemaRows(); $("#schemaOverlay").classList.add("open"); };
+$("#addSchema").onclick=()=>{ state.schema=state.schema||[]; state.schema.push({key:"",type:"text"}); renderSchemaRows(); save(); };
+const closeSchema=()=>{ $("#schemaOverlay").classList.remove("open"); refreshAttrKeys(); renderInspector(); };
+$("#schemaDone").onclick=closeSchema; $("#schemaClose").onclick=closeSchema;
+$("#schemaOverlay").onclick=e=>{ if(e.target===$("#schemaOverlay")) closeSchema(); };
+
+/* ---------------- TOML serialize ---------------- */
+const bareKey=k=>/^[A-Za-z0-9_-]+$/.test(k);
+const tkey=k=>bareKey(k)?k:`"${String(k).replace(/"/g,'\\"')}"`;
+const tstr=s=>`"${String(s).replace(/\\/g,"\\\\").replace(/"/g,'\\"').replace(/\n/g,"\\n")}"`;
+/* infer a TOML value from a free-typed attribute string */
+function tval(v){
+  const s=String(v==null?"":v).trim();
+  if(s==="true"||s==="false") return s;
+  if(/^-?\d+$/.test(s)) return s;
+  if(/^-?(\d+\.\d*|\.\d+)$/.test(s)) return s;
+  if(/^[\[{"]/.test(s)) return s;            // raw TOML: array, inline table, or already quoted
+  return tstr(s);
+}
+function emitAttrs(attrs){
+  let o="";
+  for(const [k,v] of Object.entries(attrs||{})){
+    if(!k) continue;
+    const def=schemaFor(k);
+    if(!def){ o+=`${tkey(k)} = ${tval(v)}\n`; continue; }   // ad-hoc: infer
+    if(def.type==="int") o+=`${tkey(k)} = ${parseInt(v,10)||0}\n`;
+    else if(def.type==="float") o+=`${tkey(k)} = ${(parseFloat(v)||0)}\n`;
+    else if(def.type==="bool") o+=`${tkey(k)} = ${String(v)==="true"?"true":"false"}\n`;
+    else if(def.type==="list") o+=`${tkey(k)} = ${/^\s*\[/.test(String(v))?String(v).trim():"["+String(v).split(",").filter(s=>s.trim()).map(s=>tstr(s.trim())).join(", ")+"]"}\n`;
+    else o+=`${tkey(k)} = ${tstr(v)}\n`;                     // text, enum → quoted string
+  }
+  return o;
+}
+/* turn a parsed TOML value back into the string the attribute editor shows */
+function fromVal(v){
+  if(Array.isArray(v)) return "["+v.map(x=>typeof x==="string"?tstr(x):x).join(", ")+"]";
+  if(typeof v==="boolean") return v?"true":"false";
+  if(v==null) return ""; return String(v);
+}
+function serializeMap(){
+  const {w,h}=dims(); let rows=[];
+  for(let y=0;y<h;y++){ let s=""; for(let x=0;x<w;x++){ const c=(state.grid[y]||[])[x]; s+=(c==null?".":c); } rows.push(s.replace(/\s+$/,"")); }
+  // trailing empty rows still meaningful for shape; keep as-is
+  let out=`[map]\nname = ${tstr(state.name||"untitled")}\ngrid = """\n${rows.join("\n")}\n"""\n`;
+  const keys=Object.keys(state.cells).sort((a,b)=>{const[ax,ay]=a.split(",").map(Number),[bx,by]=b.split(",").map(Number);return ay-by||ax-bx;});
+  for(const k of keys){
+    const c=state.cells[k]; const q=`cells.${tkey(k)}`;
+    out+=`\n[${q}]\n`;
+    if(c.title) out+=`title = ${tstr(c.title)}\n`;
+    if(c.description) out+=`description = ${tstr(c.description)}\n`;
+    if(c.fixed_room) out+=`fixed_room = ${tstr(c.fixed_room)}\n`;
+    if(c.passable===false) out+=`passable = false\n`;
+    out+=emitAttrs(c.attrs);
+    (c.objects||[]).forEach(o=>{
+      out+=`\n[[${q}.objects]]\n`;
+      out+=`key = ${tstr(o.key||"")}\n`;
+      out+=`kind = ${tstr(o.kind||"npc")}\n`;
+      if(o.title) out+=`title = ${tstr(o.title)}\n`;
+      if(o.description) out+=`description = ${tstr(o.description)}\n`;
+    });
+    (c.encounters||[]).forEach(e=>{
+      out+=`\n[[${q}.encounters]]\n`;
+      out+=`monster = ${tstr(e.monster||"")}\n`;
+      out+=`count = [${e.count?e.count[0]:1}, ${e.count?e.count[1]:1}]\n`;
+    });
+  }
+  return out;
+}
+function serializePalette(){
+  let out=`# Game-level terrain palette — every map inherits these square types.\n`;
+  for(const d of (state.schema||[])){
+    out+=`\n[[terrain_attr]]\nkey = ${tstr(d.key)}\ntype = ${tstr(d.type)}\n`;
+    if(d.type==="enum"&&d.values&&d.values.length) out+=`values = [${d.values.map(tstr).join(", ")}]\n`;
+  }
+  for(const [ch,t] of Object.entries(state.palette)){
+    out+=`\n[terrain.${tkey(ch)}]\n`;
+    out+=`theme = ${tstr(t.theme||"")}\n`;
+    if(t.title_prefix) out+=`title_prefix = ${tstr(t.title_prefix)}\n`;
+    if(t.passable===false) out+=`passable = false\n`;
+    if(t.color) out+=`color = ${tstr(t.color)}\n`;
+    out+=emitAttrs(t.attrs);
+  }
+  return out;
+}
+
+/* ---------------- TOML parse (focused subset) ---------------- */
+function parseTOML(text){
+  const root={}; let cur=root; const lines=text.split(/\r?\n/);
+  const setPath=(obj,path,val)=>{ let o=obj; for(let i=0;i<path.length-1;i++){ o[path[i]]=o[path[i]]||{}; o=o[path[i]]; } o[path[path.length-1]]=val; };
+  const getObj=(path,arr)=>{ let o=root; for(let i=0;i<path.length;i++){ const last=i===path.length-1; const k=path[i];
+      if(last&&arr){ o[k]=o[k]||[]; const n={}; o[k].push(n); return n; }
+      o[k]=o[k]|| (Array.isArray(o[k])?o[k]:{}); if(Array.isArray(o[k])) o=o[k][o[k].length-1]; else o=o[k]; }
+    return o; };
+  const parsePath=s=>{ const parts=[]; const re=/\s*("([^"\\]|\\.)*"|[A-Za-z0-9_\-.]+)\s*(?:\.|$)/g; let m;
+    // split on dots but respect quotes
+    let out=[], buf="", q=false;
+    for(let i=0;i<s.length;i++){ const c=s[i]; if(c==='"'){q=!q; buf+=c;} else if(c==="."&&!q){ out.push(buf); buf="";} else buf+=c; }
+    out.push(buf);
+    return out.map(p=>{ p=p.trim(); if(p.startsWith('"')&&p.endsWith('"')) return p.slice(1,-1).replace(/\\"/g,'"'); return p; });
+  };
+  const parseVal=(raw)=>{
+    raw=raw.trim();
+    if(raw.startsWith('"""')) return raw; // handled elsewhere
+    if(raw.startsWith('"')){ return raw.slice(1,-1).replace(/\\n/g,"\n").replace(/\\"/g,'"').replace(/\\\\/g,"\\"); }
+    if(raw==="true") return true; if(raw==="false") return false;
+    if(raw.startsWith("[")){ const inner=raw.slice(1,-1).trim(); if(!inner) return []; return inner.split(",").map(v=>parseVal(v.trim())); }
+    if(/^-?\d+$/.test(raw)) return parseInt(raw,10);
+    if(/^-?\d*\.\d+$/.test(raw)) return parseFloat(raw);
+    return raw;
+  };
+  for(let i=0;i<lines.length;i++){
+    let line=lines[i]; const t=line.trim();
+    if(!t||t.startsWith("#")) continue;
+    let m;
+    if((m=/^\[\[(.+)\]\]$/.exec(t))){ cur=getObj(parsePath(m[1]),true); continue; }
+    if((m=/^\[(.+)\]$/.exec(t))){ cur=getObj(parsePath(m[1]),false); continue; }
+    if((m=/^([^=]+?)\s*=\s*(.*)$/.exec(t))){
+      const key=m[1].trim().replace(/^"|"$/g,""); let val=m[2];
+      if(val.trim().startsWith('"""')){
+        // multi-line basic string
+        let acc=val.trim().slice(3); let closed=acc.endsWith('"""');
+        if(closed){ acc=acc.slice(0,-3); }
+        else{ acc=acc.replace(/^\n/,""); i++; for(;i<lines.length;i++){ if(lines[i].trim().endsWith('"""')||lines[i].includes('"""')){ acc+=(acc?"\n":"")+lines[i].replace(/"""\s*$/,""); closed=true; break;} acc+=(acc?"\n":"")+lines[i]; } }
+        acc=acc.replace(/^\n/,"");
+        cur[key]=acc;
+      }else{
+        cur[key]=parseVal(val);
+      }
+    }
+  }
+  return root;
+}
+
+function importMap(root){
+  if(!root.map||!root.map.grid) throw new Error("No [map] table with a grid found.");
+  const gridRows=root.map.grid.replace(/^\n+|\n+$/g,"").split("\n");
+  const grid=gridRows.map(r=>r.split("").map(c=>c===" "||c==="."&&false?null:c));
+  // treat '.' as plains terrain char if present in palette; keep as-is otherwise
+  state.name=root.map.name||"untitled";
+  state.grid=gridRows.map(r=>r.split("").map(c=>c===" "?null:c));
+  state.cells={};
+  const cellsTbl=root.cells||{};
+  for(const [k,v] of Object.entries(cellsTbl)){
+    const c={};
+    if(v.title) c.title=v.title; if(v.description) c.description=v.description;
+    if(v.fixed_room) c.fixed_room=v.fixed_room; if(v.passable===false) c.passable=false;
+    if(Array.isArray(v.encounters)) c.encounters=v.encounters.map(e=>({monster:e.monster,count:Array.isArray(e.count)?e.count:[1,1]}));
+    if(Array.isArray(v.objects)) c.objects=v.objects.map(o=>({key:o.key,kind:o.kind||"npc",title:o.title,description:o.description}));
+    const KNOWN_C=new Set(["title","description","fixed_room","passable","lock","encounters","objects"]);
+    const ca={}; for(const [ak,av] of Object.entries(v)) if(!KNOWN_C.has(ak)) ca[ak]=fromVal(av);
+    if(Object.keys(ca).length) c.attrs=ca;
+    if(Object.keys(c).length) state.cells[k]=c;
+  }
+}
+function importPalette(root){
+  if(!root.terrain) throw new Error("No [terrain.*] tables found.");
+  const p={}; const KNOWN_T=new Set(["theme","title_prefix","passable","color"]);
+  for(const [ch,t] of Object.entries(root.terrain)){
+    const attrs={}; for(const [k,v] of Object.entries(t)) if(!KNOWN_T.has(k)) attrs[k]=fromVal(v);
+    p[ch]={theme:t.theme||"",title_prefix:t.title_prefix||"",passable:t.passable!==false,color:t.color||"#88aa66",attrs};
+  }
+  state.palette=p; if(!state.palette[state.brush]) state.brush=Object.keys(p)[0];
+  if(Array.isArray(root.terrain_attr)) state.schema=root.terrain_attr
+    .filter(d=>d&&d.key)
+    .map(d=>({key:d.key,type:ATTR_TYPES.includes(d.type)?d.type:"text",values:Array.isArray(d.values)?d.values.map(String):undefined}));
+}
+
+/* ---------------- modal ---------------- */
+let modalMode="export", modalDoc="map";
+function openModal(mode){
+  modalMode=mode; $("#modalTitle").textContent = mode==="export"?"Export TOML":"Import TOML";
+  $("#btnLoad").style.display = mode==="import"?"":"none";
+  $("#btnCopy").style.display = mode==="export"?"":"none";
+  $("#tomlArea").readOnly = mode==="export";
+  setDoc("map"); if(mode==="import"){ $("#tomlArea").value=""; $("#tomlArea").placeholder="Paste a map file or terrain.toml here, pick which it is above, then Load."; }
+  $("#modalMsg").className="msg"; $("#modalMsg").textContent = mode==="import"?"Choose the document type that matches what you paste.":"";
+  $("#overlay").classList.add("open");
+}
+function setDoc(doc){
+  modalDoc=doc; $$("#modalTabs button").forEach(b=>b.setAttribute("aria-pressed",b.dataset.doc===doc?"true":"false"));
+  if(modalMode==="export") $("#tomlArea").value = doc==="map"?serializeMap():serializePalette();
+}
+$$("#modalTabs button").forEach(b=>b.onclick=()=>setDoc(b.dataset.doc));
+$("#btnExport").onclick=()=>openModal("export");
+$("#btnImport").onclick=()=>openModal("import");
+$("#btnCloseModal").onclick=()=>$("#overlay").classList.remove("open");
+$("#overlay").onclick=e=>{ if(e.target===$("#overlay")) $("#overlay").classList.remove("open"); };
+$("#btnCopy").onclick=async()=>{ try{ await navigator.clipboard.writeText($("#tomlArea").value); modalMsg("Copied to clipboard","ok"); }catch(e){ $("#tomlArea").select(); modalMsg("Select-all ready — press ⌘/Ctrl-C","ok"); } };
+$("#btnLoad").onclick=()=>{
+  try{
+    const root=parseTOML($("#tomlArea").value);
+    if(modalDoc==="map") importMap(root); else importPalette(root);
+    state.selected=null; renderAll(); save();
+    $("#overlay").classList.remove("open"); toast((modalDoc==="map"?"Map":"Palette")+" loaded");
+  }catch(err){ modalMsg(err.message||"Could not parse TOML","err"); }
+};
+function modalMsg(t,cls){ const m=$("#modalMsg"); m.textContent=t; m.className="msg"+(cls?" "+cls:""); }
+
+/* ---------------- misc ui ---------------- */
+$("#mapName").oninput=e=>{ state.name=e.target.value; save(); };
+$("#btnReset").onclick=()=>{ if(confirm("Discard the current map and reload the Iron Hills sample?")){ const b=freshFromSample(); Object.assign(state,b); $("#mapName").value=state.name; renderAll(); save(); toast("Reset to sample"); } };
+
+let toastTimer;
+function toast(t){ const el=$("#toast"); el.textContent=t; el.classList.add("show"); clearTimeout(toastTimer); toastTimer=setTimeout(()=>el.classList.remove("show"),1600); }
+
+/* theme toggle */
+function currentTheme(){ const s=document.documentElement.getAttribute("data-theme"); if(s) return s; return matchMedia("(prefers-color-scheme:dark)").matches?"dark":"light"; }
+$("#btnTheme").onclick=()=>{ const n=currentTheme()==="dark"?"light":"dark"; document.documentElement.setAttribute("data-theme",n); try{localStorage.setItem("mapwright:theme",n);}catch(e){} };
+try{const th=localStorage.getItem("mapwright:theme"); if(th) document.documentElement.setAttribute("data-theme",th);}catch(e){}
+
+/* keyboard: 1/2/3 tools, esc closes modal */
+window.addEventListener("keydown",e=>{
+  if(e.target.matches("input,textarea,select")) { if(e.key==="Escape") e.target.blur(); return; }
+  if(e.key==="Escape"){ $("#overlay").classList.remove("open"); $("#terrainOverlay").classList.remove("open"); $("#schemaOverlay").classList.remove("open"); }
+  if(e.key==="1"){state.tool="paint";syncTools();}
+  if(e.key==="2"){state.tool="erase";syncTools();}
+  if(e.key==="3"){state.tool="inspect";syncTools();}
+});
+
+/* ---------------- server mode: live edit against the running game ----------------
+   Served at /builder by the Hearth engine, the builder talks to POST /api with
+   the {action,...} envelope + a Bearer admin token (writes are Admin-gated). As
+   a standalone artifact the probe fails and it silently stays in copy/paste mode. */
+let SERVER=false;
+const getToken=()=>{ try{return localStorage.getItem("mapwright:token")||"";}catch(e){return"";} };
+const setToken=t=>{ try{localStorage.setItem("mapwright:token",t||"");}catch(e){} };
+async function apiPost(action, params){
+  const headers={"Content-Type":"application/json"};
+  const t=getToken(); if(t) headers["Authorization"]="Bearer "+t;
+  const r=await fetch("/api",{method:"POST",cache:"no-store",headers,body:JSON.stringify(Object.assign({action},params||{}))});
+  return r.json();   // { ok, data?, error? }
+}
+async function detectServer(){
+  let j; try{ j=await apiPost("list_maps"); }catch(e){ return; }   // artifact / no server → stay local
+  SERVER=true;
+  if(j && j.ok && j.data && Array.isArray(j.data.maps)){ afterAuth(); await enterServerMode(j.data); }
+  else { needToken(j&&j.error||"admin token required"); }
+}
+function needToken(msg){
+  $("#serverDot").classList.remove("hidden"); $("#serverDot").textContent="● needs token"; $("#serverDot").style.color="var(--warn)";
+  $("#apiToken").classList.remove("hidden"); $("#apiToken").value=getToken();
+  toast(msg);
+}
+function afterAuth(){ $("#apiToken").classList.add("hidden"); $("#serverDot").textContent="● live"; $("#serverDot").style.color=""; }
+$("#apiToken").onchange=()=>{ setToken($("#apiToken").value.trim()); detectServer(); };
+async function enterServerMode(d){
+  $("#serverDot").classList.remove("hidden");
+  $("#btnSaveServer").classList.remove("hidden"); $("#btnSaveDoc").classList.remove("hidden");
+  $("#mapPicker").classList.remove("hidden");
+  if(d.terrain){ try{ importPalette(parseTOML(d.terrain)); }catch(e){} }   // shared palette + schema
+  const first = d.maps.includes(state.name)?state.name:d.maps[0];
+  if(first) await loadMapFromServer(first,true); else { refreshMapList(d.maps); renderAll(); }
+  toast("Connected to the game — editing live");
+}
+function refreshMapList(names){ $("#mapPicker").innerHTML=(names||[]).map(n=>`<option${n===state.name?" selected":""}>${H(n)}</option>`).join(""); }
+async function loadMapFromServer(name,quiet){
+  const j=await apiPost("get_map",{name});
+  if(!j.ok){ toast(j.error||("couldn't open "+name)); return; }
+  try{ importMap(parseTOML(j.data.toml)); state.name=j.data.name||name; state.selected=null;
+    renderAll(); save(); $("#mapPicker").value=state.name; if(!quiet) toast("Opened "+state.name); }
+  catch(e){ toast("Parse error: "+(e.message||e)); }
+}
+async function saveToServer(which){
+  let j;
+  if(which==="palette") j=await apiPost("put_terrain",{toml:serializePalette()});
+  else{ const name=(state.name||"untitled").trim().replace(/[^A-Za-z0-9_\-]/g,"_");
+    j=await apiPost("put_map",{name,toml:serializeMap()}); }
+  if(j.ok){ toast((which==="palette"?"terrain.toml":state.name+".toml")+" saved to the live game");
+    try{ const m=await apiPost("list_maps"); if(m.ok){ refreshMapList(m.data.maps); $("#mapPicker").value=state.name; } }catch(e){} }
+  else toast("Save failed: "+(j.error||"?"));
+}
+$("#mapPicker").onchange=e=>loadMapFromServer(e.target.value);
+$("#btnSaveServer").onclick=()=>saveToServer("map");
+$("#btnSaveDoc").onclick=()=>saveToServer(modalDoc==="palette"?"palette":"map");
+
+/* ---------------- boot ---------------- */
+function renderAll(){ $("#mapName").value=state.name; refreshAttrKeys(); renderPalette(); renderGrid(); renderInspector(); syncTools(); }
+renderAll();
+detectServer();
+</script>
+
+</body></html>
