@@ -103,6 +103,10 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
+          # Only the build job's binaries. Without a pattern this also pulls
+          # the .dockerbuild provenance artifact that docker/build-push-action
+          # uploads on its own, which fails to extract under merge-multiple.
+          pattern: hearth-mud-*
           path: artifacts
           merge-multiple: true
 
