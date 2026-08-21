@@ -259,7 +259,14 @@ impl Engine {
 
         // Always load/reload game files — new content is created,
         // managed content is updated, non-managed content is untouched.
-        let mut key_map: HashMap<String, String> = HashMap::new();
+        //
+        // Seeded from the world we just loaded rather than starting empty:
+        // with `load_world_files = false` the loader never runs, and an empty
+        // map fails every `<area>/<key>` lookup — starting with `spawn_room`
+        // below, which then builds a duplicate empty room and drops players
+        // into it. The file load overwrites these entries with its own when
+        // it runs, so this is a floor rather than a competing source.
+        let mut key_map: HashMap<String, String> = crate::loader::key_map_from_world(&world);
         let mut file_hashes: HashMap<std::path::PathBuf, u64> = HashMap::new();
         let softcode = SoftcodeRuntime::new();
         if let Some(game_dir) = &config.game_dir {
@@ -6812,6 +6819,46 @@ mod tests {
         let out = engine.cmd_import(&session_id, &dir.path.to_string_lossy());
         assert!(out.contains("Permission denied"));
         assert!(engine.world.objects.values().all(|o| o.key != "hall"));
+    }
+
+    /// Booting with `load_world_files = false` used to leave the file-key map
+    /// empty, so `spawn_room` never resolved and the engine built a duplicate
+    /// empty room — players landed in "An empty room" instead of the real
+    /// spawn. Verified against The Last Stag before the fix: 34 objects became
+    /// 35, with two crossroads rooms.
+    #[test]
+    fn spawn_room_resolves_from_the_database_when_file_loading_is_off() {
+        let db = crate::db::Database::open(Path::new(":memory:")).unwrap();
+
+        let mut seeded = World::new();
+        let crossroads = seeded.next_dbref();
+        let mut room = GameObject::new(&crossroads, "crossroads", Kind::Room)
+            .with_title("The Crossroads");
+        room.attrs.insert(
+            "_file_key".into(),
+            serde_json::json!("town/crossroads"),
+        );
+        seeded.add_object(room);
+        db.save_world(&seeded).unwrap();
+
+        let config = Config {
+            spawn_room: "town/crossroads".into(),
+            game_dir: None,
+            load_world_files: false,
+            ..Config::default()
+        };
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let engine = Engine::new(rx, db, &config);
+
+        assert_eq!(
+            engine.spawn_room_ref, crossroads,
+            "spawn should resolve to the room already in the database"
+        );
+        assert_eq!(
+            engine.world.objects.len(),
+            1,
+            "no duplicate spawn room should have been created"
+        );
     }
 
     /// A hook that schedules two timers is a fork bomb, and because timers

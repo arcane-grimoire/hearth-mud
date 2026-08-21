@@ -109,6 +109,16 @@ delta against a previous version.
 
 ### Fixed
 
+- **`load_world_files = false` broke every file-key lookup.** The
+  `<area>/<key>` → dbref map was built only as a by-product of loading the game
+  directory, so with boot-time file loading off it stayed empty. `spawn_room`
+  then failed to resolve and the engine created a duplicate empty room, landing
+  players in "An empty room. Build your world from here." instead of the real
+  spawn — and `resolve_key` and map `fixed_room` references failed the same
+  way. The identity already lives on each object in `_file_key` and persists
+  with it, so the map is now rebuilt from the loaded world before file loading
+  runs. This made the flag unusable, which is the whole point of it.
+
 - **`on_tick` programs silently discarded their `state` writes.** `run_hook`
   used `Rc::try_unwrap(...).unwrap_or_default()` where the reference count is
   always at least two, so every tick's accumulated state was thrown away

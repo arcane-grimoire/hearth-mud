@@ -56,6 +56,28 @@ fn managed_tag() -> Tag {
 /// drop only the ownership and reconcile semantics layered on top of it."
 pub(crate) const FILE_KEY_ATTR: &str = "_file_key";
 
+/// Rebuild the `<area>/<key>` → dbref map from a world, without reading any
+/// files.
+///
+/// The map is normally a by-product of loading the game directory, but with
+/// `load_world_files = false` that never runs — and then every file-key
+/// lookup fails, starting with `spawn_room`, which falls back to creating a
+/// duplicate empty room. The identity lives on each object in
+/// [`FILE_KEY_ATTR`] and persists with it, so a world loaded straight from
+/// the database already carries everything the map needs.
+///
+/// Objects built in-game carry no file identity and are simply absent.
+pub fn key_map_from_world(world: &World) -> HashMap<String, String> {
+    world
+        .objects
+        .values()
+        .filter_map(|obj| {
+            let key = obj.attrs.get(FILE_KEY_ATTR)?.as_str()?;
+            Some((key.to_string(), obj.ref_id.clone()))
+        })
+        .collect()
+}
+
 /// `pub(crate)` (with `Serialize` added below): `@export` builds these same
 /// structs from live DB objects and serializes them back to TOML, so import
 /// and export share one format definition by construction rather than two
@@ -1272,5 +1294,32 @@ mod tests {
         // stdlib modules are present
         assert!(modules.contains_key("str"));
         assert!(modules.contains_key("collections"));
+    }
+
+    /// With `load_world_files = false` the boot path never ran the loader, so
+    /// the `<area>/<key>` map was empty and every file-key lookup failed —
+    /// including `spawn_room`, which then created a duplicate empty room and
+    /// dropped players into it instead of the real one. The identity is
+    /// already on each object and persists with it, so the map can be
+    /// rebuilt from a world loaded straight from the database.
+    #[test]
+    fn key_map_can_be_rebuilt_from_a_world_without_reading_files() {
+        let mut world = World::new();
+
+        let crossroads = world.next_dbref();
+        let mut room = GameObject::new(&crossroads, "crossroads", Kind::Room);
+        room.attrs
+            .insert(FILE_KEY_ATTR.into(), serde_json::json!("town/crossroads"));
+        world.add_object(room);
+
+        // An object built in-game carries no file identity and must simply
+        // be absent from the map rather than breaking the rebuild.
+        let adhoc = world.next_dbref();
+        world.add_object(GameObject::new(&adhoc, "barrel", Kind::Item));
+
+        let key_map = key_map_from_world(&world);
+
+        assert_eq!(key_map.get("town/crossroads"), Some(&crossroads));
+        assert_eq!(key_map.len(), 1, "only file-identified objects belong in the map");
     }
 }
