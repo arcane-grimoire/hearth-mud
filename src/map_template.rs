@@ -47,6 +47,52 @@ pub struct TerrainDef {
     pub title_prefix: Option<String>,
     #[serde(default = "default_true")]
     pub passable: bool,
+    /// Base fill / environment color for a client's map view (a hex string
+    /// like "#3a6a2e"). Used as the tile fallback by a graphical client and as
+    /// the environment color by a telnet mapper (e.g. Mudlet over GMCP).
+    /// Presentation metadata — the engine never reads it.
+    #[serde(default)]
+    pub color: Option<String>,
+    /// Optional path to a tile image for a graphical client. The engine never
+    /// reads it — it's presentation metadata carried through to the builder /
+    /// renderer via `get_map_template`.
+    #[serde(default)]
+    pub tile_image: Option<String>,
+    /// How the tile image is rotated, named by the cardinal direction it
+    /// faces (north = unrotated). Purely a rendering hint, like `tile_image`.
+    #[serde(default)]
+    pub tile_rotation: TileRotation,
+    /// Game-defined custom attributes. Any key on a `[terrain.X]` block that
+    /// isn't one of the named fields above is captured here and stamped onto
+    /// every room of that terrain as a `terrain_<key>` attribute, so game
+    /// softcode can reference it at runtime (see [`instantiate`]).
+    #[serde(flatten)]
+    pub attrs: HashMap<String, toml::Value>,
+}
+
+/// Rotation of a terrain's [`TerrainDef::tile_image`], expressed as the
+/// cardinal direction the tile faces. `North` is the unrotated default;
+/// `East`/`South`/`West` correspond to 90°/180°/270° clockwise.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TileRotation {
+    #[default]
+    North,
+    East,
+    South,
+    West,
+}
+
+impl TileRotation {
+    /// The rotation as a lowercase cardinal name, for the read API.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TileRotation::North => "north",
+            TileRotation::East => "east",
+            TileRotation::South => "south",
+            TileRotation::West => "west",
+        }
+    }
 }
 
 fn default_theme() -> String {
@@ -133,6 +179,43 @@ pub fn load_map_templates(game_dir: &Path) -> HashMap<String, MapTemplateFile> {
     templates
 }
 
+/// The game-level terrain palette: default `[terrain.X]` swatches every map
+/// inherits, loaded from a single `<game_dir>/terrain.toml`. A map's own
+/// `[terrain.X]` block overrides the palette entry for that character
+/// wholesale (see [`MapTemplateFile::effective_terrain`]).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TerrainPaletteFile {
+    #[serde(default)]
+    pub terrain: HashMap<String, TerrainDef>,
+}
+
+/// Load the game-level terrain palette from `<game_dir>/terrain.toml`, keyed
+/// by terrain character. A missing or unparseable file yields an empty
+/// palette and is logged rather than treated as fatal — same non-fatal
+/// contract as [`load_map_templates`] and [`crate::theme::load_themes`].
+pub fn load_terrain_palette(game_dir: &Path) -> HashMap<String, TerrainDef> {
+    let path = game_dir.join("terrain.toml");
+    if !path.exists() {
+        return HashMap::new();
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match toml::from_str::<TerrainPaletteFile>(&content) {
+            Ok(pf) => {
+                tracing::info!(count = pf.terrain.len(), path = %path.display(), "loaded terrain palette");
+                pf.terrain
+            }
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "failed to parse terrain palette");
+                HashMap::new()
+            }
+        },
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "failed to read terrain palette file");
+            HashMap::new()
+        }
+    }
+}
+
 /// A parsed grid: `cells[y][x]` is `Some(ch)` for a named terrain cell, or
 /// `None` for blank/absent space. Rows may be ragged in the source TOML
 /// (trailing whitespace trimmed by editors, etc.) — short rows are padded
@@ -144,6 +227,20 @@ pub struct ParsedGrid {
 }
 
 impl MapTemplateFile {
+    /// This map's effective terrain set: the game `palette` as the base, with
+    /// the map's own `[terrain.X]` blocks overriding per character wholesale
+    /// (whole-swatch override — a map block replaces the palette entry for
+    /// that character, custom attributes and all). Characters the map doesn't
+    /// declare fall through to the palette.
+    pub fn effective_terrain(
+        &self,
+        palette: &HashMap<String, TerrainDef>,
+    ) -> HashMap<String, TerrainDef> {
+        let mut terrain = palette.clone();
+        terrain.extend(self.terrain.iter().map(|(k, v)| (k.clone(), v.clone())));
+        terrain
+    }
+
     pub fn parse_grid(&self) -> ParsedGrid {
         let rows: Vec<&str> = self.map.grid.trim_matches('\n').lines().collect();
         let height = rows.len();
@@ -316,6 +413,24 @@ pub fn instantiate(
                     value,
                 });
             }
+
+            // Game-defined terrain attributes, stamped under the `terrain_`
+            // namespace (mirroring the `map_` stamps above) so game softcode
+            // can reference them on the room at runtime. The prefix keeps them
+            // clear of the engine stamps and the game's own room attributes.
+            for (attr_key, attr_val) in &terrain.attrs {
+                match serde_json::to_value(attr_val) {
+                    Ok(value) => intents.push(Intent::SetAttr {
+                        target: room_ref.clone(),
+                        key: format!("terrain_{}", attr_key),
+                        value,
+                    }),
+                    Err(e) => tracing::warn!(
+                        map = %name, terrain = %terrain_key, attr = %attr_key, error = %e,
+                        "skipping terrain attribute that could not be converted to JSON"
+                    ),
+                }
+            }
             intents.push(Intent::SetTag { target: room_ref.clone(), tag: map_tag.clone() });
 
             if let Some(expr) = cell_override.and_then(|ov| ov.lock.clone()) {
@@ -446,11 +561,11 @@ mod tests {
         let mut terrain = HashMap::new();
         terrain.insert(
             "f".to_string(),
-            TerrainDef { theme: "forest".into(), title_prefix: Some("Forest".into()), passable: true },
+            TerrainDef { theme: "forest".into(), title_prefix: Some("Forest".into()), passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), attrs: HashMap::new() },
         );
         terrain.insert(
             "r".to_string(),
-            TerrainDef { theme: "river".into(), title_prefix: Some("River".into()), passable: false },
+            TerrainDef { theme: "river".into(), title_prefix: Some("River".into()), passable: false, color: None, tile_image: None, tile_rotation: TileRotation::default(), attrs: HashMap::new() },
         );
         MapTemplateFile {
             map: MapHeader { name: "test_map".into(), grid: grid.to_string() },
@@ -522,6 +637,72 @@ mod tests {
         let result = instantiate(&tmpl, &themes, &world, 1, "#1").unwrap();
         assert_eq!(result.room_count, 2);
         assert!(!result.room_refs.contains_key(&(1, 0)));
+    }
+
+    #[test]
+    fn effective_terrain_merges_palette_with_map_overriding_per_char() {
+        // Palette defines f (forest) and m (mountain); the map redefines f as
+        // swamp and leaves m alone. 3A: the map's f wins wholesale, m falls
+        // through from the palette.
+        let mut palette = HashMap::new();
+        palette.insert(
+            "f".to_string(),
+            TerrainDef { theme: "forest".into(), title_prefix: None, passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), attrs: HashMap::new() },
+        );
+        palette.insert(
+            "m".to_string(),
+            TerrainDef { theme: "mountain".into(), title_prefix: None, passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), attrs: HashMap::new() },
+        );
+
+        let mut map_terrain = HashMap::new();
+        map_terrain.insert(
+            "f".to_string(),
+            TerrainDef { theme: "swamp".into(), title_prefix: None, passable: false, color: None, tile_image: None, tile_rotation: TileRotation::default(), attrs: HashMap::new() },
+        );
+        let tmpl = MapTemplateFile {
+            map: MapHeader { name: "m".into(), grid: "f".into() },
+            terrain: map_terrain,
+            cells: HashMap::new(),
+        };
+
+        let merged = tmpl.effective_terrain(&palette);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged["f"].theme, "swamp"); // map override wins wholesale
+        assert!(!merged["f"].passable);
+        assert_eq!(merged["m"].theme, "mountain"); // inherited from palette
+    }
+
+    #[test]
+    fn custom_terrain_attrs_are_stamped_onto_rooms_with_prefix() {
+        let mut attrs = HashMap::new();
+        attrs.insert("movement_cost".to_string(), toml::Value::Integer(3));
+        attrs.insert("is_high_ground".to_string(), toml::Value::Boolean(true));
+        let mut terrain = HashMap::new();
+        terrain.insert(
+            "m".to_string(),
+            TerrainDef { theme: "forest".into(), title_prefix: None, passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), attrs },
+        );
+        let tmpl = MapTemplateFile {
+            map: MapHeader { name: "test_map".into(), grid: "m".into() },
+            terrain,
+            cells: HashMap::new(),
+        };
+        let themes = sample_themes();
+        let world = World::new();
+        let result = instantiate(&tmpl, &themes, &world, 1, "#1").unwrap();
+
+        let stamped: HashMap<&str, &serde_json::Value> = result
+            .intents
+            .iter()
+            .filter_map(|i| match i {
+                Intent::SetAttr { key, value, .. } => Some((key.as_str(), value)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stamped.get("terrain_movement_cost"), Some(&&serde_json::json!(3)));
+        assert_eq!(stamped.get("terrain_is_high_ground"), Some(&&serde_json::json!(true)));
+        // The bare, unprefixed key is never stamped — the namespace is required.
+        assert!(!stamped.contains_key("movement_cost"));
     }
 
     #[test]

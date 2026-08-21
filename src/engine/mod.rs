@@ -325,11 +325,27 @@ impl Engine {
             .map(|dir| crate::theme::load_themes(std::path::Path::new(dir)))
             .unwrap_or_default();
 
-        let map_templates = config
+        let mut map_templates = config
             .game_dir
             .as_deref()
             .map(|dir| crate::map_template::load_map_templates(std::path::Path::new(dir)))
             .unwrap_or_default();
+
+        // Fold the game-level terrain palette into every map's terrain set
+        // once, at load time, so all downstream consumers (instantiate,
+        // get_map_template) read a single already-merged `terrain` map and
+        // need no palette plumbing. A map's own `[terrain.X]` still overrides
+        // the palette entry for that character (see `effective_terrain`).
+        let terrain_palette = config
+            .game_dir
+            .as_deref()
+            .map(|dir| crate::map_template::load_terrain_palette(std::path::Path::new(dir)))
+            .unwrap_or_default();
+        if !terrain_palette.is_empty() {
+            for template in map_templates.values_mut() {
+                template.terrain = template.effective_terrain(&terrain_palette);
+            }
+        }
 
         let scheduled_hooks = db.load_scheduled_hooks().unwrap_or_else(|e| {
             tracing::error!(error = %e, "Failed to load scheduled hooks");

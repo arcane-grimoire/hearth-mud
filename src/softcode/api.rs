@@ -1324,6 +1324,13 @@ pub fn install<'scope, 'env>(
                             if let Some(prefix) = &terrain.title_prefix {
                                 cell.set("title_prefix", prefix.clone())?;
                             }
+                            if !terrain.attrs.is_empty() {
+                                let attrs = lua.create_table()?;
+                                for (k, v) in &terrain.attrs {
+                                    attrs.set(k.clone(), lua.to_value(v)?)?;
+                                }
+                                cell.set("terrain_attrs", attrs)?;
+                            }
                         }
 
                         if let Some(ov) = template.cells.get(&key) {
@@ -1365,6 +1372,20 @@ pub fn install<'scope, 'env>(
                 t.set("passable", def.passable)?;
                 if let Some(prefix) = &def.title_prefix {
                     t.set("title_prefix", prefix.clone())?;
+                }
+                if let Some(color) = &def.color {
+                    t.set("color", color.clone())?;
+                }
+                if let Some(image) = &def.tile_image {
+                    t.set("tile_image", image.clone())?;
+                    t.set("tile_rotation", def.tile_rotation.as_str())?;
+                }
+                if !def.attrs.is_empty() {
+                    let attrs = lua.create_table()?;
+                    for (k, v) in &def.attrs {
+                        attrs.set(k.clone(), lua.to_value(v)?)?;
+                    }
+                    t.set("attrs", attrs)?;
                 }
                 terrain_table.set(key.clone(), t)?;
             }
