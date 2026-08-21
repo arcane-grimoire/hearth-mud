@@ -86,6 +86,24 @@ next.
   and rebuilds the live templates, no restart. With both halves in, maps have
   world content's full story and `load_world_files` need not mean anything for
   maps.
+
+  > **On the conflict divergence:** maps keep-local-and-report where Programs
+  > overwrite-and-preserve. This is deliberate and the *right* asymmetry, not an
+  > oversight to "fix" by making maps overwrite. The only reason Programs can
+  > safely overwrite is that the version log preserves the discarded edit; maps
+  > have no history, so overwriting is unrecoverable. If the two are ever
+  > unified, the correct direction is **giving maps a version history** and then
+  > adopting overwrite-and-preserve — never dropping the keep-local guard while
+  > maps still have no undo.
+
+- **Map/terrain files are skipped by the world-content area walk**
+  (`is_map_source_path`, filtered in both `parse_area_dir` and `load_game_dir`).
+  They live in the same directory but are owned by `file_sources`; parsing them
+  as areas was a harmless no-op, but a *malformed* one would abort the entire
+  world-content load (the walk propagates the first parse error, and boot logs
+  it and continues — a healthy-looking server with none of the game applied).
+  Now that `@export`/edit/`@import` makes hand-editing map files routine, that
+  blast radius is closed at the parse site.
 - **Map picker / rename / delete** actions (`delete_map`).
 - **Themes and ink** want the same DB-backed treatment; `file_sources` is
   already the generic authored-source table (keyed by path) they'd share.
