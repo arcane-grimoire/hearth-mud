@@ -18,7 +18,7 @@ are built on. The game (The Last Stag) lives in `../the-last-stag-mud/`.
 ```sh
 cargo run                                    # default config (hearth.toml)
 cargo run -- ../the-last-stag-mud/hearth.toml  # game-specific config
-cargo test                                   # 236 tests
+cargo test                                   # 238 tests
 
 # Web client (Svelte)
 cd web && npm install                        # first time
@@ -187,8 +187,8 @@ See `docs/adr/` (6 ADRs). See `CONTEXT.md` for domain glossary.
 
 ## Testing
 
-236 tests across: softcode (57), engine (54), db (18), import/export (17),
-grid (16), loader (14), accounts (12), cli (10), ink (9),
+238 tests across: softcode (57), engine (54), db (18), import/export (17),
+grid (16), loader (14), accounts (12), map templates (11), cli (10), ink (9),
 map templates (9), locks (9), markup (6), dungeon (4), world (1).
 
 Softcode tests also discover and run `*.test.luau` files from the game
