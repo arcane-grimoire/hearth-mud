@@ -7,6 +7,8 @@
   import MapIcon from '@lucide/svelte/icons/map';
   import WrenchIcon from '@lucide/svelte/icons/wrench';
   import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
+  import Maximize2 from '@lucide/svelte/icons/maximize-2';
+  import Minimize2 from '@lucide/svelte/icons/minimize-2';
   import Output from './components/Output.svelte';
   import InputBar from './components/InputBar.svelte';
   import Sidebar from './components/Sidebar.svelte';
@@ -27,6 +29,7 @@
   let settingsOpen = $state(false);
   let adminOpen = $state(false);
   let mapsOpen = $state(false);
+  let panelFull = $state(false);
   let toolsOpen = $state(false);
   let ws;
   let reconnectTimer;
@@ -113,10 +116,28 @@
 
   function handleKeydown(e) {
     if (e.key === 'Escape') {
+      if (panelFull) { panelFull = false; return; }  // Esc leaves full screen first
       if (editingEntity) closeEditor();
       inputBar?.focus();
     }
   }
+
+  // Auto-clear full screen when no panel is open, and let the embedded map
+  // builder (a same-origin iframe) drive full-screen/Esc via postMessage, since
+  // its own keydowns don't reach this document.
+  $effect(() => {
+    if (!mapsOpen && !adminOpen && !editingEntity) panelFull = false;
+  });
+  $effect(() => {
+    const onMsg = (e) => {
+      if (e.origin !== location.origin) return;
+      const t = e.data?.type;
+      if (t === 'mapwright:toggle-fullscreen') panelFull = !panelFull;
+      else if (t === 'mapwright:esc') { if (panelFull) panelFull = false; else closeMaps(); }
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  });
 
   $effect(() => {
     connect();
@@ -158,6 +179,11 @@
           {/if}
         </div>
       {/if}
+      {#if mapsOpen || adminOpen || editingEntity}
+        <IconButton ariaLabel={panelFull ? 'Exit full screen' : 'Full screen'} size="sm" onclick={() => panelFull = !panelFull}>
+          {#if panelFull}<Minimize2 size={14} />{:else}<Maximize2 size={14} />{/if}
+        </IconButton>
+      {/if}
       <IconButton ariaLabel="Settings" size="sm" onclick={() => settingsOpen = true}>
         <SettingsIcon size={14} />
       </IconButton>
@@ -180,7 +206,7 @@
   <div class="main">
     <Output bind:this={output} oncommand={handleCommand} />
     {#if mapsOpen}
-      <div class="maps-view">
+      <div class="pane maps-view" class:full={panelFull}>
         <div class="maps-back">
           <IconButton ariaLabel="Back to game" size="sm" onclick={closeMaps}>
             <ArrowLeftIcon size={14} />
@@ -189,9 +215,13 @@
         <iframe class="maps-frame" src="/builder?embed=1" title="Map builder"></iframe>
       </div>
     {:else if adminOpen}
-      <Admin onclose={() => adminOpen = false} />
+      <div class="pane" class:full={panelFull}>
+        <Admin onclose={() => adminOpen = false} />
+      </div>
     {:else if editingEntity}
-      <Editor entity={editingEntity} onclose={closeEditor} />
+      <div class="pane" class:full={panelFull}>
+        <Editor entity={editingEntity} onclose={closeEditor} />
+      </div>
     {:else if sidebarOpen}
       <Sidebar {status} room={roomData} {sendCommand} {isBuilder} onedit={openEditor} {gamePanels} />
     {/if}
@@ -257,7 +287,14 @@
   .tools-item:hover { background: var(--bg-surface-hover); }
 
   /* embedded map builder fills the main area; the app supplies the back button */
-  .maps-view { position: relative; flex: 1; min-width: 0; display: flex; }
+  /* a panel (map builder, admin, or entity editor) that can go full screen */
+  .pane { display: flex; min-width: 0; }
+  .maps-view.pane { position: relative; flex: 1; }
+  /* full screen: fill the window below the top bar, so the exit toggle up
+     there stays reachable — works for every panel, not just the map builder */
+  .pane.full { position: fixed; inset: 44px 0 0 0; z-index: 100; background: var(--bg-primary); }
+  .pane.full :global(.admin),
+  .pane.full :global(.editor) { width: 100%; max-width: 100%; min-width: 0; flex: 1; }
   .maps-frame { flex: 1; width: 100%; height: 100%; border: 0; background: var(--bg-primary); }
   .maps-back { position: absolute; top: 6px; left: 7px; z-index: 5; }
 

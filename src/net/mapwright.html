@@ -1069,12 +1069,21 @@ try{
 }catch(e){}
 
 /* keyboard: 1/2/3 tools, esc closes modal */
+const postHost=(type)=>{ if(EMBED){ try{ parent.postMessage({type},location.origin); }catch(err){} } };
 window.addEventListener("keydown",e=>{
+  // ⌘/Ctrl-S saves to the game (server mode) or opens Export (standalone) — from anywhere.
+  if((e.metaKey||e.ctrlKey) && (e.key==="s"||e.key==="S")){ e.preventDefault(); if(SERVER) saveToServer("map"); else openModal("export"); return; }
   if(e.target.matches("input,textarea,select")) { if(e.key==="Escape") e.target.blur(); return; }
-  if(e.key==="Escape"){ $("#overlay").classList.remove("open"); $("#terrainOverlay").classList.remove("open"); $("#schemaOverlay").classList.remove("open"); }
+  if(e.key==="Escape"){
+    const open=$("#overlay").classList.contains("open")||$("#terrainOverlay").classList.contains("open")||$("#schemaOverlay").classList.contains("open");
+    $("#overlay").classList.remove("open"); $("#terrainOverlay").classList.remove("open"); $("#schemaOverlay").classList.remove("open");
+    if(!open) postHost("mapwright:esc");   // embedded: leave full screen, then close
+    return;
+  }
   if(e.key==="1"){state.tool="paint";syncTools();}
   if(e.key==="2"){state.tool="erase";syncTools();}
   if(e.key==="3"){state.tool="inspect";syncTools();}
+  if(e.key==="f"||e.key==="F"){ postHost("mapwright:toggle-fullscreen"); }   // embedded: toggle full screen
 });
 
 /* ---------------- server mode: live edit against the running game ----------------
