@@ -375,6 +375,19 @@ impl Engine {
                 if let Err(e) = db.seed_file_source(&path, &toml) {
                     tracing::warn!(error = %e, path = %path, "failed to seed map source");
                 }
+                // Record the seed hash as the import baseline the first time a
+                // path is seen, so a later `@import` of a changed file can tell
+                // "nobody edited the DB copy" (silent update) from "the builder
+                // edited it" (conflict). Never overwrite an existing baseline.
+                if db
+                    .get_import_hash(crate::import_export::FILE_SOURCE_REF, &path)
+                    .ok()
+                    .flatten()
+                    .is_none()
+                {
+                    let hash = crate::import_export::blake3_hex(&toml);
+                    let _ = db.set_import_hash(crate::import_export::FILE_SOURCE_REF, &path, &hash);
+                }
             }
         }
         let file_sources = db.load_file_sources().unwrap_or_else(|e| {
@@ -757,6 +770,14 @@ impl Engine {
     /// see the change immediately, no restart.
     fn rebuild_map_templates(&mut self) {
         self.map_templates = crate::map_template::build_templates_from_sources(&self.file_sources);
+    }
+
+    /// Reload DB-owned map/terrain sources into memory and rebuild the live
+    /// templates — after an `@import`/`Import` that may have written
+    /// `file_sources` rows, so the running game reflects them without restart.
+    fn reload_map_sources_from_db(&mut self) {
+        self.file_sources = self.db.load_file_sources().unwrap_or_default();
+        self.rebuild_map_templates();
     }
 
     /// A map name safe to use as `maps/<name>.toml` — bare filename only, no
@@ -1178,6 +1199,9 @@ impl Engine {
                     acting_account.as_deref(),
                 ) {
                     Ok(report) => {
+                        if !dry_run {
+                            self.reload_map_sources_from_db();
+                        }
                         let output = crate::import_export::render_import_report(&report, dry_run, &path);
                         ApiResponse::success(serde_json::json!({ "output": output }))
                     }
@@ -4239,7 +4263,12 @@ impl Engine {
             dry_run,
             actor_ref.as_deref(),
         ) {
-            Ok(report) => crate::import_export::render_import_report(&report, dry_run, path),
+            Ok(report) => {
+                if !dry_run {
+                    self.reload_map_sources_from_db();
+                }
+                crate::import_export::render_import_report(&report, dry_run, path)
+            }
             Err(e) => format!("Import error: {}\r\n", e),
         }
     }
