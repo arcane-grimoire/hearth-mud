@@ -4,9 +4,18 @@
 
   let { status = 'disconnected', room = null, sendCommand = () => {}, isBuilder = false, onedit = () => {}, gamePanels = new Map() } = $props();
 
-  let players = $derived(room?.contents?.filter(e => e.kind === 'player') ?? []);
-  let npcs = $derived(room?.contents?.filter(e => e.kind === 'npc') ?? []);
-  let items = $derived(room?.contents?.filter(e => e.kind === 'item') ?? []);
+  let grouped = $derived.by(() => {
+    const g = { players: [], npcs: [], items: [] };
+    for (const e of room?.contents ?? []) {
+      if (e.kind === 'player') g.players.push(e);
+      else if (e.kind === 'npc') g.npcs.push(e);
+      else if (e.kind === 'item') g.items.push(e);
+    }
+    return g;
+  });
+  let players = $derived(grouped.players);
+  let npcs = $derived(grouped.npcs);
+  let items = $derived(grouped.items);
   let exits = $derived(room?.exits ?? []);
 
   const statusDotMap = {

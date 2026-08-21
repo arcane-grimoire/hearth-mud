@@ -11,17 +11,30 @@
     }
   }
 
+  // Incoming text is queued and flushed at most once per animation frame so
+  // bursts of WebSocket messages cause a single DOM write + layout pass.
+  let queue = [];
+  let flushScheduled = false;
+
   export function append(html) {
-    if (!container) return;
-    container.insertAdjacentHTML('beforeend', html);
-    while (container.childNodes.length > 8000) {
-      container.removeChild(container.firstChild);
+    queue.push(html);
+    if (!flushScheduled) {
+      flushScheduled = true;
+      requestAnimationFrame(flush);
     }
-    if (autoScroll) {
-      requestAnimationFrame(() => {
-        if (container) container.scrollTop = container.scrollHeight;
-      });
-    }
+  }
+
+  function flush() {
+    flushScheduled = false;
+    if (!container || queue.length === 0) return;
+    const batch = queue;
+    queue = [];
+    container.insertAdjacentHTML('beforeend', batch.join(''));
+    // Cap by node count; trim before scrolling so we don't lay out nodes
+    // we're about to remove.
+    let excess = container.childNodes.length - 8000;
+    while (excess-- > 0) container.removeChild(container.firstChild);
+    if (autoScroll) container.scrollTop = container.scrollHeight;
   }
 
   function handleScroll() {

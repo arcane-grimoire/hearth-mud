@@ -41,6 +41,12 @@
     error: 'unclean',
   };
 
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[c]);
+  }
+
   function connect() {
     status = 'connecting';
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -72,8 +78,10 @@
             availableCommands = msg.commands || [];
             break;
           case 'game':
+            // $state proxies Maps, so mutating in place is reactive without
+            // cloning the whole map per update.
             if (msg.channel && msg.data?.widget) {
-              gamePanels = new Map(gamePanels).set(msg.channel, msg.data);
+              gamePanels.set(msg.channel, msg.data);
             }
             break;
         }
@@ -93,7 +101,7 @@
 
   function handleCommand(cmd) {
     if (ws?.readyState === WebSocket.OPEN) {
-      output?.append(`<span class="echo">&gt; ${cmd.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</span>\n`);
+      output?.append(`<span class="echo">&gt; ${escapeHtml(cmd)}</span>\n`);
       ws.send(cmd);
     }
   }

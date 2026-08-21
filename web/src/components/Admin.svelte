@@ -15,6 +15,15 @@
   let objLoading = $state(false);
   let expandedRooms = $state(new Set());
   let search = $state('');
+  // Debounced copy of `search` — the tree filter is O(rooms × objects), so we
+  // don't want to recompute it on every keystroke.
+  let searchQuery = $state('');
+  let searchTimer;
+  function setSearch(v) {
+    search = v;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { searchQuery = v; }, 150);
+  }
   let editingAttr = $state(null);
   let editValue = $state('');
   let newAttrKey = $state('');
@@ -60,31 +69,43 @@
     selectObject(refId);
   }
 
+  // Objects pre-grouped by location so filtering doesn't rescan allObjects
+  // for every room.
+  let objectsByLocation = $derived.by(() => {
+    const m = new Map();
+    for (const o of allObjects) {
+      if (o.kind === 'room') continue;
+      let list = m.get(o.location_ref);
+      if (!list) m.set(o.location_ref, (list = []));
+      list.push(o);
+    }
+    return m;
+  });
+
   let filteredTree = $derived.by(() => {
-    const q = search.toLowerCase();
+    const q = searchQuery.toLowerCase();
     return rooms.map(r => {
-      const contents = allObjects.filter(o =>
-        o.location_ref === r.ref_id && o.kind !== 'room'
-      );
+      const contents = objectsByLocation.get(r.ref_id) ?? [];
       const matchesRoom = !q ||
         (r.title || '').toLowerCase().includes(q) ||
         (r.key || '').toLowerCase().includes(q) ||
         r.ref_id.toLowerCase().includes(q);
-      const matchingContents = contents.filter(o =>
-        !q ||
-        (o.title || o.key || '').toLowerCase().includes(q) ||
-        o.ref_id.toLowerCase().includes(q)
-      );
+      const matchingContents = q
+        ? contents.filter(o =>
+            (o.title || o.key || '').toLowerCase().includes(q) ||
+            o.ref_id.toLowerCase().includes(q))
+        : contents;
       if (!matchesRoom && matchingContents.length === 0) return null;
       return { ...r, contents: matchingContents, expanded: expandedRooms.has(r.ref_id) || (q && matchingContents.length > 0) };
     }).filter(Boolean);
   });
 
   let orphans = $derived.by(() => {
-    const q = search.toLowerCase();
+    const q = searchQuery.toLowerCase();
+    const roomRefs = new Set(rooms.map(r => r.ref_id));
     return allObjects.filter(o => {
       if (o.kind === 'room') return false;
-      if (rooms.find(r => r.ref_id === o.location_ref)) return false;
+      if (roomRefs.has(o.location_ref)) return false;
       if (q && !(o.title || o.key || '').toLowerCase().includes(q) && !o.ref_id.toLowerCase().includes(q)) return false;
       return true;
     });
@@ -218,9 +239,10 @@
           type="text"
           placeholder="Filter objects..."
           bind:value={search}
+          oninput={(e) => setSearch(e.target.value)}
         />
         {#if search}
-          <button class="search-clear" onclick={() => search = ''}>
+          <button class="search-clear" onclick={() => setSearch('')}>
             <X size={12} />
           </button>
         {/if}
