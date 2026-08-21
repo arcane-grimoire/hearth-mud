@@ -219,9 +219,9 @@ See `docs/adr/` (6 ADRs). See `CONTEXT.md` for domain glossary.
 
 ## Testing
 
-276 tests across: softcode (74), engine (57), db (19), import/export (17),
-grid (16), loader (18), accounts (12), map templates (11), cli (10), ink (9),
-map templates (9), locks (9), markup (6), dungeon (4), world (1).
+276 tests across: softcode (74), engine (62), import/export (24), loader (19),
+db (19), grid (16), accounts (12), map templates (11), cli (10), ink (9),
+locks (9), markup (6), dungeon (4), world (1).
 
 Softcode tests also discover and run `*.test.luau` files from the game
 directory (21 Luau tests across str and collections modules).
