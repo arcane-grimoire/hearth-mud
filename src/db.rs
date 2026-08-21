@@ -87,6 +87,10 @@ impl Database {
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS file_hashes (
+                path TEXT PRIMARY KEY,
+                hash TEXT NOT NULL
             );",
         )?;
 
@@ -284,6 +288,45 @@ impl Database {
             store.insert(account);
         }
         Ok(store)
+    }
+
+    /// Persist the content hash of every game file seen at the last load.
+    ///
+    /// `load_game_dir` already skips files whose hash is unchanged, which is
+    /// why `@reload-world` is cheap — but `Engine::new` had nowhere to get a
+    /// previous set from, so every boot re-read and reinstalled the whole game
+    /// directory. Storing them is what carries the skip across a restart.
+    ///
+    /// Replaces the stored set rather than merging, so a file deleted from the
+    /// game directory stops being remembered.
+    pub fn save_file_hashes(
+        &self,
+        hashes: &HashMap<std::path::PathBuf, String>,
+    ) -> rusqlite::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM file_hashes", [])?;
+        {
+            let mut stmt =
+                tx.prepare("INSERT INTO file_hashes (path, hash) VALUES (?1, ?2)")?;
+            for (path, hash) in hashes {
+                stmt.execute(rusqlite::params![path.to_string_lossy(), hash])?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// The counterpart to [`Database::save_file_hashes`]. An empty map means
+    /// "nothing known", which correctly makes the next load treat every file
+    /// as changed.
+    pub fn load_file_hashes(&self) -> rusqlite::Result<HashMap<std::path::PathBuf, String>> {
+        let mut stmt = self.conn.prepare("SELECT path, hash FROM file_hashes")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                std::path::PathBuf::from(row.get::<_, String>(0)?),
+                row.get::<_, String>(1)?,
+            ))
+        })?;
+        rows.collect()
     }
 
     pub fn save_world(&self, world: &World) -> rusqlite::Result<()> {
@@ -1097,5 +1140,31 @@ mod tests {
         assert_eq!(db.get_program_version("#1", "on_tick", 2).unwrap().unwrap().source, "return 2");
         assert!(db.get_program_version("#1", "on_tick", 0).unwrap().is_none());
         assert!(db.get_program_version("#1", "on_tick", 3).unwrap().is_none());
+    }
+
+    /// `load_game_dir` already skips files whose content hash is unchanged,
+    /// and `@reload-world` benefits — but `Engine::new` starts from an empty
+    /// map, so every boot re-reads and reinstalls the whole game directory.
+    /// Persisting the hashes is what carries that skip across a restart.
+    #[test]
+    fn file_hashes_round_trip() {
+        let db = Database::open(Path::new(":memory:")).unwrap();
+
+        use std::path::PathBuf;
+
+        let mut hashes = HashMap::new();
+        hashes.insert(PathBuf::from("town/town.toml"), "abc123".to_string());
+        hashes.insert(PathBuf::from("system/cmd_fight.luau"), "def456".to_string());
+        db.save_file_hashes(&hashes).unwrap();
+
+        let loaded = db.load_file_hashes().unwrap();
+        assert_eq!(loaded, hashes);
+
+        // A later save replaces the set rather than merging, so a file
+        // deleted from the game directory stops being remembered.
+        let mut fewer = HashMap::new();
+        fewer.insert(PathBuf::from("town/town.toml"), "abc123".to_string());
+        db.save_file_hashes(&fewer).unwrap();
+        assert_eq!(db.load_file_hashes().unwrap(), fewer);
     }
 }

@@ -6,11 +6,12 @@ use serde::{Deserialize, Serialize};
 use crate::softcode::hooks::{self, ProgramOrigin};
 use crate::world::{GameObject, Kind, Tag, World};
 
-fn hash_content(content: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    content.hash(&mut hasher);
-    hasher.finish()
+/// blake3 rather than `DefaultHasher`: these hashes are persisted across
+/// restarts so that boot can skip unchanged files, and `DefaultHasher` is
+/// explicitly not stable between Rust versions — every file would look changed
+/// after a toolchain bump. Same reasoning as the program version log.
+fn hash_content(content: &str) -> String {
+    blake3::hash(content.as_bytes()).to_hex().to_string()
 }
 
 #[derive(Debug)]
@@ -19,7 +20,7 @@ pub struct LoadResult {
     pub created: u32,
     pub updated: u32,
     pub skipped: u32,
-    pub file_hashes: HashMap<PathBuf, u64>,
+    pub file_hashes: HashMap<PathBuf, String>,
     pub changed_files: Vec<String>,
     /// Every `(obj_ref, hook, source)` a file program was actually written
     /// to during this load (excludes hooks skipped because an in-game edit
@@ -241,7 +242,7 @@ pub(crate) fn parse_area_dir(dir: &Path) -> Result<Vec<ParsedArea>, String> {
 pub fn load_game_dir(
     game_dir: &Path,
     world: &mut World,
-    prev_hashes: &HashMap<PathBuf, u64>,
+    prev_hashes: &HashMap<PathBuf, String>,
 ) -> Result<LoadResult, String> {
     if !game_dir.exists() {
         return Err(format!("Game directory not found: {}", game_dir.display()));
@@ -264,7 +265,7 @@ pub fn load_game_dir(
         });
     }
 
-    let mut new_hashes: HashMap<PathBuf, u64> = HashMap::new();
+    let mut new_hashes: HashMap<PathBuf, String> = HashMap::new();
     let mut changed_files: Vec<String> = Vec::new();
 
     // Parse every area file up front — later passes need to see all of them
@@ -275,9 +276,10 @@ pub fn load_game_dir(
         let contents = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
         let hash = hash_content(&contents);
+        let unchanged = prev_hashes.get(path) == Some(&hash);
         new_hashes.insert(path.clone(), hash);
 
-        if prev_hashes.get(path) == Some(&hash) {
+        if unchanged {
             skipped_files.push(path.clone());
             continue;
         }
@@ -1302,6 +1304,54 @@ mod tests {
     /// dropped players into it instead of the real one. The identity is
     /// already on each object and persists with it, so the map can be
     /// rebuilt from a world loaded straight from the database.
+    /// The in-process skip was already tested; this is the part that was
+    /// missing — carrying it across a restart. Boot used to pass an empty
+    /// previous-hash map, so every startup re-read and reinstalled the whole
+    /// game directory no matter what had changed.
+    #[test]
+    fn unchanged_files_stay_skipped_across_a_restart() {
+        let dir = TempGameDir::new();
+        dir.write_area(
+            "town",
+            "town.toml",
+            r#"
+            area = "town"
+            [[rooms]]
+            key = "square"
+            title = "The Square"
+            "#,
+        );
+
+        let db_path = dir.path.join("scratch.db");
+
+        // First boot: nothing known, so the file is read and installed.
+        let mut world = World::new();
+        let first = {
+            let db = crate::db::Database::open(&db_path).unwrap();
+            let result = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+            db.save_file_hashes(&result.file_hashes).unwrap();
+            result
+        };
+        assert_eq!(first.skipped, 0, "first load has nothing to skip");
+        assert!(first.created > 0);
+
+        // Second boot: a fresh connection, as a restart would have, reading
+        // the hashes back out of the database.
+        let db = crate::db::Database::open(&db_path).unwrap();
+        let restored = db.load_file_hashes().unwrap();
+        assert_eq!(
+            restored, first.file_hashes,
+            "hashes must survive the connection being dropped"
+        );
+
+        let second = load_game_dir(&dir.path, &mut world, &restored).unwrap();
+        assert!(
+            second.skipped > 0,
+            "an unchanged file should be skipped on the next boot"
+        );
+        assert_eq!(second.created, 0, "nothing new should be created");
+    }
+
     #[test]
     fn key_map_can_be_rebuilt_from_a_world_without_reading_files() {
         let mut world = World::new();

@@ -109,6 +109,15 @@ delta against a previous version.
 
 ### Fixed
 
+- **Every boot re-read and reinstalled the whole game directory.**
+  `load_game_dir` already skips files whose content hash is unchanged, which is
+  why `@reload-world` is cheap — but `Engine::new` passed an empty
+  previous-hash map, so a restart could never skip anything. Hashes are now
+  persisted and restored, so boot skips what has not changed. Hashing moved
+  from `DefaultHasher` to blake3 in the process: the former is explicitly not
+  stable across Rust versions, so persisting it would have made every file look
+  changed after a toolchain bump.
+
 - **`load_world_files = false` broke every file-key lookup.** The
   `<area>/<key>` → dbref map was built only as a by-product of loading the game
   directory, so with boot-time file loading off it stayed empty. `spawn_room`

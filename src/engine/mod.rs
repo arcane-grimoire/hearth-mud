@@ -236,7 +236,7 @@ pub struct Engine {
     /// API tokens: hash → info. Both session (ephemeral) and persistent tokens.
     api_tokens: HashMap<String, TokenInfo>,
     /// Content hashes from the last load/reload, used to skip unchanged files.
-    file_hashes: HashMap<std::path::PathBuf, u64>,
+    file_hashes: HashMap<std::path::PathBuf, String>,
     max_characters: u8,
 }
 
@@ -267,7 +267,17 @@ impl Engine {
         // into it. The file load overwrites these entries with its own when
         // it runs, so this is a floor rather than a competing source.
         let mut key_map: HashMap<String, String> = crate::loader::key_map_from_world(&world);
-        let mut file_hashes: HashMap<std::path::PathBuf, u64> = HashMap::new();
+        // Restored from the database rather than starting empty. `load_game_dir`
+        // skips files whose content hash is unchanged — which is why
+        // `@reload-world` is cheap — but boot had nowhere to get a previous set
+        // from, so every restart re-read and reinstalled the whole game
+        // directory. See docs/plans/program-authoring.md, "how this went
+        // wrong", symptom 2.
+        let mut file_hashes: HashMap<std::path::PathBuf, String> =
+            db.load_file_hashes().unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "Could not read file hashes; treating every file as changed");
+                HashMap::new()
+            });
         let softcode = SoftcodeRuntime::new();
         if let Some(game_dir) = &config.game_dir {
             let game_path = std::path::Path::new(game_dir);
@@ -279,10 +289,13 @@ impl Engine {
             // Lib modules and ink files below are unaffected — they are
             // never persisted to the DB regardless of this setting.
             if config.load_world_files {
-                match crate::loader::load_game_dir(game_path, &mut world, &HashMap::new()) {
+                match crate::loader::load_game_dir(game_path, &mut world, &file_hashes) {
                     Ok(result) => {
                         key_map = result.key_map;
                         file_hashes = result.file_hashes;
+                        if let Err(e) = db.save_file_hashes(&file_hashes) {
+                            tracing::warn!(error = %e, "Failed to persist file hashes");
+                        }
                         // File installs are an authoring path too (see
                         // docs/plans/program-authoring.md Stage 3) — record a
                         // version for each. Content-addressed dedupe means an
@@ -4066,6 +4079,11 @@ impl Engine {
                     self.spawn_room_ref = ref_id.clone();
                 }
                 self.file_hashes = result.file_hashes;
+                // Persist so the next boot can skip what this reload already
+                // saw, rather than re-reading the whole directory.
+                if let Err(e) = self.db.save_file_hashes(&self.file_hashes) {
+                    tracing::warn!(error = %e, "Failed to persist file hashes");
+                }
                 for (obj_ref, hook, source) in &result.installed_programs {
                     self.record_program_version(obj_ref, hook, source, None);
                 }
