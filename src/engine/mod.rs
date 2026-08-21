@@ -1187,7 +1187,11 @@ impl Engine {
             ApiRequest::Export { path } => {
                 let export_path = std::path::Path::new(&path);
                 match crate::import_export::export_bundle(export_path, &mut self.world) {
-                    Ok(report) => {
+                    Ok(mut report) => {
+                        match crate::import_export::export_file_sources(export_path, &self.file_sources) {
+                            Ok(written) => report.maps_written = written,
+                            Err(e) => return ApiResponse::error(e),
+                        }
                         let output = crate::import_export::render_export_report(&report, &path);
                         ApiResponse::success(serde_json::json!({ "output": output }))
                     }
@@ -4251,8 +4255,15 @@ impl Engine {
         if path.is_empty() {
             return "Usage: @export <path>\r\n".to_string();
         }
-        match crate::import_export::export_bundle(std::path::Path::new(path), &mut self.world) {
-            Ok(report) => crate::import_export::render_export_report(&report, path),
+        let export_path = std::path::Path::new(path);
+        match crate::import_export::export_bundle(export_path, &mut self.world) {
+            Ok(mut report) => {
+                match crate::import_export::export_file_sources(export_path, &self.file_sources) {
+                    Ok(written) => report.maps_written = written,
+                    Err(e) => return format!("Export error: {}\r\n", e),
+                }
+                crate::import_export::render_export_report(&report, path)
+            }
             Err(e) => format!("Export error: {}\r\n", e),
         }
     }
@@ -6543,6 +6554,100 @@ mod tests {
             TokenInfo { account_id: account_id.clone(), label: "test".to_string(), persistent: false, expires_at: None },
         );
         (engine, token, account_id)
+    }
+
+    // ---- map builder REST surface: the three invariants a future refactor
+    // is most likely to loosen silently (see docs/plans/map-builder.md). ----
+
+    #[test]
+    fn valid_map_name_rejects_traversal_and_separators() {
+        assert!(Engine::valid_map_name("iron_hills"));
+        assert!(Engine::valid_map_name("a-b_1"));
+        assert!(Engine::valid_map_name("Map2"));
+        // Rejections make a traversal path unrepresentable, not blocklisted —
+        // PutMap builds maps/<name>.toml, so any of these leaking through is a
+        // write-anywhere hole.
+        assert!(!Engine::valid_map_name(""));
+        assert!(!Engine::valid_map_name(".."));
+        assert!(!Engine::valid_map_name("a/b"));
+        assert!(!Engine::valid_map_name("../evil"));
+        assert!(!Engine::valid_map_name("a\\b"));
+        assert!(!Engine::valid_map_name("a.b")); // '.' disallowed: no name.toml tricks
+        assert!(!Engine::valid_map_name("/etc/passwd"));
+        assert!(!Engine::valid_map_name(&"x".repeat(65)));
+    }
+
+    #[test]
+    fn map_writes_require_admin_not_just_builder() {
+        let toml = "[map]\nname = \"t\"\ngrid = \"\"\"\n.\n\"\"\"\n";
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
+        let resp = engine.handle_api_request(
+            ApiRequest::PutMap { name: "t".into(), toml: toml.into() },
+            Some(token.clone()),
+        );
+        assert_eq!(resp.error.as_deref(), Some("Admin scope required"));
+        let resp = engine
+            .handle_api_request(ApiRequest::PutTerrain { toml: String::new() }, Some(token));
+        assert_eq!(resp.error.as_deref(), Some("Admin scope required"));
+
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder, Scope::Admin]);
+        let resp = engine.handle_api_request(
+            ApiRequest::PutMap { name: "t".into(), toml: toml.into() },
+            Some(token),
+        );
+        assert!(resp.ok, "{:?}", resp.error);
+    }
+
+    #[test]
+    fn map_reads_require_auth_and_stay_out_of_is_read() {
+        let (mut engine, _t, _) = engine_with_api_token(&[Scope::Builder]);
+        for req in [
+            ApiRequest::ListMaps,
+            ApiRequest::GetMap { name: "x".into() },
+            ApiRequest::GetTerrain,
+        ] {
+            let resp = engine.handle_api_request(req, None);
+            assert_eq!(
+                resp.error.as_deref(),
+                Some("Authentication required"),
+                "map reads must not be public"
+            );
+        }
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
+        let resp = engine.handle_api_request(ApiRequest::ListMaps, Some(token));
+        assert!(resp.ok, "{:?}", resp.error);
+    }
+
+    #[test]
+    fn put_map_rejects_bad_name_and_bad_toml_before_writing() {
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder, Scope::Admin]);
+        let resp = engine.handle_api_request(
+            ApiRequest::PutMap { name: "../evil".into(), toml: "[map]".into() },
+            Some(token.clone()),
+        );
+        assert!(resp.error.as_deref().unwrap().contains("invalid map name"));
+        let resp = engine.handle_api_request(
+            ApiRequest::PutMap { name: "ok".into(), toml: "not toml [".into() },
+            Some(token),
+        );
+        assert!(resp.error.as_deref().unwrap().contains("invalid map TOML"));
+        // neither bad request half-landed
+        assert!(!engine.file_sources.contains_key("maps/ok.toml"));
+    }
+
+    #[test]
+    fn put_map_persists_and_rebuilds_live_templates() {
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder, Scope::Admin]);
+        let toml = "[map]\nname = \"loop\"\ngrid = \"\"\"\n.f\nf.\n\"\"\"\n";
+        let resp = engine.handle_api_request(
+            ApiRequest::PutMap { name: "loop".into(), toml: toml.into() },
+            Some(token.clone()),
+        );
+        assert!(resp.ok, "{:?}", resp.error);
+        assert!(engine.file_sources.contains_key("maps/loop.toml"));
+        assert!(engine.map_templates.contains_key("loop"), "live templates rebuilt");
+        let resp = engine.handle_api_request(ApiRequest::GetMap { name: "loop".into() }, Some(token));
+        assert_eq!(resp.data.unwrap()["name"].as_str(), Some("loop"));
     }
 
     /// `Eval` over the REST API is arbitrary code with the full write API —

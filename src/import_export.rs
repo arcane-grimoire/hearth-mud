@@ -701,9 +701,38 @@ fn apply(
 pub struct ExportReport {
     pub written_areas: Vec<String>,
     pub objects_written: usize,
+    /// DB-owned map + terrain sources written to files (`"terrain.toml"`,
+    /// `"maps/<name>.toml"`) — see [`export_file_sources`].
+    pub maps_written: Vec<String>,
     /// Objects that could not be represented — see the module's export
     /// limitations. `"<file_key> (<reason>)"`.
     pub skipped: Vec<String>,
+}
+
+/// Write the DB-owned map + terrain sources to `path` in game-dir layout
+/// (`terrain.toml`, `maps/<name>.toml`), returning the relative paths written,
+/// sorted. This is the export half of the map builder's durability loop —
+/// builder → DB → `@export` → commit — the counterpart to the boot seed that
+/// reads these same files. Paths come from the DB keys, which are only ever
+/// the validated `maps/<name>.toml` / `terrain.toml` set.
+pub fn export_file_sources(
+    path: &Path,
+    sources: &std::collections::HashMap<String, String>,
+) -> Result<Vec<String>, String> {
+    let mut written = Vec::new();
+    let mut rels: Vec<&String> = sources.keys().collect();
+    rels.sort();
+    for rel in rels {
+        let dest = path.join(rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
+        }
+        std::fs::write(&dest, &sources[rel])
+            .map_err(|e| format!("Failed to write {}: {}", dest.display(), e))?;
+        written.push(rel.clone());
+    }
+    Ok(written)
 }
 
 pub fn render_export_report(report: &ExportReport, path: &str) -> String {
@@ -716,6 +745,13 @@ pub fn render_export_report(report: &ExportReport, path: &str) -> String {
         if areas.is_empty() { "(none)".to_string() } else { areas.join(", ") }
     ));
     out.push_str(&format!("  {} object(s) written\r\n", report.objects_written));
+    if !report.maps_written.is_empty() {
+        out.push_str(&format!(
+            "  {} map/terrain file(s) written: {}\r\n",
+            report.maps_written.len(),
+            report.maps_written.join(", ")
+        ));
+    }
     if !report.skipped.is_empty() {
         out.push_str(&format!(
             "  {} object(s) skipped (cannot be represented as files):\r\n",
@@ -1240,6 +1276,29 @@ mod tests {
 
     fn temp_db() -> Database {
         Database::open(Path::new(":memory:")).unwrap()
+    }
+
+    #[test]
+    fn export_file_sources_writes_game_dir_layout_verbatim() {
+        let dir = TempDir::new();
+        let mut sources = std::collections::HashMap::new();
+        sources.insert("terrain.toml".to_string(), "[terrain.f]\ntheme = \"forest\"\n".to_string());
+        sources.insert(
+            "maps/iron_hills.toml".to_string(),
+            "[map]\nname = \"iron_hills\"\ngrid = \"\"\"\n.f\n\"\"\"\n".to_string(),
+        );
+        let written = super::export_file_sources(&dir.path, &sources).unwrap();
+        // sorted, game-dir-relative
+        assert_eq!(written, vec!["maps/iron_hills.toml".to_string(), "terrain.toml".to_string()]);
+        // byte-identical round-trip — @export is the inverse of the boot seed
+        assert_eq!(
+            std::fs::read_to_string(dir.path.join("terrain.toml")).unwrap(),
+            sources["terrain.toml"]
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path.join("maps/iron_hills.toml")).unwrap(),
+            sources["maps/iron_hills.toml"]
+        );
     }
 
     fn town_toml(crossroads_desc: &str) -> String {
