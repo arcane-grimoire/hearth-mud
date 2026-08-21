@@ -2724,6 +2724,25 @@ impl Engine {
         }
     }
 
+    /// Whether the owner of `target` already has the most pending timers they
+    /// are allowed. An unowned target belongs to the system layer and is
+    /// exempt. See [`crate::softcode::OWNER_TIMER_QUOTA`].
+    fn timer_quota_reached(&self, target: &str) -> bool {
+        let Some(owner) = self.world.get(target).and_then(|o| o.owner_ref.clone()) else {
+            return false;
+        };
+        self.scheduled_hooks
+            .iter()
+            .filter(|s| {
+                self.world
+                    .get(&s.target)
+                    .and_then(|o| o.owner_ref.as_deref())
+                    == Some(owner.as_str())
+            })
+            .count()
+            >= crate::softcode::OWNER_TIMER_QUOTA
+    }
+
     fn deliver_effects(&mut self, effects: &[Effect], actor_ref: &str) {
         let mut triggers = Vec::new();
         for effect in effects {
@@ -2735,6 +2754,18 @@ impl Engine {
                     exclude,
                 } => self.send_to_room(room, message, exclude),
                 Effect::ScheduleHook { target, hook, ticks, data } => {
+                    // Fork-bomb guard. Counted against the *target's* owner
+                    // rather than whoever scheduled it, so the cap holds
+                    // however the timer was created. Unowned targets are the
+                    // system layer and exempt, same as the object quota.
+                    if self.timer_quota_reached(target) {
+                        tracing::warn!(
+                            target = %target,
+                            hook = %hook,
+                            "timer quota reached; refusing to schedule"
+                        );
+                        continue;
+                    }
                     self.scheduled_hooks.push(ScheduledHook {
                         id: uuid::Uuid::new_v4().to_string(),
                         fire_at_tick: self.tick_count + ticks,
@@ -6781,5 +6812,81 @@ mod tests {
         let out = engine.cmd_import(&session_id, &dir.path.to_string_lossy());
         assert!(out.contains("Permission denied"));
         assert!(engine.world.objects.values().all(|o| o.key != "hall"));
+    }
+
+    /// A hook that schedules two timers is a fork bomb, and because timers
+    /// persist to `scheduled_hooks` it survives a restart — bouncing the
+    /// server does not clear it. The instruction budget is no defence, since
+    /// every individual run is well inside it; only the count grows.
+    #[test]
+    fn timers_are_capped_per_owner() {
+        let (mut engine, _session_id, actor_ref) = test_engine_with_session(true);
+
+        let owned = engine.world.next_dbref();
+        engine.world.add_object(
+            GameObject::new(&owned, "bomb", Kind::Item).with_owner(&actor_ref),
+        );
+
+        for i in 0..crate::softcode::OWNER_TIMER_QUOTA {
+            engine.scheduled_hooks.push(ScheduledHook {
+                id: format!("pre-{}", i),
+                fire_at_tick: 999,
+                target: owned.clone(),
+                hook: "on_expire".into(),
+                data: None,
+            });
+        }
+        let before = engine.scheduled_hooks.len();
+
+        engine.deliver_effects(
+            &[Effect::ScheduleHook {
+                target: owned.clone(),
+                hook: "on_expire".into(),
+                ticks: 1,
+                data: None,
+            }],
+            &actor_ref,
+        );
+
+        assert_eq!(
+            engine.scheduled_hooks.len(),
+            before,
+            "scheduling past the quota must not add a timer"
+        );
+    }
+
+    #[test]
+    fn timers_on_unowned_objects_are_not_capped() {
+        // Every file-authored object is unowned, and system content schedules
+        // timers freely.
+        let (mut engine, _session_id, actor_ref) = test_engine_with_session(true);
+
+        let system_obj = engine.world.next_dbref();
+        engine
+            .world
+            .add_object(GameObject::new(&system_obj, "beacon", Kind::Item));
+
+        for i in 0..crate::softcode::OWNER_TIMER_QUOTA {
+            engine.scheduled_hooks.push(ScheduledHook {
+                id: format!("pre-{}", i),
+                fire_at_tick: 999,
+                target: system_obj.clone(),
+                hook: "on_expire".into(),
+                data: None,
+            });
+        }
+        let before = engine.scheduled_hooks.len();
+
+        engine.deliver_effects(
+            &[Effect::ScheduleHook {
+                target: system_obj.clone(),
+                hook: "on_expire".into(),
+                ticks: 1,
+                data: None,
+            }],
+            &actor_ref,
+        );
+
+        assert_eq!(engine.scheduled_hooks.len(), before + 1);
     }
 }

@@ -148,6 +148,25 @@ delta against a previous version.
   firing a lifecycle hook out of context is what breaks the invariant it exists
   to maintain.
 
+  `Move` is deliberately left unrestricted. Requiring ownership of what you
+  move would mean owning a player in order to teleport them, ruling out
+  builder-made teleporters, shops, containers, and knockback. The cost is that
+  possession routes around ownership — a builder cannot destroy or reprogram
+  someone else's object but can move it into one of their own. That is accepted
+  as a social problem rather than a technical one, on the assumption that the
+  builder flag goes to people you know.
+
+- **Fork-bomb guard on timers.** At most `OWNER_TIMER_QUOTA` (100) timers may
+  be pending against one owner's objects. A hook that schedules two more of
+  itself is worse than a runaway loop, because `scheduled_hooks` is persisted
+  and so the bomb survives a restart — bouncing the server does not clear it,
+  and the instruction budget is no defence when every individual run is well
+  inside it and only the count grows. Counted against the target's owner rather
+  than whoever scheduled it, so the cap holds however the timer was created;
+  unowned targets are the system layer and exempt. A refused timer is dropped
+  with a warning rather than failing the batch, since effects are delivered
+  after the batch has already been applied.
+
 - **Creation quota.** One owner may hold at most `OWNER_OBJECT_QUOTA` (500)
   objects; `Spawn` and `CreateExit` are refused past it. A ceiling on the total
   rather than on a batch, because the failure this catches is a bug rather than

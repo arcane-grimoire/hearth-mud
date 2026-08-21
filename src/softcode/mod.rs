@@ -326,6 +326,15 @@ fn at_object_quota(world: &World, authority: Option<&str>) -> bool {
 /// procedural generation legitimately creates hundreds of rooms at a time.
 pub const OWNER_OBJECT_QUOTA: usize = 500;
 
+/// How many timers may be pending against one owner's objects at once.
+///
+/// The fork bomb this stops — a hook that schedules two more of itself — is
+/// worse than a runaway loop, because `scheduled_hooks` is persisted: it
+/// survives a restart, so bouncing the server does not clear it. The
+/// instruction budget is no defence either, since each individual run is well
+/// inside it and only the count grows.
+pub const OWNER_TIMER_QUOTA: usize = 100;
+
 /// Hooks the engine fires as part of an object's lifecycle rather than in
 /// response to a player action. Firing one out of context is what makes
 /// `Intent::Trigger` a privilege-escalation seam, so these are restricted to
@@ -392,6 +401,18 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 });
             }
             Intent::Move { target, destination } => {
+                // Deliberately unrestricted, unlike the other mutating
+                // intents. Requiring ownership of what you move would mean
+                // owning a player in order to teleport them, which rules out
+                // builder-made teleporters, shops, containers, and knockback —
+                // most of what Move exists for.
+                //
+                // The cost is that possession routes around ownership: a
+                // builder cannot destroy or reprogram someone else's object,
+                // but can move it into one of their own. That is theft, and it
+                // is accepted here as a social problem rather than a technical
+                // one, on the assumption that the builder flag is granted to
+                // people you know. Revisit if that assumption changes.
                 if world.get(destination).is_none() {
                     return Err(format!("move_object: no destination '{}'", destination));
                 }
