@@ -1082,7 +1082,17 @@ window.addEventListener("keydown",e=>{
    the {action,...} envelope + a Bearer admin token (writes are Admin-gated). As
    a standalone artifact the probe fails and it silently stays in copy/paste mode. */
 let SERVER=false;
-const getToken=()=>{ try{return localStorage.getItem("hearth_token")||localStorage.getItem("mapwright:token")||"";}catch(e){return"";} };
+/* Prefer the web client's shared session token, then our own pasted one. The
+   session token can be present-but-dead (nothing clears hearth_token on
+   expiry, only on explicit logout), so once it's failed auth this session we
+   skip it — otherwise "first non-empty" keeps returning the stale value and a
+   freshly pasted token never takes effect. We never removeItem it: that key is
+   the web client's session, not ours to clear. */
+let sessionTokenDead=false;
+const getToken=()=>{ try{
+  if(!sessionTokenDead){ const h=localStorage.getItem("hearth_token"); if(h) return h; }
+  return localStorage.getItem("mapwright:token")||"";
+}catch(e){ return ""; } };
 const setToken=t=>{ try{localStorage.setItem("mapwright:token",t||"");}catch(e){} };
 async function apiPost(action, params){
   const headers={"Content-Type":"application/json"};
@@ -1093,8 +1103,16 @@ async function apiPost(action, params){
 async function detectServer(){
   let j; try{ j=await apiPost("list_maps"); }catch(e){ return; }   // artifact / no server → stay local
   SERVER=true;
-  if(j && j.ok && j.data && Array.isArray(j.data.maps)){ afterAuth(); await enterServerMode(j.data); }
-  else { needToken(j&&j.error||"admin token required"); }
+  if(j && j.ok && j.data && Array.isArray(j.data.maps)){ afterAuth(); await enterServerMode(j.data); return; }
+  // Auth failed. If we were using the shared session token, treat it as dead
+  // for the rest of this session and re-resolve — so a pasted token (or the
+  // prompt below) actually takes effect on the retry instead of being masked
+  // by a stale hearth_token.
+  if(!sessionTokenDead && localStorage.getItem("hearth_token")){
+    sessionTokenDead=true;
+    return detectServer();
+  }
+  needToken(j&&j.error||"admin token required");
 }
 function needToken(msg){
   $("#serverDot").classList.remove("hidden"); $("#serverDot").textContent="● needs token"; $("#serverDot").style.color="var(--warn)";
