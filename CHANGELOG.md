@@ -4,9 +4,15 @@ Notable changes to Hearth. This file starts partway through the project's
 history — earlier changes are in the git log.
 
 The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Hearth has no tagged releases yet, so everything so far is unreleased.
 
 ## Unreleased
+
+Nothing yet.
+
+## 0.1.0-rc.1 — 2026-08-21
+
+First tagged release. Everything below is the initial cut rather than a
+delta against a previous version.
 
 ### Added
 
@@ -116,6 +122,38 @@ Hearth has no tagged releases yet, so everything so far is unreleased.
   disambiguated export identity.
 
 ### Security
+
+- **Intent authorization.** `apply_to` previously validated only that an
+  intent's target existed, so any Program could write to, reprogram, or destroy
+  any object. Programs now run with the authority of the object they are
+  attached to — its `owner_ref` — rather than with the authority of whoever
+  triggered them, which is the property MUSH's permission model rests on.
+  A Program may only modify what its authority owns.
+
+  An object with no owner belongs to the system layer and its Programs are
+  unrestricted. That is not a default but a load-bearing invariant: `owner_ref`
+  defaults to `None` and neither the loader nor `@import` sets it, so every
+  file-authored object is unowned. The converse matters as much — a builder
+  cannot modify an *unowned* object, so builder code cannot reach into the
+  system layer.
+
+  `SetOwner` follows from the same rule: you may give away what you own and
+  may not take what you do not.
+
+  `Trigger` is restricted for lifecycle hooks (`on_tick`, `on_create`,
+  `on_destroy`, `on_startup`, `on_shutdown`, `on_reload`, `on_save`,
+  `on_connect`, `on_disconnect`) but left open for gameplay hooks, which
+  ordinary play fires on objects you do not own constantly. Triggering runs the
+  target's Program under *its* authority, so this is the confused-deputy seam;
+  firing a lifecycle hook out of context is what breaks the invariant it exists
+  to maintain.
+
+- **Creation quota.** One owner may hold at most `OWNER_OBJECT_QUOTA` (500)
+  objects; `Spawn` and `CreateExit` are refused past it. A ceiling on the total
+  rather than on a batch, because the failure this catches is a bug rather than
+  an attack — a loop creating a few objects per tick stays under any per-batch
+  cap indefinitely. System authority is exempt, since procedural generation
+  legitimately creates hundreds of rooms at once.
 
 - `ListPrograms` left the unauthenticated read set. It had been serving full
   Program source to anyone who could reach `/api`.

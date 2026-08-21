@@ -279,17 +279,90 @@ pub fn dry_run(world: &World, batch: &IntentBatch) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether a batch running under `authority` may modify `target`.
+///
+/// `None` authority means the running Program is attached to an object with
+/// no owner — the system layer, which every file-authored object belongs to
+/// (`owner_ref` defaults to `None` and neither the loader nor `@import` sets
+/// it). System code is trusted and unrestricted.
+///
+/// Anything else is a builder, and may only modify what it owns. Note the
+/// asymmetry this creates deliberately: a builder cannot modify an *unowned*
+/// object, so builder code cannot rewrite the system layer.
+fn may_modify(world: &World, authority: Option<&str>, target: &str) -> bool {
+    let Some(authority) = authority else {
+        return true;
+    };
+    world
+        .get(target)
+        .and_then(|o| o.owner_ref.as_deref())
+        .is_some_and(|owner| owner == authority)
+}
+
+fn refuse(verb: &str, target: &str) -> String {
+    format!("{}: permission denied on '{}'", verb, target)
+}
+
+/// Whether `authority` is already at its object ceiling. Counts on demand
+/// rather than caching: creation is rare next to reads, and a stale cache
+/// here would be a worse bug than the scan is a cost.
+fn at_object_quota(world: &World, authority: Option<&str>) -> bool {
+    let Some(authority) = authority else {
+        return false;
+    };
+    world
+        .objects
+        .values()
+        .filter(|o| o.owner_ref.as_deref() == Some(authority))
+        .count()
+        >= OWNER_OBJECT_QUOTA
+}
+
+/// How many objects one owner may have in existence at once.
+///
+/// A ceiling on the total, not on any single batch: the failure this actually
+/// catches is a builder's loop creating a handful of objects every tick, which
+/// stays under any per-batch cap indefinitely. System authority is exempt —
+/// procedural generation legitimately creates hundreds of rooms at a time.
+pub const OWNER_OBJECT_QUOTA: usize = 500;
+
+/// Hooks the engine fires as part of an object's lifecycle rather than in
+/// response to a player action. Firing one out of context is what makes
+/// `Intent::Trigger` a privilege-escalation seam, so these are restricted to
+/// objects the running authority owns.
+fn is_lifecycle_hook(hook: &str) -> bool {
+    matches!(
+        hook,
+        "on_tick"
+            | "on_create"
+            | "on_destroy"
+            | "on_startup"
+            | "on_shutdown"
+            | "on_reload"
+            | "on_save"
+            | "on_connect"
+            | "on_disconnect"
+    )
+}
+
 fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, String> {
     let mut effects = Vec::new();
+    let authority = batch.authority.as_deref();
     for intent in &batch.intents {
         match intent {
             Intent::SetAttr { target, key, value } => {
+                if !may_modify(world, authority, target) {
+                    return Err(refuse("set_attr", target));
+                }
                 let obj = world
                     .get_mut(target)
                     .ok_or_else(|| format!("set_attr: no object '{}'", target))?;
                 obj.attrs.insert(key.clone(), value.clone());
             }
             Intent::UnsetAttr { target, key } => {
+                if !may_modify(world, authority, target) {
+                    return Err(refuse("unset_attr", target));
+                }
                 let obj = world
                     .get_mut(target)
                     .ok_or_else(|| format!("unset_attr: no object '{}'", target))?;
@@ -346,12 +419,18 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 obj.location_ref = Some(destination.clone());
             }
             Intent::SetTag { target, tag } => {
+                if !may_modify(world, authority, target) {
+                    return Err(refuse("set_tag", target));
+                }
                 let obj = world
                     .get_mut(target)
                     .ok_or_else(|| format!("set_tag: no object '{}'", target))?;
                 obj.tags.insert(tag.clone());
             }
             Intent::UnsetTag { target, tag } => {
+                if !may_modify(world, authority, target) {
+                    return Err(refuse("unset_tag", target));
+                }
                 let obj = world
                     .get_mut(target)
                     .ok_or_else(|| format!("unset_tag: no object '{}'", target))?;
@@ -366,6 +445,12 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 location,
                 owner,
             } => {
+                if at_object_quota(world, authority) {
+                    return Err(format!(
+                        "spawn: object quota reached ({} objects)",
+                        OWNER_OBJECT_QUOTA
+                    ));
+                }
                 if world.get(ref_id).is_some() {
                     return Err(format!("spawn: ref '{}' already exists", ref_id));
                 }
@@ -395,18 +480,27 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 world.add_object(obj);
             }
             Intent::SetTitle { target, title } => {
+                if !may_modify(world, authority, target) {
+                    return Err(refuse("set_title", target));
+                }
                 let obj = world
                     .get_mut(target)
                     .ok_or_else(|| format!("set_title: no object '{}'", target))?;
                 obj.title = Some(title.clone());
             }
             Intent::SetDescription { target, description } => {
+                if !may_modify(world, authority, target) {
+                    return Err(refuse("set_description", target));
+                }
                 let obj = world
                     .get_mut(target)
                     .ok_or_else(|| format!("set_description: no object '{}'", target))?;
                 obj.description = description.clone();
             }
             Intent::Destroy { target } => {
+                if !may_modify(world, authority, target) {
+                    return Err(refuse("destroy", target));
+                }
                 match world.get(target) {
                     Some(obj) if obj.kind == Kind::Player => {
                         return Err("destroy: cannot destroy player objects".into());
@@ -418,6 +512,15 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 }
             }
             Intent::CreateExit { ref_id, source, direction, target, aliases } => {
+                if at_object_quota(world, authority) {
+                    return Err(format!(
+                        "create_exit: object quota reached ({} objects)",
+                        OWNER_OBJECT_QUOTA
+                    ));
+                }
+                if !may_modify(world, authority, source) {
+                    return Err(refuse("create_exit", source));
+                }
                 if world.get(ref_id).is_some() {
                     return Err(format!("create_exit: ref '{}' already exists", ref_id));
                 }
@@ -439,6 +542,9 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 });
             }
             Intent::SetProgram { target, hook, source } => {
+                if !may_modify(world, authority, target) {
+                    return Err(refuse("set_program", target));
+                }
                 let obj = world
                     .get_mut(target)
                     .ok_or_else(|| format!("set_program: no object '{}'", target))?;
@@ -448,6 +554,14 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
             Intent::Trigger { target, hook, data } => {
                 if world.get(target).is_none() {
                     return Err(format!("trigger: no object '{}'", target));
+                }
+                // Triggering runs the target's Program under *its* authority,
+                // so this is the confused-deputy seam. Gameplay hooks stay
+                // open because ordinary play fires them on objects you do not
+                // own all the time; lifecycle hooks do not, and firing one out
+                // of context breaks the invariant it exists to maintain.
+                if is_lifecycle_hook(hook) && !may_modify(world, authority, target) {
+                    return Err(refuse("trigger", target));
                 }
                 effects.push(Effect::TriggerHook {
                     target: target.clone(),
@@ -466,6 +580,9 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 });
             }
             Intent::SetLock { target, hook, expr } => {
+                if !may_modify(world, authority, target) {
+                    return Err(refuse("set_lock", target));
+                }
                 crate::locks::parse(expr).map_err(|e| format!("set_lock: {}", e))?;
                 let obj = world
                     .get_mut(target)
@@ -473,6 +590,13 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 obj.locks.insert(hook.clone(), expr.clone());
             }
             Intent::SetOwner { target, owner } => {
+                // Giving away what you own is fine; taking what you do not is
+                // escalation. `owner` is a required String, so this intent
+                // cannot clear an owner back to `None` and slip an object into
+                // the unrestricted system layer.
+                if !may_modify(world, authority, target) {
+                    return Err(refuse("set_owner", target));
+                }
                 if world.get(owner).is_none() {
                     return Err(format!("set_owner: no object '{}'", owner));
                 }
@@ -526,6 +650,15 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 });
             }
             Intent::TransferAttr { from, to, key, amount } => {
+                // Both ends are mutated, so both need authority — checking
+                // only the destination would let a builder drain someone
+                // else's object into their own.
+                if !may_modify(world, authority, from) {
+                    return Err(refuse("transfer_attr", from));
+                }
+                if !may_modify(world, authority, to) {
+                    return Err(refuse("transfer_attr", to));
+                }
                 let from_val = world
                     .get(from)
                     .and_then(|o| o.attrs.get(key))
@@ -3522,5 +3655,462 @@ mod tests {
             }
             panic!("{} softcode test(s) failed", total_failed);
         }
+    }
+
+    // -- UGC intent authorization ------------------------------------------
+    //
+    // A Program runs with the authority of the object it is attached to (its
+    // `owner_ref`), not with the authority of whoever triggered it. See
+    // docs/plans/program-authoring.md.
+
+    /// Build a world holding one item owned by `owner`, and return its ref.
+    fn world_with_owned_item(owner: Option<&str>) -> (World, String) {
+        let mut world = World::new();
+        let ref_id = world.next_dbref();
+        let mut obj = GameObject::new(&ref_id, "crate", Kind::Item);
+        if let Some(o) = owner {
+            obj = obj.with_owner(o);
+        }
+        world.add_object(obj);
+        (world, ref_id)
+    }
+
+    fn batch_as(authority: Option<&str>, intents: Vec<Intent>) -> IntentBatch {
+        IntentBatch {
+            intents,
+            actor_ref: None,
+            authority: authority.map(|s| s.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_program_cannot_set_attrs_on_an_object_it_does_not_own() {
+        let (mut world, target) = world_with_owned_item(Some("#builder-b"));
+
+        let batch = batch_as(
+            Some("#builder-a"),
+            vec![Intent::SetAttr {
+                target: target.clone(),
+                key: "hp".into(),
+                value: serde_json::json!(1),
+            }],
+        );
+
+        let result = apply_batch(&mut world, &batch);
+
+        assert!(result.is_err(), "expected refusal, got {:?}", result);
+        assert!(
+            !world.get(&target).unwrap().attrs.contains_key("hp"),
+            "a refused batch must leave the world untouched"
+        );
+    }
+
+    #[test]
+    fn a_program_can_set_attrs_on_an_object_it_owns() {
+        let (mut world, target) = world_with_owned_item(Some("#builder-a"));
+
+        let batch = batch_as(
+            Some("#builder-a"),
+            vec![Intent::SetAttr {
+                target: target.clone(),
+                key: "hp".into(),
+                value: serde_json::json!(1),
+            }],
+        );
+
+        apply_batch(&mut world, &batch).expect("owner should be allowed");
+        assert!(world.get(&target).unwrap().attrs.contains_key("hp"));
+    }
+
+    #[test]
+    fn system_authority_is_unrestricted() {
+        // Every file-authored object is unowned, so its Programs carry no
+        // authority. That has to mean "system", not "nobody", or the game
+        // would not run at all.
+        let (mut world, target) = world_with_owned_item(Some("#builder-b"));
+
+        let batch = batch_as(
+            None,
+            vec![Intent::SetAttr {
+                target: target.clone(),
+                key: "hp".into(),
+                value: serde_json::json!(1),
+            }],
+        );
+
+        apply_batch(&mut world, &batch).expect("system authority should be allowed");
+        assert!(world.get(&target).unwrap().attrs.contains_key("hp"));
+    }
+
+    #[test]
+    fn a_builder_cannot_modify_an_unowned_system_object() {
+        // The other half of the rule above: system code is unrestricted, but
+        // builder code must not be able to reach *into* the system layer.
+        let (mut world, target) = world_with_owned_item(None);
+
+        let batch = batch_as(
+            Some("#builder-a"),
+            vec![Intent::SetAttr {
+                target: target.clone(),
+                key: "hp".into(),
+                value: serde_json::json!(1),
+            }],
+        );
+
+        assert!(
+            apply_batch(&mut world, &batch).is_err(),
+            "an unowned object belongs to the system layer"
+        );
+    }
+
+    #[test]
+    fn a_program_cannot_destroy_an_object_it_does_not_own() {
+        let (mut world, target) = world_with_owned_item(Some("#builder-b"));
+
+        let batch = batch_as(
+            Some("#builder-a"),
+            vec![Intent::Destroy { target: target.clone() }],
+        );
+
+        assert!(apply_batch(&mut world, &batch).is_err(), "expected refusal");
+        assert!(
+            world.get(&target).is_some(),
+            "a refused destroy must leave the object standing"
+        );
+    }
+
+    #[test]
+    fn a_program_cannot_take_ownership_of_someone_elses_object() {
+        // Giving your own object away is fine; taking someone else's is
+        // privilege escalation with no further steps needed.
+        let mut world = World::new();
+        // Both builders must exist as real objects, or set_owner's existence
+        // check refuses the batch before authorization is ever consulted and
+        // the test passes for the wrong reason.
+        let thief = world.next_dbref();
+        world.add_object(GameObject::new(&thief, "alice", Kind::Player));
+        let victim = world.next_dbref();
+        world.add_object(GameObject::new(&victim, "bob", Kind::Player));
+        let target = world.next_dbref();
+        world
+            .add_object(GameObject::new(&target, "crate", Kind::Item).with_owner(&victim));
+
+        let batch = batch_as(
+            Some(&thief),
+            vec![Intent::SetOwner {
+                target: target.clone(),
+                owner: thief.clone(),
+            }],
+        );
+
+        assert!(apply_batch(&mut world, &batch).is_err(), "expected refusal");
+        assert_eq!(
+            world.get(&target).unwrap().owner_ref.as_deref(),
+            Some(victim.as_str()),
+            "ownership must not have moved"
+        );
+    }
+
+    #[test]
+    fn a_program_can_give_away_an_object_it_owns() {
+        let mut world = World::new();
+        let recipient = world.next_dbref();
+        world.add_object(GameObject::new(&recipient, "bob", Kind::Player));
+        let target = world.next_dbref();
+        world.add_object(
+            GameObject::new(&target, "crate", Kind::Item).with_owner("#builder-a"),
+        );
+
+        let batch = batch_as(
+            Some("#builder-a"),
+            vec![Intent::SetOwner {
+                target: target.clone(),
+                owner: recipient.clone(),
+            }],
+        );
+
+        apply_batch(&mut world, &batch).expect("giving away what you own is allowed");
+        assert_eq!(
+            world.get(&target).unwrap().owner_ref.as_deref(),
+            Some(recipient.as_str())
+        );
+    }
+
+    #[test]
+    fn every_mutating_intent_is_refused_on_an_object_you_do_not_own() {
+        // One case per intent that writes to a named target. Kept as a table
+        // so that adding a mutating intent without an authority check shows
+        // up here rather than in someone's world.
+        let cases: Vec<(&str, fn(&str) -> Intent)> = vec![
+            ("unset_attr", |t| Intent::UnsetAttr {
+                target: t.into(),
+                key: "hp".into(),
+            }),
+            ("set_tag", |t| Intent::SetTag {
+                target: t.into(),
+                tag: Tag { category: "x".into(), key: "y".into() },
+            }),
+            ("unset_tag", |t| Intent::UnsetTag {
+                target: t.into(),
+                tag: Tag { category: "x".into(), key: "y".into() },
+            }),
+            ("set_title", |t| Intent::SetTitle {
+                target: t.into(),
+                title: "pwned".into(),
+            }),
+            ("set_description", |t| Intent::SetDescription {
+                target: t.into(),
+                description: "pwned".into(),
+            }),
+            ("set_program", |t| Intent::SetProgram {
+                target: t.into(),
+                hook: "on_use".into(),
+                source: "return true".into(),
+            }),
+            ("set_lock", |t| Intent::SetLock {
+                target: t.into(),
+                hook: "can_get".into(),
+                expr: "perm(admin)".into(),
+            }),
+        ];
+
+        for (name, build) in cases {
+            let (mut world, target) = world_with_owned_item(Some("#builder-b"));
+            let batch = batch_as(Some("#builder-a"), vec![build(&target)]);
+            assert!(
+                apply_batch(&mut world, &batch).is_err(),
+                "{} should be refused on an object owned by someone else",
+                name
+            );
+        }
+    }
+
+    /// The tests above hand-build batches, so they would all still pass if
+    /// `run_hook` never stamped an authority at all. This drives the real
+    /// path: a Program on a builder-owned object reaching for someone else's.
+    #[test]
+    fn authority_comes_from_the_hosting_objects_owner() {
+        let mut world = World::new();
+        let alice = world.next_dbref();
+        world.add_object(GameObject::new(&alice, "alice", Kind::Player));
+        let bob = world.next_dbref();
+        world.add_object(GameObject::new(&bob, "bob", Kind::Player));
+
+        let host = world.next_dbref();
+        world.add_object(GameObject::new(&host, "wand", Kind::Item).with_owner(&alice));
+        let victim = world.next_dbref();
+        world.add_object(GameObject::new(&victim, "chest", Kind::Item).with_owner(&bob));
+
+        let runtime = SoftcodeRuntime::new();
+        let program = ProgramRecord::new(
+            "on_use",
+            format!(
+                r#"
+                function on_use(this, actor, room)
+                    set_attr("{}", "pwned", true)
+                end
+                "#,
+                victim
+            ),
+        );
+
+        let result = runtime
+            .run_hook(
+                &world,
+                &program,
+                &host,
+                &alice,
+                None,
+                None,
+                Budget::default(),
+                counter(&world),
+                &test_themes(),
+                &test_map_templates(),
+                &[],
+                0,
+            )
+            .expect("hook should run");
+
+        assert_eq!(
+            result.batch.authority.as_deref(),
+            Some(alice.as_str()),
+            "authority should be the host object's owner, not the actor"
+        );
+
+        let mut world = world;
+        assert!(
+            apply_batch(&mut world, &result.batch).is_err(),
+            "alice's program must not reach bob's object"
+        );
+        assert!(!world.get(&victim).unwrap().attrs.contains_key("pwned"));
+    }
+
+    #[test]
+    fn a_program_cannot_trigger_lifecycle_hooks_on_someone_elses_object() {
+        // Gameplay hooks fire on other people's objects constantly through
+        // normal play, so triggering one is a shortcut for something you
+        // could already cause. Lifecycle hooks are the ones where firing out
+        // of context breaks an invariant — on_create running twice, on_destroy
+        // running on something that still exists.
+        for hook in ["on_tick", "on_create", "on_destroy", "on_startup"] {
+            let (mut world, target) = world_with_owned_item(Some("#builder-b"));
+            let batch = batch_as(
+                Some("#builder-a"),
+                vec![Intent::Trigger {
+                    target: target.clone(),
+                    hook: hook.into(),
+                    data: None,
+                }],
+            );
+            assert!(
+                apply_batch(&mut world, &batch).is_err(),
+                "{} should not be triggerable on another builder's object",
+                hook
+            );
+        }
+    }
+
+    #[test]
+    fn a_program_can_trigger_gameplay_hooks_on_someone_elses_object() {
+        let (mut world, target) = world_with_owned_item(Some("#builder-b"));
+        let batch = batch_as(
+            Some("#builder-a"),
+            vec![Intent::Trigger {
+                target: target.clone(),
+                hook: "on_use".into(),
+                data: None,
+            }],
+        );
+
+        apply_batch(&mut world, &batch)
+            .expect("gameplay hooks stay reachable, as they are through normal play");
+    }
+
+    #[test]
+    fn a_builder_cannot_spawn_past_their_quota() {
+        // The limit that actually bites is a bug, not an attack: a loop that
+        // creates objects every tick stays under any per-batch cap forever.
+        let mut world = World::new();
+        let room = world.next_dbref();
+        world.add_object(GameObject::new(&room, "room", Kind::Room));
+
+        for i in 0..OWNER_OBJECT_QUOTA {
+            let r = world.next_dbref();
+            world.add_object(
+                GameObject::new(&r, &format!("thing{}", i), Kind::Item)
+                    .with_owner("#builder-a"),
+            );
+        }
+
+        let batch = batch_as(
+            Some("#builder-a"),
+            vec![Intent::Spawn {
+                ref_id: "#9999".into(),
+                key: "one-too-many".into(),
+                kind: Kind::Item,
+                title: None,
+                description: None,
+                location: room.clone(),
+                owner: Some("#builder-a".into()),
+            }],
+        );
+
+        assert!(
+            apply_batch(&mut world, &batch).is_err(),
+            "spawning past the quota should be refused"
+        );
+        assert!(world.get("#9999").is_none());
+    }
+
+    #[test]
+    fn system_authority_is_not_subject_to_a_quota() {
+        // Procedural generation runs as system and legitimately creates
+        // hundreds of rooms at a time.
+        let mut world = World::new();
+        let room = world.next_dbref();
+        world.add_object(GameObject::new(&room, "room", Kind::Room));
+
+        for i in 0..OWNER_OBJECT_QUOTA {
+            let r = world.next_dbref();
+            world.add_object(GameObject::new(&r, &format!("thing{}", i), Kind::Item));
+        }
+
+        let batch = batch_as(
+            None,
+            vec![Intent::Spawn {
+                ref_id: "#9999".into(),
+                key: "generated".into(),
+                kind: Kind::Item,
+                title: None,
+                description: None,
+                location: room.clone(),
+                owner: None,
+            }],
+        );
+
+        apply_batch(&mut world, &batch).expect("system generation is unbounded");
+    }
+
+    #[test]
+    fn transfer_attr_requires_ownership_of_both_ends() {
+        // It reads a number off one object and writes it to another, so it is
+        // a mutation of both.
+        let mut world = World::new();
+        let mine = world.next_dbref();
+        let mut a = GameObject::new(&mine, "purse", Kind::Item).with_owner("#builder-a");
+        a.attrs.insert("gold".into(), serde_json::json!(100.0));
+        world.add_object(a);
+
+        let theirs = world.next_dbref();
+        let mut b = GameObject::new(&theirs, "vault", Kind::Item).with_owner("#builder-b");
+        b.attrs.insert("gold".into(), serde_json::json!(100.0));
+        world.add_object(b);
+
+        // Draining someone else's object into your own.
+        let batch = batch_as(
+            Some("#builder-a"),
+            vec![Intent::TransferAttr {
+                from: theirs.clone(),
+                to: mine.clone(),
+                key: "gold".into(),
+                amount: 50.0,
+            }],
+        );
+
+        assert!(apply_batch(&mut world, &batch).is_err(), "expected refusal");
+        assert_eq!(
+            world.get(&theirs).unwrap().attrs.get("gold").unwrap(),
+            &serde_json::json!(100.0),
+            "the victim's balance must be untouched"
+        );
+    }
+
+    #[test]
+    fn creating_an_exit_counts_against_the_quota() {
+        let mut world = World::new();
+        let room = world.next_dbref();
+        world.add_object(GameObject::new(&room, "room", Kind::Room).with_owner("#builder-a"));
+        for i in 0..OWNER_OBJECT_QUOTA {
+            let r = world.next_dbref();
+            world.add_object(
+                GameObject::new(&r, &format!("thing{}", i), Kind::Item)
+                    .with_owner("#builder-a"),
+            );
+        }
+
+        let batch = batch_as(
+            Some("#builder-a"),
+            vec![Intent::CreateExit {
+                ref_id: "#9999".into(),
+                source: room.clone(),
+                direction: "north".into(),
+                target: room.clone(),
+                aliases: vec![],
+            }],
+        );
+
+        assert!(apply_batch(&mut world, &batch).is_err());
+        assert!(world.get("#9999").is_none());
     }
 }
