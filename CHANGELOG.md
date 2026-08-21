@@ -156,6 +156,15 @@ delta against a previous version.
   as a social problem rather than a technical one, on the assumption that the
   builder flag goes to people you know.
 
+- **Emit limit.** A builder-authored run may emit at most `EMIT_BATCH_LIMIT`
+  (50) messages. Scoped to a single batch because that is where a runaway loop
+  lives — the instruction budget bounds how long a hook runs but not how much
+  it says. The batch is refused whole rather than truncated, so the reason
+  stays legible. System authority is exempt, since a server-wide announcement
+  legitimately emits once per player. This does not bound a program that emits
+  a few every tick forever; that is a content bug rather than a runaway, and it
+  is visible in play.
+
 - **Fork-bomb guard on timers.** At most `OWNER_TIMER_QUOTA` (100) timers may
   be pending against one owner's objects. A hook that schedules two more of
   itself is worse than a runaway loop, because `scheduled_hooks` is persisted

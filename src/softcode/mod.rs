@@ -326,6 +326,18 @@ fn at_object_quota(world: &World, authority: Option<&str>) -> bool {
 /// procedural generation legitimately creates hundreds of rooms at a time.
 pub const OWNER_OBJECT_QUOTA: usize = 500;
 
+/// How many messages one builder-authored run may emit.
+///
+/// Scoped to a single batch because that is where the runaway loop lives: the
+/// instruction budget bounds how long a hook runs but not how much it says,
+/// and fifty messages out of one hook is already pathological. System
+/// authority is exempt — a server-wide announcement legitimately emits once
+/// per player.
+///
+/// This does not bound a program that emits a handful every tick forever.
+/// That is a content bug rather than a runaway, and it is visible in play.
+pub const EMIT_BATCH_LIMIT: usize = 50;
+
 /// How many timers may be pending against one owner's objects at once.
 ///
 /// The fork bomb this stops — a hook that schedules two more of itself — is
@@ -357,6 +369,34 @@ fn is_lifecycle_hook(hook: &str) -> bool {
 fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, String> {
     let mut effects = Vec::new();
     let authority = batch.authority.as_deref();
+
+    // Checked up front rather than counted as we go, so an over-limit batch
+    // is refused whole instead of applying its first fifty messages and then
+    // failing — the atomic-rollback guarantee would cover it either way, but
+    // this keeps the reason legible.
+    if authority.is_some() {
+        let emits = batch
+            .intents
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i,
+                    Intent::EmitActor { .. }
+                        | Intent::EmitRoom { .. }
+                        | Intent::EmitNearby { .. }
+                        | Intent::EmitRadius { .. }
+                        | Intent::EmitData { .. }
+                )
+            })
+            .count();
+        if emits > EMIT_BATCH_LIMIT {
+            return Err(format!(
+                "emit: {} messages in one run exceeds the limit of {}",
+                emits, EMIT_BATCH_LIMIT
+            ));
+        }
+    }
+
     for intent in &batch.intents {
         match intent {
             Intent::SetAttr { target, key, value } => {
@@ -4133,5 +4173,43 @@ mod tests {
 
         assert!(apply_batch(&mut world, &batch).is_err());
         assert!(world.get("#9999").is_none());
+    }
+
+    #[test]
+    fn a_builders_batch_cannot_emit_without_limit() {
+        let mut world = World::new();
+        let victim = world.next_dbref();
+        world.add_object(GameObject::new(&victim, "bob", Kind::Player));
+
+        let intents = (0..=EMIT_BATCH_LIMIT)
+            .map(|i| Intent::EmitActor {
+                target: victim.clone(),
+                message: format!("spam {}", i),
+            })
+            .collect();
+
+        let batch = batch_as(Some("#builder-a"), intents);
+        assert!(
+            apply_batch(&mut world, &batch).is_err(),
+            "a single run emitting past the limit should be refused"
+        );
+    }
+
+    #[test]
+    fn system_authority_may_emit_without_limit() {
+        // A server-wide announcement legitimately emits once per player.
+        let mut world = World::new();
+        let victim = world.next_dbref();
+        world.add_object(GameObject::new(&victim, "bob", Kind::Player));
+
+        let intents = (0..=EMIT_BATCH_LIMIT)
+            .map(|i| Intent::EmitActor {
+                target: victim.clone(),
+                message: format!("announcement {}", i),
+            })
+            .collect();
+
+        let batch = batch_as(None, intents);
+        apply_batch(&mut world, &batch).expect("system broadcasts are unbounded");
     }
 }
