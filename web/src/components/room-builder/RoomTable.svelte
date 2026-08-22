@@ -1,14 +1,15 @@
 <script>
   import { Table, TableHeaderCell, SearchInput, Chip } from '@kenn-io/kit-ui';
+  import WaypointsIcon from '@lucide/svelte/icons/waypoints';
   import { api } from '../../lib/api.js';
   import { route, setQuery } from '../../lib/router.svelte.js';
   import { sampleWorld, sampleAreas } from './sample.js';
 
   // The table view: the same scoped slice as the graph, as a sortable,
-  // searchable list. Row → open that room in the graph (focused). Small data
-  // (a slice is capped at 400 rows), so sort/filter is a plain derived — no
-  // data-grid library needed.
-  let { onopen = () => {} } = $props();
+  // searchable list. Row → open the modal editor; the trailing button jumps to
+  // that room focused in the graph. Small data (a slice is capped at 400 rows),
+  // so sort/filter is a plain derived — no data-grid library needed.
+  let { onopen = () => {}, onedit = () => {} } = $props();
 
   let rows = $state([]);
   let areas = $state([]);
@@ -95,10 +96,11 @@
         <TableHeaderCell label="Tags" />
         <TableHeaderCell label="Exits" numeric sortable sortDirection={sortDir('exits')} onsort={() => sortBy('exits')} />
         <TableHeaderCell label="Ref" numeric />
+        <TableHeaderCell label="" />
       {/snippet}
 
       {#each filtered as r (r.ref)}
-        <tr class="rt-row" onclick={() => onopen(r.ref)} title="Open in graph">
+        <tr class="rt-row" onclick={() => onedit(r.ref)} title="Edit room">
           <td class="rt-key">{r.key}</td>
           <td class="rt-title">{r.title || r.key}</td>
           <td>{#if r.area}<span class="rt-area">{r.area}</span>{:else}<span class="rt-unfiled">unfiled</span>{/if}</td>
@@ -109,6 +111,11 @@
           </td>
           <td class="rt-num">{r.exits}</td>
           <td class="rt-num rt-ref">{r.ref}</td>
+          <td class="rt-actions">
+            <button class="rt-jump" title="Open in graph" onclick={(e) => { e.stopPropagation(); onopen(r.ref); }}>
+              <WaypointsIcon size={14} />
+            </button>
+          </td>
         </tr>
       {/each}
     </Table>
@@ -155,5 +162,11 @@
   .rt-num { text-align: right; font-variant-numeric: tabular-nums; }
   .rt-ref { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--accent-amber, #c9956b); }
   .rt-dim { color: var(--text-muted, #8c8378); }
+  .rt-actions { text-align: right; width: 40px; }
+  .rt-jump {
+    background: none; border: none; color: var(--text-muted, #9a9186); cursor: pointer;
+    padding: 4px; border-radius: 6px; line-height: 0;
+  }
+  .rt-jump:hover { color: var(--accent-amber, #c9956b); background: color-mix(in srgb, var(--accent-amber, #c9956b) 14%, transparent); }
   .rt-empty { padding: 28px; text-align: center; color: var(--text-muted, #9a9186); font-size: 13px; }
 </style>

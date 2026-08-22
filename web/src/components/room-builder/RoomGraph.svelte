@@ -16,6 +16,8 @@
   import { api } from '../../lib/api.js';
   import { route, setQuery } from '../../lib/router.svelte.js';
 
+  let { onedit = () => {} } = $props();
+
   const nodeTypes = { room: RoomNode, stub: StubNode };
 
   let nodes = $state.raw([]);
@@ -341,6 +343,7 @@
           {/if}
         </div>
         <footer>
+          <button class="ri-full" onclick={() => onedit(sel.ref)}>Full editor…</button>
           <span class="ri-dirty" class:on={dirty}>unsaved</span>
           <Button size="sm" onclick={applyInspector} disabled={!dirty || saving}>Apply</Button>
         </footer>
@@ -467,6 +470,8 @@
   .ri-go:hover { color: var(--accent-amber, #c9956b); }
   .ri-empty { font-size: 12px; color: var(--text-muted, #9a9186); font-style: italic; line-height: 1.5; }
   .rg-insp footer { display: flex; align-items: center; gap: 8px; padding: 10px 13px; border-top: 1px solid var(--border-default, #2a2419); }
+  .ri-full { background: none; border: none; color: var(--text-muted, #9a9186); cursor: pointer; font: inherit; font-size: 12px; padding: 4px 2px; }
+  .ri-full:hover { color: var(--accent-amber, #c9956b); text-decoration: underline; }
   .ri-dirty { margin-right: auto; font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--accent-amber, #c9956b); opacity: 0; }
   .ri-dirty.on { opacity: 1; }
 

@@ -1,9 +1,10 @@
 <script>
-  import { SegmentedControl } from '@kenn-io/kit-ui';
+  import { SegmentedControl, Modal } from '@kenn-io/kit-ui';
   import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
   import { route, setQuery } from '../lib/router.svelte.js';
   import RoomGraph from './room-builder/RoomGraph.svelte';
   import RoomTable from './room-builder/RoomTable.svelte';
+  import Editor from './Editor.svelte';
 
   // Full-page builder surface. Reached at /builder/rooms via the client
   // router, lazy-loaded so the play client never pulls this or the Svelte
@@ -22,6 +23,12 @@
 
   // Open a room from the table: focus it and drop back into the graph.
   function openInGraph(ref) { setQuery({ view: null, focus: ref, area: null }); }
+
+  // Full modal editor (title + description + programs/hooks), reachable from a
+  // table row or the graph inspector's "Full editor" button.
+  let editingRef = $state(null);
+  function openEditor(ref) { editingRef = ref; }
+  function closeEditor() { editingRef = null; }
 </script>
 
 <div class="room-builder">
@@ -51,12 +58,18 @@
 
   <div class="rb-body">
     {#if view === 'table'}
-      <RoomTable onopen={openInGraph} />
+      <RoomTable onopen={openInGraph} onedit={openEditor} />
     {:else}
-      <RoomGraph />
+      <RoomGraph onedit={openEditor} />
     {/if}
   </div>
 </div>
+
+{#if editingRef}
+  <Modal title={`Edit room · ${editingRef}`} maxWidth="min(580px, calc(100vw - 32px))" onclose={closeEditor}>
+    <div class="rem"><Editor entity={{ ref_id: editingRef }} onclose={closeEditor} /></div>
+  </Modal>
+{/if}
 
 <style>
   .room-builder {
@@ -92,4 +105,11 @@
   .rb-spacer { flex: 1; }
 
   .rb-body { flex: 1; min-height: 0; overflow: hidden; }
+
+  /* Reuse the side-pane Editor inside the Modal: drop its fixed width, border,
+     and its own header (the Modal supplies the title + close). */
+  .rem :global(.editor) {
+    width: 100%; min-width: 0; border-left: none; background: transparent; overflow: visible;
+  }
+  .rem :global(.editor-header) { display: none; }
 </style>
