@@ -1,17 +1,27 @@
 <script>
+  import { SegmentedControl } from '@kenn-io/kit-ui';
   import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
-  import { route } from '../lib/router.svelte.js';
+  import { route, setQuery } from '../lib/router.svelte.js';
   import RoomGraph from './room-builder/RoomGraph.svelte';
+  import RoomTable from './room-builder/RoomTable.svelte';
 
   // Full-page builder surface. Reached at /builder/rooms via the client
   // router, lazy-loaded so the play client never pulls this or the Svelte
   // Flow canvas into its bundle. Deep-linkable through the query string:
-  // ?area=village&focus=%2312&depth=2.
+  // ?area=village&focus=%2312&depth=2&view=table.
   let { onexit = () => {} } = $props();
 
   const area = $derived(route.query.area || null);
   const focus = $derived(route.query.focus || null);
   const depth = $derived(route.query.depth || '2');
+  const view = $derived(route.query.view === 'table' ? 'table' : 'graph');
+  const viewOptions = [
+    { value: 'graph', label: 'Graph' },
+    { value: 'table', label: 'Table' },
+  ];
+
+  // Open a room from the table: focus it and drop back into the graph.
+  function openInGraph(ref) { setQuery({ view: null, focus: ref, area: null }); }
 </script>
 
 <div class="room-builder">
@@ -31,10 +41,20 @@
       </span>
     </div>
     <div class="rb-spacer"></div>
+    <SegmentedControl
+      options={viewOptions}
+      value={view}
+      onchange={(v) => setQuery({ view: v === 'table' ? 'table' : null })}
+      ariaLabel="View mode"
+    />
   </header>
 
   <div class="rb-body">
-    <RoomGraph />
+    {#if view === 'table'}
+      <RoomTable onopen={openInGraph} />
+    {:else}
+      <RoomGraph />
+    {/if}
   </div>
 </div>
 
