@@ -101,6 +101,30 @@ pub enum ApiRequest {
     /// `@program/restore`. Non-destructive, same as the telnet command.
     ProgramRestore { ref_id: String, hook: String, version: usize },
     ListExits { room_ref: String },
+    /// Distinct room areas (derived from each room's `FILE_KEY_ATTR` prefix)
+    /// with counts — the picker feed for the room builder's scope bar.
+    /// Builder-gated (NOT in `is_read`): like `Examine`, it surfaces
+    /// authored structure the play surface doesn't.
+    ListAreas,
+    /// A bounded slice of the world graph for the room builder, so it never
+    /// loads every room at once. Filter by `area` (FILE_KEY prefix), `tag`
+    /// (`category:key`, or `category:*`), and/or a `near` room with a BFS
+    /// `depth` (default 2). `limit` caps the room set (default 400) and sets
+    /// `truncated`. Returns rooms (with area+tags), the exits leaving those
+    /// rooms (targets may fall outside the slice), and those outside targets
+    /// as `boundary` stubs. Builder-gated, same rationale as `ListAreas`.
+    ListWorldSlice {
+        #[serde(default)]
+        area: Option<String>,
+        #[serde(default)]
+        tag: Option<String>,
+        #[serde(default)]
+        near: Option<String>,
+        #[serde(default)]
+        depth: Option<u32>,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
     SaveWorld,
     /// Run a one-shot Luau script against the live world — the REST
     /// counterpart of `@eval`. Gated on `Scope::Admin` explicitly below,
@@ -789,6 +813,19 @@ impl Engine {
             && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     }
 
+    /// The area an object belongs to, from the `<area>/<key>` prefix of its
+    /// `FILE_KEY_ATTR`. Rooms built in-game (or otherwise unfiled) carry no
+    /// file identity and report the empty string. Drives `ListAreas` and the
+    /// `area` filter/field of `ListWorldSlice`.
+    fn room_area(o: &GameObject) -> String {
+        o.attrs
+            .get(crate::loader::FILE_KEY_ATTR)
+            .and_then(|v| v.as_str())
+            .and_then(|fk| fk.split_once('/'))
+            .map(|(area, _)| area.to_string())
+            .unwrap_or_default()
+    }
+
     fn handle_api_request(&mut self, req: ApiRequest, token: Option<String>) -> ApiResponse {
         // `ListPrograms` deliberately does NOT sit in this set — it serves
         // full Program source, which is not something to hand out
@@ -900,11 +937,21 @@ impl Engine {
                     .collect();
                 ApiResponse::success(serde_json::json!(objs))
             }
-            ApiRequest::CreateRoom { area: _area, key, title, description } => {
+            ApiRequest::CreateRoom { area, key, title, description } => {
                 let ref_id = self.world.next_dbref();
                 let mut room = GameObject::new(&ref_id, &key, Kind::Room).with_title(&title);
                 if let Some(desc) = description {
                     room.description = desc;
+                }
+                // Stamp the file identity so a room created while scoped to an
+                // area belongs to that slice and exports into the area's file.
+                // Same `<area>/<key>` mechanism the loader uses for reload
+                // identity (see loader::FILE_KEY_ATTR); empty area = unfiled.
+                if !area.trim().is_empty() {
+                    room.attrs.insert(
+                        crate::loader::FILE_KEY_ATTR.to_string(),
+                        serde_json::Value::String(format!("{}/{}", area.trim(), key)),
+                    );
                 }
                 self.world.add_object(room);
                 self.fire_on_create(&ref_id);
@@ -1163,6 +1210,153 @@ impl Engine {
                     }))
                     .collect();
                 ApiResponse::success(serde_json::json!(exits))
+            }
+            ApiRequest::ListAreas => {
+                use std::collections::BTreeMap;
+                let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+                for o in self.world.objects.values().filter(|o| o.kind == Kind::Room) {
+                    *counts.entry(Self::room_area(o)).or_insert(0) += 1;
+                }
+                let areas: Vec<serde_json::Value> = counts
+                    .into_iter()
+                    .map(|(area, count)| serde_json::json!({ "area": area, "count": count }))
+                    .collect();
+                ApiResponse::success(serde_json::json!(areas))
+            }
+            ApiRequest::ListWorldSlice { area, tag, near, depth, limit } => {
+                let limit = limit.unwrap_or(400).min(2000) as usize;
+                let depth = depth.unwrap_or(2) as usize;
+                let tag_match = tag.as_deref().and_then(|t| Tag::parse(t).ok());
+
+                // area + tag predicate applied to every candidate room
+                let keep = |o: &GameObject| -> bool {
+                    if let Some(a) = &area
+                        && &Self::room_area(o) != a
+                    {
+                        return false;
+                    }
+                    if let Some(t) = &tag_match {
+                        let hit = if t.key == "*" {
+                            o.tags.iter().any(|x| x.category == t.category)
+                        } else {
+                            o.tags.contains(t)
+                        };
+                        if !hit {
+                            return false;
+                        }
+                    }
+                    true
+                };
+
+                // Base room set: a BFS neighbourhood around `near`, else every
+                // room. Filters narrow whichever base we pick.
+                let mut room_refs: Vec<String> = Vec::new();
+                if let Some(start) = &near {
+                    let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+                    for e in self.world.objects.values().filter(|o| o.kind == Kind::Exit) {
+                        if let (Some(f), Some(t)) =
+                            (e.location_ref.as_deref(), e.target_ref.as_deref())
+                        {
+                            adj.entry(f.to_string()).or_default().push(t.to_string());
+                            adj.entry(t.to_string()).or_default().push(f.to_string());
+                        }
+                    }
+                    let mut seen: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    let mut queue: std::collections::VecDeque<(String, usize)> =
+                        std::collections::VecDeque::new();
+                    if self.world.get(start).is_some() {
+                        seen.insert(start.clone());
+                        queue.push_back((start.clone(), 0));
+                    }
+                    while let Some((r, d)) = queue.pop_front() {
+                        room_refs.push(r.clone());
+                        if d < depth
+                            && let Some(neighbours) = adj.get(&r)
+                        {
+                            for n in neighbours {
+                                if seen.insert(n.clone()) {
+                                    queue.push_back((n.clone(), d + 1));
+                                }
+                            }
+                        }
+                    }
+                    room_refs.retain(|r| {
+                        self.world
+                            .get(r)
+                            .map(|o| o.kind == Kind::Room && keep(o))
+                            .unwrap_or(false)
+                    });
+                } else {
+                    for o in self
+                        .world
+                        .objects
+                        .values()
+                        .filter(|o| o.kind == Kind::Room && keep(o))
+                    {
+                        room_refs.push(o.ref_id.clone());
+                    }
+                }
+
+                room_refs.sort();
+                let truncated = room_refs.len() > limit;
+                room_refs.truncate(limit);
+                let in_set: std::collections::HashSet<String> =
+                    room_refs.iter().cloned().collect();
+
+                let rooms: Vec<serde_json::Value> = room_refs
+                    .iter()
+                    .filter_map(|r| self.world.get(r))
+                    .map(|o| {
+                        let tags: Vec<String> = o.tags.iter().map(|t| t.as_spec()).collect();
+                        serde_json::json!({
+                            "ref_id": o.ref_id,
+                            "key": o.key,
+                            "title": o.title,
+                            "description": o.description,
+                            "area": Self::room_area(o),
+                            "tags": tags,
+                        })
+                    })
+                    .collect();
+
+                // Exits leaving the slice's rooms; targets outside it become
+                // boundary stubs so the client can offer to expand outward.
+                let mut exits: Vec<serde_json::Value> = Vec::new();
+                let mut boundary: std::collections::BTreeSet<String> =
+                    std::collections::BTreeSet::new();
+                for e in self.world.objects.values().filter(|o| o.kind == Kind::Exit) {
+                    if let (Some(f), Some(t)) =
+                        (e.location_ref.as_deref(), e.target_ref.as_deref())
+                        && in_set.contains(f)
+                    {
+                        exits.push(serde_json::json!({
+                            "ref_id": e.ref_id,
+                            "from": f,
+                            "dir": e.key,
+                            "to": t,
+                        }));
+                        if !in_set.contains(t) {
+                            boundary.insert(t.to_string());
+                        }
+                    }
+                }
+                let boundary_nodes: Vec<serde_json::Value> = boundary
+                    .iter()
+                    .filter_map(|r| self.world.get(r))
+                    .map(|o| serde_json::json!({
+                        "ref_id": o.ref_id,
+                        "key": o.key,
+                        "title": o.title,
+                    }))
+                    .collect();
+
+                ApiResponse::success(serde_json::json!({
+                    "rooms": rooms,
+                    "exits": exits,
+                    "boundary": boundary_nodes,
+                    "truncated": truncated,
+                }))
             }
             ApiRequest::SaveWorld => {
                 self.do_save();
@@ -6677,6 +6871,176 @@ mod tests {
         assert!(engine.map_templates.contains_key("loop"), "live templates rebuilt");
         let resp = engine.handle_api_request(ApiRequest::GetMap { name: "loop".into() }, Some(token));
         assert_eq!(resp.data.unwrap()["name"].as_str(), Some("loop"));
+    }
+
+    // ---- room builder slice surface: scoping keeps the whole world from
+    // loading at once (see docs/plans/room-builder.md). ----
+
+    /// Create a room via the API and return its dbref.
+    fn mk_room(engine: &mut Engine, token: &str, area: &str, key: &str) -> String {
+        let resp = engine.handle_api_request(
+            ApiRequest::CreateRoom {
+                area: area.into(),
+                key: key.into(),
+                title: key.into(),
+                description: None,
+            },
+            Some(token.to_string()),
+        );
+        resp.data.unwrap()["ref_id"].as_str().unwrap().to_string()
+    }
+
+    fn mk_exit(engine: &mut Engine, token: &str, from: &str, to: &str) {
+        let resp = engine.handle_api_request(
+            ApiRequest::CreateExit {
+                source: from.to_string(),
+                direction: "e".into(),
+                target: to.to_string(),
+                aliases: None,
+            },
+            Some(token.to_string()),
+        );
+        assert!(resp.ok, "{:?}", resp.error);
+    }
+
+    #[test]
+    fn world_slice_and_areas_require_builder_not_public() {
+        // They surface authored area/tags like `Examine`, so they must NOT be
+        // in `is_read`: unauthenticated calls are refused.
+        let (mut engine, _t, _) = engine_with_api_token(&[Scope::Builder]);
+        for req in [
+            ApiRequest::ListAreas,
+            ApiRequest::ListWorldSlice {
+                area: None,
+                tag: None,
+                near: None,
+                depth: None,
+                limit: None,
+            },
+        ] {
+            let resp = engine.handle_api_request(req, None);
+            assert_eq!(
+                resp.error.as_deref(),
+                Some("Authentication required"),
+                "slice reads must not be public"
+            );
+        }
+        // A token without Builder is refused.
+        let (mut engine, token, _) = engine_with_api_token(&[]);
+        let resp = engine.handle_api_request(ApiRequest::ListAreas, Some(token));
+        assert_eq!(resp.error.as_deref(), Some("Builder scope required"));
+        // Builder succeeds.
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
+        assert!(engine.handle_api_request(ApiRequest::ListAreas, Some(token)).ok);
+    }
+
+    #[test]
+    fn create_room_stamps_current_area_and_slice_filters_by_it() {
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
+        let green = mk_room(&mut engine, &token, "village", "green");
+        let stag = mk_room(&mut engine, &token, "village", "stag");
+        let smithy = mk_room(&mut engine, &token, "village", "smithy");
+        let gate = mk_room(&mut engine, &token, "hills", "gate");
+        mk_exit(&mut engine, &token, &green, &stag);
+        mk_exit(&mut engine, &token, &green, &smithy);
+        mk_exit(&mut engine, &token, &green, &gate); // crosses out of village
+
+        // The stamp shows up as a distinct area with the right count.
+        let areas = engine
+            .handle_api_request(ApiRequest::ListAreas, Some(token.clone()))
+            .data
+            .unwrap();
+        let count = |name: &str| {
+            areas
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["area"] == name)
+                .map(|a| a["count"].as_u64().unwrap())
+        };
+        assert_eq!(count("village"), Some(3));
+        assert_eq!(count("hills"), Some(1));
+
+        // Scoped to village: exactly the 3 village rooms, and the exit leaving
+        // to `gate` reports it as a single boundary stub (not a full node).
+        let data = engine
+            .handle_api_request(
+                ApiRequest::ListWorldSlice {
+                    area: Some("village".into()),
+                    tag: None,
+                    near: None,
+                    depth: None,
+                    limit: None,
+                },
+                Some(token.clone()),
+            )
+            .data
+            .unwrap();
+        let rooms = data["rooms"].as_array().unwrap();
+        assert_eq!(rooms.len(), 3);
+        assert!(rooms.iter().all(|r| r["area"] == "village"));
+        let boundary = data["boundary"].as_array().unwrap();
+        assert_eq!(boundary.len(), 1);
+        assert_eq!(boundary[0]["ref_id"].as_str(), Some(gate.as_str()));
+        let exits = data["exits"].as_array().unwrap();
+        assert!(exits.iter().any(|e| e["to"].as_str() == Some(gate.as_str())));
+    }
+
+    #[test]
+    fn world_slice_near_depth_bounds_the_graph() {
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
+        // a — b — c — d, one-directional exits (BFS is undirected).
+        let a = mk_room(&mut engine, &token, "line", "a");
+        let b = mk_room(&mut engine, &token, "line", "b");
+        let c = mk_room(&mut engine, &token, "line", "c");
+        let d = mk_room(&mut engine, &token, "line", "d");
+        mk_exit(&mut engine, &token, &a, &b);
+        mk_exit(&mut engine, &token, &b, &c);
+        mk_exit(&mut engine, &token, &c, &d);
+
+        let slice_len = |engine: &mut Engine, depth: u32| {
+            engine
+                .handle_api_request(
+                    ApiRequest::ListWorldSlice {
+                        area: None,
+                        tag: None,
+                        near: Some(a.clone()),
+                        depth: Some(depth),
+                        limit: None,
+                    },
+                    Some(token.clone()),
+                )
+                .data
+                .unwrap()["rooms"]
+                .as_array()
+                .unwrap()
+                .len()
+        };
+        assert_eq!(slice_len(&mut engine, 1), 2, "depth 1 → a, b");
+        assert_eq!(slice_len(&mut engine, 2), 3, "depth 2 → a, b, c");
+    }
+
+    #[test]
+    fn world_slice_limit_truncates_and_flags() {
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
+        for i in 0..5 {
+            mk_room(&mut engine, &token, "big", &format!("r{i}"));
+        }
+        let data = engine
+            .handle_api_request(
+                ApiRequest::ListWorldSlice {
+                    area: Some("big".into()),
+                    tag: None,
+                    near: None,
+                    depth: None,
+                    limit: Some(3),
+                },
+                Some(token.clone()),
+            )
+            .data
+            .unwrap();
+        assert_eq!(data["rooms"].as_array().unwrap().len(), 3);
+        assert_eq!(data["truncated"].as_bool(), Some(true));
     }
 
     /// `Eval` over the REST API is arbitrary code with the full write API —

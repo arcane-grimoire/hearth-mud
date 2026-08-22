@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "@kenn-io/kit-ui": "file:kit-ui",
-    "@lucide/svelte": "^1.0.0"
+    "@lucide/svelte": "^1.0.0",
+    "@xyflow/svelte": "^1.6.3"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
