@@ -1204,6 +1204,23 @@ pub fn export_bundle(path: &Path, world: &mut World) -> Result<ExportReport, Str
 
     for area_name in area_names {
         let objs = &by_area[area_name];
+        // Guard the join the same way `export_file_sources` does: the area is
+        // derived from an object's `_file_key`, which `create_room` and
+        // `SetAttribute` can set, so an area like `..` would make `path.join`
+        // escape the export root — a write-anywhere primitive. Refuse any area
+        // that isn't a single normal path component.
+        let area_path = Path::new(area_name);
+        if area_path.is_absolute()
+            || area_path
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            tracing::warn!(area = %area_name, "refusing to export an area with an unsafe path");
+            report
+                .skipped
+                .push(format!("area '{}' (unsafe path — not exported)", area_name));
+            continue;
+        }
         let area_dir = path.join(area_name);
         std::fs::create_dir_all(&area_dir)
             .map_err(|e| format!("Failed to create {}: {}", area_dir.display(), e))?;

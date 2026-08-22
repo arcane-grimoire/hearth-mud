@@ -946,6 +946,20 @@ impl Engine {
                 ApiResponse::success(serde_json::json!(objs))
             }
             ApiRequest::CreateRoom { area, key, title, description } => {
+                // `key` and `area` feed the room's `_file_key`, which drives
+                // `@export`'s output path — keep them to safe identifiers so a
+                // separator or `..` can never reach the filesystem (the export
+                // sink guards too, but reject early with a clear message).
+                if !Self::valid_map_name(&key) {
+                    return ApiResponse::error(
+                        "invalid room key: use letters, digits, '_' or '-' (max 64)",
+                    );
+                }
+                if !area.trim().is_empty() && !Self::valid_map_name(area.trim()) {
+                    return ApiResponse::error(
+                        "invalid area name: use letters, digits, '_' or '-' (max 64)",
+                    );
+                }
                 let ref_id = self.world.next_dbref();
                 let mut room = GameObject::new(&ref_id, &key, Kind::Room).with_title(&title);
                 if let Some(desc) = description {
@@ -1233,7 +1247,7 @@ impl Engine {
             }
             ApiRequest::ListWorldSlice { area, tag, near, depth, limit } => {
                 let limit = limit.unwrap_or(400).min(2000) as usize;
-                let depth = depth.unwrap_or(2) as usize;
+                let depth = (depth.unwrap_or(2) as usize).min(50); // clamp, mirroring `limit`
                 let tag_match = tag.as_deref().and_then(|t| Tag::parse(t).ok());
 
                 // area + tag predicate applied to every candidate room
@@ -6975,6 +6989,43 @@ mod tests {
         // Builder succeeds.
         let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
         assert!(engine.handle_api_request(ApiRequest::ListAreas, Some(token)).ok);
+    }
+
+    #[test]
+    fn create_room_rejects_path_unsafe_key_and_area() {
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
+        // A traversal key/area must never reach _file_key -> @export path.
+        let bad_key = engine.handle_api_request(
+            ApiRequest::CreateRoom {
+                area: "town".into(),
+                key: "../evil".into(),
+                title: "x".into(),
+                description: None,
+            },
+            Some(token.clone()),
+        );
+        assert!(bad_key.error.as_deref().unwrap().contains("invalid room key"));
+        let bad_area = engine.handle_api_request(
+            ApiRequest::CreateRoom {
+                area: "..".into(),
+                key: "ok".into(),
+                title: "x".into(),
+                description: None,
+            },
+            Some(token.clone()),
+        );
+        assert!(bad_area.error.as_deref().unwrap().contains("invalid area"));
+        // A normal room still works.
+        let good = engine.handle_api_request(
+            ApiRequest::CreateRoom {
+                area: "town".into(),
+                key: "market".into(),
+                title: "Market".into(),
+                description: None,
+            },
+            Some(token),
+        );
+        assert!(good.ok, "{:?}", good.error);
     }
 
     #[test]
