@@ -16,7 +16,7 @@
   import { api } from '../../lib/api.js';
   import { route, setQuery } from '../../lib/router.svelte.js';
 
-  let { onedit = () => {} } = $props();
+  let { onedit = () => {}, reloadSignal = 0 } = $props();
 
   const nodeTypes = { room: RoomNode, stub: StubNode };
 
@@ -132,7 +132,7 @@
 
   let lastScope = null;
   $effect(() => {
-    const k = `${scopeArea}|${scopeNear}|${scopeDepth}`;
+    const k = `${scopeArea}|${scopeNear}|${scopeDepth}|${reloadSignal}`;
     if (k !== lastScope) { lastScope = k; load(); }
   });
 
