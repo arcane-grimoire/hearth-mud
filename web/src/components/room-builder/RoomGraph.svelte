@@ -76,7 +76,12 @@
     const rooms = (slice.rooms || []).map(norm);
     const exits = (slice.exits || []).map(norm);
     const boundary = (slice.boundary || []).map(norm);
-    const pos = computeLayout(rooms, exits, {});
+    // Honour saved layout positions (_rx/_ry) the slice returns.
+    const saved = {};
+    for (const r of rooms) {
+      if (typeof r.rx === 'number' && typeof r.ry === 'number') saved[r.ref] = { x: r.rx, y: r.ry };
+    }
+    const pos = computeLayout(rooms, exits, saved);
     const roomIds = new Set(rooms.map((r) => r.ref));
 
     const stubPos = {};

@@ -73,10 +73,39 @@ const GX = 250; // world units between columns
 const GY = 175; // world units between rows
 
 export function computeLayout(rooms, exits, saved = {}) {
-  // If every room already has a saved position, honour the hand-laid graph.
-  if (rooms.length && rooms.every((r) => saved[r.ref])) {
-    const pos = {};
-    for (const r of rooms) pos[r.ref] = { ...saved[r.ref] };
+  // Seed any saved positions (persisted _rx/_ry). If every room has one, the
+  // hand-laid graph stands as-is.
+  const seeded = {};
+  for (const r of rooms) if (saved[r.ref]) seeded[r.ref] = { ...saved[r.ref] };
+  if (rooms.length && rooms.every((r) => seeded[r.ref])) return seeded;
+
+  // Mixed: some rooms saved, some new. Keep the saved ones fixed and drop each
+  // new room beside a placed neighbour (by its exit direction), so adding a
+  // room doesn't re-scramble the whole layout. Only fully-unsaved slices fall
+  // through to the directional auto-layout below.
+  if (rooms.some((r) => seeded[r.ref])) {
+    const pos = seeded;
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const r of rooms) {
+        if (pos[r.ref]) continue;
+        const link = exits.find(
+          (e) => (e.from === r.ref && pos[e.to]) || (e.to === r.ref && pos[e.from]),
+        );
+        if (!link) continue;
+        const outward = link.from === r.ref; // r's own exit points at the anchor
+        const anchor = pos[outward ? link.to : link.from];
+        const dir = outward ? REV[normDir(link.dir)] || link.dir : link.dir;
+        const v = DIRS[normDir(dir)] || HANDLE_VEC[dirToHandle(dir)] || [1, 0];
+        pos[r.ref] = { x: anchor.x + v[0] * GX, y: anchor.y + v[1] * GY };
+        changed = true;
+      }
+    }
+    let scatter = 0;
+    for (const r of rooms) {
+      if (!pos[r.ref]) { pos[r.ref] = { x: scatter * GX, y: -2 * GY }; scatter += 1; }
+    }
     return pos;
   }
 
