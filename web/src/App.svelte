@@ -18,6 +18,7 @@
   import { setToken, getSavedToken } from './lib/api.js';
   import { navigate, matches } from './lib/router.svelte.js';
   import WaypointsIcon from '@lucide/svelte/icons/waypoints';
+  import CodeIcon from '@lucide/svelte/icons/code';
 
   let output;
   let status = $state('connecting');
@@ -133,6 +134,17 @@
     }
   });
   function openRoomBuilder() { navigate('/builder/rooms'); toolsOpen = false; }
+
+  // Code editor — its own full-page route (/builder/code), also lazy-loaded so
+  // CodeMirror never touches the play bundle.
+  let onCodeRoute = $derived(matches('/builder/code'));
+  let CodeWorkspace = $state(null);
+  $effect(() => {
+    if (onCodeRoute && !CodeWorkspace) {
+      import('./components/CodeWorkspace.svelte').then((m) => { CodeWorkspace = m.default; });
+    }
+  });
+  function openCodeEditor() { navigate('/builder/code'); toolsOpen = false; }
   let inputBar;
 
   function handleKeydown(e) {
@@ -198,6 +210,9 @@
                 <button class="tools-item" role="menuitem" onclick={openRoomBuilder}>
                   <WaypointsIcon size={14} /> Room builder
                 </button>
+                <button class="tools-item" role="menuitem" onclick={openCodeEditor}>
+                  <CodeIcon size={14} /> Code editor
+                </button>
               {/if}
             </div>
           {/if}
@@ -258,6 +273,10 @@
 
 {#if onBuilderRoute && RoomBuilder}
   <RoomBuilder onexit={() => navigate('/')} />
+{/if}
+
+{#if onCodeRoute && CodeWorkspace}
+  <CodeWorkspace onexit={() => navigate('/')} />
 {/if}
 
 <style>
