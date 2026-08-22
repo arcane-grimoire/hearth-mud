@@ -16,6 +16,9 @@
   import Admin from './components/Admin.svelte';
   import Settings from './components/Settings.svelte';
   import { setToken, getSavedToken } from './lib/api.js';
+  import { navigate, matches } from './lib/router.svelte.js';
+  import WaypointsIcon from '@lucide/svelte/icons/waypoints';
+  import CodeIcon from '@lucide/svelte/icons/code';
 
   let output;
   let status = $state('connecting');
@@ -120,6 +123,28 @@
   // builder entry is admin-only — a plain builder would load it and then fail
   // on save. Reads/Admin panel stay builder-gated.
   let isAdmin = $derived(scopes.includes('admin'));
+
+  // Room builder is its own full-page route (/builder/rooms), lazy-loaded so
+  // the play client never pulls it (or the Svelte Flow canvas) into its bundle.
+  let onBuilderRoute = $derived(matches('/builder/rooms'));
+  let RoomBuilder = $state(null);
+  $effect(() => {
+    if (onBuilderRoute && !RoomBuilder) {
+      import('./components/RoomBuilder.svelte').then((m) => { RoomBuilder = m.default; });
+    }
+  });
+  function openRoomBuilder() { navigate('/builder/rooms'); toolsOpen = false; }
+
+  // Code editor — its own full-page route (/builder/code), also lazy-loaded so
+  // CodeMirror never touches the play bundle.
+  let onCodeRoute = $derived(matches('/builder/code'));
+  let CodeWorkspace = $state(null);
+  $effect(() => {
+    if (onCodeRoute && !CodeWorkspace) {
+      import('./components/CodeWorkspace.svelte').then((m) => { CodeWorkspace = m.default; });
+    }
+  });
+  function openCodeEditor() { navigate('/builder/code'); toolsOpen = false; }
   let inputBar;
 
   function handleKeydown(e) {
@@ -182,6 +207,12 @@
                 <button class="tools-item" role="menuitem" onclick={openMaps}>
                   <MapIcon size={14} /> Map builder
                 </button>
+                <button class="tools-item" role="menuitem" onclick={openRoomBuilder}>
+                  <WaypointsIcon size={14} /> Room builder
+                </button>
+                <button class="tools-item" role="menuitem" onclick={openCodeEditor}>
+                  <CodeIcon size={14} /> Code editor
+                </button>
               {/if}
             </div>
           {/if}
@@ -239,6 +270,14 @@
 </div>
 
 <Settings open={settingsOpen} onclose={() => settingsOpen = false} {scopes} oncommand={handleCommand} {autocomplete} onautocomplete={setAutocomplete} />
+
+{#if onBuilderRoute && RoomBuilder}
+  <RoomBuilder onexit={() => navigate('/')} />
+{/if}
+
+{#if onCodeRoute && CodeWorkspace}
+  <CodeWorkspace onexit={() => navigate('/')} />
+{/if}
 
 <style>
   .app {
