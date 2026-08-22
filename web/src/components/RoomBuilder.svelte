@@ -4,7 +4,7 @@
   import { route, setQuery } from '../lib/router.svelte.js';
   import RoomGraph from './room-builder/RoomGraph.svelte';
   import RoomTable from './room-builder/RoomTable.svelte';
-  import Editor from './Editor.svelte';
+  import RoomEditorModal from './room-builder/RoomEditorModal.svelte';
 
   // Full-page builder surface. Reached at /builder/rooms via the client
   // router, lazy-loaded so the play client never pulls this or the Svelte
@@ -29,6 +29,10 @@
   let editingRef = $state(null);
   function openEditor(ref) { editingRef = ref; }
   function closeEditor() { editingRef = null; }
+
+  // Bumped when the modal makes a structural change (tag/exit/delete) so the
+  // active graph/table view reloads its slice.
+  let dataVersion = $state(0);
 </script>
 
 <div class="room-builder">
@@ -58,16 +62,16 @@
 
   <div class="rb-body">
     {#if view === 'table'}
-      <RoomTable onopen={openInGraph} onedit={openEditor} />
+      <RoomTable onopen={openInGraph} onedit={openEditor} reloadSignal={dataVersion} />
     {:else}
-      <RoomGraph onedit={openEditor} />
+      <RoomGraph onedit={openEditor} reloadSignal={dataVersion} />
     {/if}
   </div>
 </div>
 
 {#if editingRef}
   <Modal title={`Edit room · ${editingRef}`} maxWidth="min(580px, calc(100vw - 32px))" onclose={closeEditor}>
-    <div class="rem"><Editor entity={{ ref_id: editingRef }} onclose={closeEditor} /></div>
+    <RoomEditorModal ref={editingRef} onclose={closeEditor} onchanged={() => (dataVersion += 1)} />
   </Modal>
 {/if}
 
@@ -105,11 +109,4 @@
   .rb-spacer { flex: 1; }
 
   .rb-body { flex: 1; min-height: 0; overflow: hidden; }
-
-  /* Reuse the side-pane Editor inside the Modal: drop its fixed width, border,
-     and its own header (the Modal supplies the title + close). */
-  .rem :global(.editor) {
-    width: 100%; min-width: 0; border-left: none; background: transparent; overflow: visible;
-  }
-  .rem :global(.editor-header) { display: none; }
 </style>

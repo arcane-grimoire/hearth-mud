@@ -9,7 +9,7 @@
   // searchable list. Row → open the modal editor; the trailing button jumps to
   // that room focused in the graph. Small data (a slice is capped at 400 rows),
   // so sort/filter is a plain derived — no data-grid library needed.
-  let { onopen = () => {}, onedit = () => {} } = $props();
+  let { onopen = () => {}, onedit = () => {}, reloadSignal = 0 } = $props();
 
   let rows = $state([]);
   let areas = $state([]);
@@ -44,7 +44,8 @@
 
   let lastScope = null;
   $effect(() => {
-    if (scopeArea !== lastScope) { lastScope = scopeArea; load(); }
+    const k = `${scopeArea}|${reloadSignal}`;
+    if (k !== lastScope) { lastScope = k; load(); }
   });
 
   const filtered = $derived.by(() => {
