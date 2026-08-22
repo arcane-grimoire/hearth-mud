@@ -91,6 +91,14 @@ pub enum ApiRequest {
     SetProgram { ref_id: String, hook: String, source: String },
     RemoveProgram { ref_id: String, hook: String },
     ListPrograms { ref_id: String },
+    /// Compile-check Luau without running or saving it — the linter backend
+    /// for the code editor. Wraps `Softcode::check_syntax`; returns
+    /// `{valid, error?}`. Builder-gated (authoring surface), like the other
+    /// program actions.
+    CheckProgram { source: String },
+    /// Every object that carries programs, with its hook names — the code
+    /// editor's explorer feed, in one call instead of per-object. Builder-gated.
+    ListProgramsAll,
     /// Version history for one `(ref_id, hook)` — the REST counterpart of
     /// `@program/history`. Requires auth like any other write-tier action
     /// (see `is_read` below): it serves full historical Program source,
@@ -1366,6 +1374,32 @@ impl Engine {
                     "boundary": boundary_nodes,
                     "truncated": truncated,
                 }))
+            }
+            ApiRequest::CheckProgram { source } => match self.softcode.check_syntax(&source) {
+                Ok(()) => ApiResponse::success(serde_json::json!({ "valid": true })),
+                Err(e) => ApiResponse::success(serde_json::json!({ "valid": false, "error": e })),
+            },
+            ApiRequest::ListProgramsAll => {
+                let mut out: Vec<serde_json::Value> = self
+                    .world
+                    .objects
+                    .values()
+                    .filter(|o| !o.programs.is_empty())
+                    .map(|o| {
+                        let mut hooks: Vec<String> = o.programs.keys().cloned().collect();
+                        hooks.sort();
+                        serde_json::json!({
+                            "ref_id": o.ref_id,
+                            "key": o.key,
+                            "title": o.title,
+                            "kind": o.kind.to_string(),
+                            "area": Self::room_area(o),
+                            "hooks": hooks,
+                        })
+                    })
+                    .collect();
+                out.sort_by(|a, b| a["ref_id"].as_str().cmp(&b["ref_id"].as_str()));
+                ApiResponse::success(serde_json::json!(out))
             }
             ApiRequest::SaveWorld => {
                 self.do_save();
@@ -7050,6 +7084,51 @@ mod tests {
             .unwrap();
         assert_eq!(data["rooms"].as_array().unwrap().len(), 3);
         assert_eq!(data["truncated"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn check_program_reports_syntax_without_saving() {
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
+        let valid = engine
+            .handle_api_request(
+                ApiRequest::CheckProgram { source: "local x = 1\nreturn x".into() },
+                Some(token.clone()),
+            )
+            .data
+            .unwrap();
+        assert_eq!(valid["valid"].as_bool(), Some(true));
+
+        let bad = engine
+            .handle_api_request(
+                ApiRequest::CheckProgram { source: "local x = ".into() },
+                Some(token.clone()),
+            )
+            .data
+            .unwrap();
+        assert_eq!(bad["valid"].as_bool(), Some(false));
+        assert!(bad["error"].as_str().is_some(), "reports the compile error");
+
+        // Builder-gated, not public.
+        let resp = engine.handle_api_request(ApiRequest::CheckProgram { source: "x".into() }, None);
+        assert_eq!(resp.error.as_deref(), Some("Authentication required"));
+    }
+
+    #[test]
+    fn list_programs_all_returns_objects_with_hooks() {
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
+        let r = mk_room(&mut engine, &token, "town", "hall");
+        let set = engine.handle_api_request(
+            ApiRequest::SetProgram { ref_id: r.clone(), hook: "on_enter".into(), source: "return true".into() },
+            Some(token.clone()),
+        );
+        assert!(set.ok, "{:?}", set.error);
+        let data = engine
+            .handle_api_request(ApiRequest::ListProgramsAll, Some(token))
+            .data
+            .unwrap();
+        let entry = data.as_array().unwrap().iter().find(|e| e["ref_id"] == r).unwrap();
+        assert_eq!(entry["hooks"].as_array().unwrap()[0].as_str(), Some("on_enter"));
+        assert_eq!(entry["area"].as_str(), Some("town"));
     }
 
     /// `Eval` over the REST API is arbitrary code with the full write API —
