@@ -1309,6 +1309,13 @@ impl Engine {
                     .filter_map(|r| self.world.get(r))
                     .map(|o| {
                         let tags: Vec<String> = o.tags.iter().map(|t| t.as_spec()).collect();
+                        // Saved builder layout position, if the room has one
+                        // (a number, or a stringified number from older saves).
+                        let coord = |k: &str| {
+                            o.attrs.get(k).and_then(|v| {
+                                v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                            })
+                        };
                         serde_json::json!({
                             "ref_id": o.ref_id,
                             "key": o.key,
@@ -1316,6 +1323,8 @@ impl Engine {
                             "description": o.description,
                             "area": Self::room_area(o),
                             "tags": tags,
+                            "rx": coord("_rx"),
+                            "ry": coord("_ry"),
                         })
                     })
                     .collect();
