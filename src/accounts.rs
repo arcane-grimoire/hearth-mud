@@ -78,6 +78,12 @@ pub struct AccountStore {
     by_username: HashMap<String, String>,
 }
 
+impl Default for AccountStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AccountStore {
     pub fn new() -> Self {
         Self {

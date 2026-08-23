@@ -1767,25 +1767,24 @@ mod tests {
         // isn't present (CI, a bare checkout).
         if let Ok(dts) =
             std::fs::read_to_string("../the-last-stag-mud/types/hearth.d.luau")
+            && let Some(after) = dts.split("type Object = {").nth(1)
         {
-            if let Some(after) = dts.split("type Object = {").nth(1) {
-                // Terminate at the closing brace on its own line, not the inline
-                // `{ [string]: any }` braces on the attrs/tags fields.
-                let block = after.split("\n}").next().unwrap_or("");
-                let typed: BTreeSet<String> = block
-                    .lines()
-                    .filter_map(|l| l.trim().split_once(':').map(|(n, _)| n.trim().to_string()))
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                let missing_t: Vec<_> = snapshot.difference(&typed).collect();
-                let stale_t: Vec<_> = typed.difference(&snapshot).collect();
-                assert!(
-                    missing_t.is_empty() && stale_t.is_empty(),
-                    "hearth.d.luau `type Object` drifted from the engine snapshot:\n  missing (add to the .d.luau): {:?}\n  stale (remove from the .d.luau): {:?}",
-                    missing_t,
-                    stale_t
-                );
-            }
+            // Terminate at the closing brace on its own line, not the inline
+            // `{ [string]: any }` braces on the attrs/tags fields.
+            let block = after.split("\n}").next().unwrap_or("");
+            let typed: BTreeSet<String> = block
+                .lines()
+                .filter_map(|l| l.trim().split_once(':').map(|(n, _)| n.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect();
+            let missing_t: Vec<_> = snapshot.difference(&typed).collect();
+            let stale_t: Vec<_> = typed.difference(&snapshot).collect();
+            assert!(
+                missing_t.is_empty() && stale_t.is_empty(),
+                "hearth.d.luau `type Object` drifted from the engine snapshot:\n  missing (add to the .d.luau): {:?}\n  stale (remove from the .d.luau): {:?}",
+                missing_t,
+                stale_t
+            );
         }
     }
 }

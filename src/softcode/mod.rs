@@ -4171,7 +4171,7 @@ mod tests {
         for i in 0..OWNER_OBJECT_QUOTA {
             let r = world.next_dbref();
             world.add_object(
-                GameObject::new(&r, &format!("thing{}", i), Kind::Item)
+                GameObject::new(&r, format!("thing{}", i), Kind::Item)
                     .with_owner("#builder-a"),
             );
         }
@@ -4206,7 +4206,7 @@ mod tests {
 
         for i in 0..OWNER_OBJECT_QUOTA {
             let r = world.next_dbref();
-            world.add_object(GameObject::new(&r, &format!("thing{}", i), Kind::Item));
+            world.add_object(GameObject::new(&r, format!("thing{}", i), Kind::Item));
         }
 
         let batch = batch_as(
@@ -4267,7 +4267,7 @@ mod tests {
         for i in 0..OWNER_OBJECT_QUOTA {
             let r = world.next_dbref();
             world.add_object(
-                GameObject::new(&r, &format!("thing{}", i), Kind::Item)
+                GameObject::new(&r, format!("thing{}", i), Kind::Item)
                     .with_owner("#builder-a"),
             );
         }
