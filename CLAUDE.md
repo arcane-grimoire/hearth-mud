@@ -215,6 +215,26 @@ Maps and terrain used to load this way too, but are now **DB-owned**: the
 from those files on `@import` and thereafter edited from the map builder (the DB
 is the source of truth once imported).
 
+**Boot-time world-content loading is hash-reconciled, not a blind re-import.**
+The world loads from the database first (it is the source of truth); then, when
+`load_world_files = true`, each `<area>/*.toml` and the program `.luau` files it
+references are compared by **blake3 content hash** against the `file_hashes`
+table (see `src/loader.rs` `load_game_dir`, `src/db.rs` `load_file_hashes`):
+
+- **unchanged** files are *skipped* — their DB objects stand, so in-game edits
+  (`@program`, the web code editor, `hearth program set`) survive a reboot
+  instead of being clobbered by the on-disk copy;
+- **changed** files *update* their `system:managed` objects (title, description,
+  tags, locks, attrs, programs re-applied from disk; the dbref never changes) or
+  *create* new ones with a fresh dbref;
+- player-created (non-managed) objects are never touched.
+
+Updated hashes are written back, so the next boot only reconciles what actually
+changed (the startup log's `created`/`updated`/`skipped` counts). Setting
+`load_world_files = false` skips this reconciliation entirely — the database is
+fully authoritative and no `<area>` files are read (the file-key map is still
+rebuilt from the DB so path-style refs like `spawn_room` resolve).
+
 A container built without the game directory boots — spawn resolves from the
 database, and maps/terrain come from `file_sources` — but libs, ink dialogue,
 and themes are all missing, so anything touching them breaks at runtime rather

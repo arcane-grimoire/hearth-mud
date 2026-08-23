@@ -132,6 +132,21 @@ Require the `admin` scope.
 | `@eval <luau>` | Run a one-shot Luau script against the live world (see below) |
 | `@import <path> [--dry-run]` | Install a TOML+`.luau` bundle into the database (see below) |
 | `@export <path>` | Write DB-owned content back to files in the same format (see below) |
+| `@reload-world` | Hot-reload the game directory: re-read libs + ink, invalidate the bytecode cache, and re-run the same hash-reconciled world load as boot — changed `<area>`/program files update their `system:managed` objects (dbrefs preserved), unchanged files are skipped, player-created objects untouched (see below) |
+| `@reload <ref>/<hook>` | Re-validate and re-enable one program (e.g. after fixing a syntax error that disabled it) |
+
+### `@reload-world`
+
+`@reload-world` applies edits to the game directory *without a restart*. It runs
+the identical reconciliation the engine does at boot (`loader::load_game_dir`):
+each `<area>/*.toml` and its program `.luau` files are hashed (blake3) against
+the stored `file_hashes`, and only files whose content changed are re-applied.
+Changed managed objects get their title/description/tags/locks/attrs/programs
+refreshed from disk while keeping their `#N` dbref; new content is created;
+player-created (non-`system:managed`) objects are never touched. It also reloads
+`lib/*.luau` modules and `.ink` files and clears the compiled-bytecode cache.
+`spawn_room` is re-resolved afterward. Maps/terrain are DB-owned — use `@import`
+to bring changed `maps/*.toml` / `terrain.toml` into the database.
 
 ### `@eval`
 
