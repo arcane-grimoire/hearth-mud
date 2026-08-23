@@ -3,7 +3,7 @@
   import PlugIcon from '@lucide/svelte/icons/plug';
   import PanelRightIcon from '@lucide/svelte/icons/panel-right';
   import MessagesSquareIcon from '@lucide/svelte/icons/messages-square';
-  import { showFlash } from '@kenn-io/kit-ui';
+  import { showFlash, Tooltip } from '@kenn-io/kit-ui';
   import { api } from '../../lib/api.js';
   import InkCodeEditor from './InkCodeEditor.svelte';
   import PlaytestPane from './PlaytestPane.svelte';
@@ -121,17 +121,23 @@
         <button class="seg-b" class:on={mode === 'raw'} onclick={() => (mode = 'raw')} title="Highlighting only — no lint or autocomplete">Raw</button>
       </div>
     {/if}
-    <button class="btn" onclick={wireUp} disabled={wiring} title="Give this NPC cmd_talk + on_dialog_choice hooks">
-      <PlugIcon size={13} /> {wiring ? '…' : 'Wire up NPC'}
-    </button>
-    {#if mode === 'rich' && !broken}
-      <button class="btn" class:on={showPlaytest} onclick={() => (showPlaytest = !showPlaytest)} title="Toggle playtest pane">
-        <PanelRightIcon size={13} /> Playtest
+    <Tooltip text="Give this NPC cmd_talk + on_dialog_choice hooks">
+      <button class="btn" onclick={wireUp} disabled={wiring}>
+        <PlugIcon size={13} /> {wiring ? '…' : 'Wire up NPC'}
       </button>
+    </Tooltip>
+    {#if mode === 'rich' && !broken}
+      <Tooltip text="Toggle playtest pane">
+        <button class="btn" class:on={showPlaytest} onclick={() => (showPlaytest = !showPlaytest)}>
+          <PanelRightIcon size={13} /> Playtest
+        </button>
+      </Tooltip>
     {/if}
-    <button class="btn save" onclick={save} disabled={saving || !dirty}>
-      <SaveIcon size={13} /> {saving ? '…' : 'Save'}
-    </button>
+    <Tooltip text="Save dialogue (⌘S)" align="end">
+      <button class="btn save" onclick={save} disabled={saving || !dirty}>
+        <SaveIcon size={13} /> {saving ? '…' : 'Save'}
+      </button>
+    </Tooltip>
   </header>
 
   {#if loading}

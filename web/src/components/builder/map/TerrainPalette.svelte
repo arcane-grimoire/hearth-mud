@@ -2,6 +2,7 @@
   import PlusIcon from '@lucide/svelte/icons/plus';
   import Settings2Icon from '@lucide/svelte/icons/settings-2';
   import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
+  import { Tooltip } from '@kenn-io/kit-ui';
   import { dims, readable } from '../../../lib/mapwright-toml.js';
 
   // Left rail: tool selector (Paint/Erase/Inspect), terrain palette swatches,
@@ -40,7 +41,7 @@
   </section>
 
   <section>
-    <p class="label">Terrain palette <button class="add" title="Add terrain type" onclick={onadd}><PlusIcon size={13} /></button></p>
+    <p class="label">Terrain palette <Tooltip text="Add terrain type" align="end"><button class="add" aria-label="Add terrain type" onclick={onadd}><PlusIcon size={13} /></button></Tooltip></p>
     <div class="swatches">
       {#each entries as [ch, t] (ch)}
         <button class="swatch" class:on={m.tool === 'paint' && m.brush === ch}
@@ -65,8 +66,8 @@
   <section>
     <p class="label">Canvas</p>
     <div class="dims">
-      <div class="stepper"><span>cols</span><button onclick={() => ondim('w', -1)}>−</button><span class="val">{size.w}</span><button onclick={() => ondim('w', 1)}>+</button></div>
-      <div class="stepper"><span>rows</span><button onclick={() => ondim('h', -1)}>−</button><span class="val">{size.h}</span><button onclick={() => ondim('h', 1)}>+</button></div>
+      <div class="stepper"><span>cols</span><Tooltip text="Remove a column"><button aria-label="Remove a column" onclick={() => ondim('w', -1)}>−</button></Tooltip><span class="val">{size.w}</span><Tooltip text="Add a column"><button aria-label="Add a column" onclick={() => ondim('w', 1)}>+</button></Tooltip></div>
+      <div class="stepper"><span>rows</span><Tooltip text="Remove a row"><button aria-label="Remove a row" onclick={() => ondim('h', -1)}>−</button></Tooltip><span class="val">{size.h}</span><Tooltip text="Add a row"><button aria-label="Add a row" onclick={() => ondim('h', 1)}>+</button></Tooltip></div>
     </div>
     <button class="reset" onclick={onreset}><RotateCcwIcon size={12} /> Reset to Iron Hills sample</button>
   </section>

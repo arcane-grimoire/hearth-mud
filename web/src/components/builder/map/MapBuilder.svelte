@@ -1,5 +1,5 @@
 <script>
-  import { Button, showFlash } from '@kenn-io/kit-ui';
+  import { Button, showFlash, Tooltip } from '@kenn-io/kit-ui';
   import SaveIcon from '@lucide/svelte/icons/save';
   import DownloadIcon from '@lucide/svelte/icons/download';
   import UploadIcon from '@lucide/svelte/icons/upload';
@@ -182,7 +182,7 @@
       {#if server}<span class="live">● live</span>{/if}
     </div>
     <span class="spacer"></span>
-    {#if server}<Button size="sm" tone="accent" onclick={saveGame}><SaveIcon size={13} /> Save to game</Button>{/if}
+    {#if server}<Tooltip text="Save map to the game (⌘S)"><Button size="sm" tone="accent" onclick={saveGame}><SaveIcon size={13} /> Save to game</Button></Tooltip>{/if}
     <Button size="sm" onclick={() => (ioMode = 'import')}><UploadIcon size={13} /> Import</Button>
     <Button size="sm" tone="accent" surface="soft" onclick={() => (ioMode = 'export')}><DownloadIcon size={13} /> Export TOML</Button>
   </header>

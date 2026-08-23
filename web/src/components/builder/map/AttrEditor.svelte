@@ -26,7 +26,7 @@
   {#each rows as row, i (i)}
     {@const def = schemaFor(schema, (row.key || '').trim())}
     <div class="mini">
-      <button class="del" title="remove" onclick={() => removeRow(i)}>×</button>
+      <button class="del" title="Remove attribute" aria-label="Remove attribute" onclick={() => removeRow(i)}>×</button>
       <div class="grid">
         <div>
           <div class="lbl">key{#if def}<span class="tybadge">{def.type}</span>{/if}</div>

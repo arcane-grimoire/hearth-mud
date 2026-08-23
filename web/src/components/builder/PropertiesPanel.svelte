@@ -1,5 +1,5 @@
 <script>
-  import { Button, showFlash } from '@kenn-io/kit-ui';
+  import { Button, showFlash, Tooltip } from '@kenn-io/kit-ui';
   import { api } from '../../lib/api.js';
 
   // Object properties: identity, tags, attributes. Lifted from Admin.svelte so
@@ -78,7 +78,7 @@
       <h3>Tags</h3>
       <div class="tags">
         {#each obj.tags || [] as tag}
-          <span class="tag">{tag}<button onclick={() => removeTag(tag)}>×</button></span>
+          <span class="tag">{tag}<Tooltip text="Remove tag"><button aria-label="Remove tag" onclick={() => removeTag(tag)}>×</button></Tooltip></span>
         {/each}
         {#if !(obj.tags || []).length}<span class="none">no tags</span>{/if}
       </div>
@@ -104,7 +104,7 @@
                 <td class="av" ondblclick={() => startEdit(key)} title="Double-click to edit">{disp}</td>
                 <td class="aa">
                   <button onclick={() => startEdit(key)}>Edit</button>
-                  <button class="del" onclick={() => deleteAttr(key)}>Del</button>
+                  <Tooltip text="Delete attribute"><button class="del" onclick={() => deleteAttr(key)}>Del</button></Tooltip>
                 </td>
               {/if}
             </tr>

@@ -4,6 +4,7 @@
   import FileCodeIcon from '@lucide/svelte/icons/file-code';
   import Grid3x3Icon from '@lucide/svelte/icons/grid-3x3';
   import PlusIcon from '@lucide/svelte/icons/plus';
+  import { Tooltip } from '@kenn-io/kit-ui';
 
   // VS Code-style explorer: area (folder) → object → its hooks (files), plus a
   // "Maps" folder for the tile/terrain maps. Stays pinned on the left while you
@@ -68,7 +69,7 @@
       <span class="area-name">Maps</span>
       <span class="area-count">{maps.length}</span>
     </button>
-    <button class="area-add" title="Map builder (new / all)" onclick={onnewmap}><PlusIcon size={12} /></button>
+    <Tooltip text="Map builder — new / all maps" align="end"><button class="area-add" aria-label="Map builder" onclick={onnewmap}><PlusIcon size={12} /></button></Tooltip>
   </div>
   {#if mapsOpen}
     {#each maps as m}

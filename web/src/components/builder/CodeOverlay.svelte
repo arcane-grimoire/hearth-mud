@@ -1,5 +1,5 @@
 <script>
-  import { Button, showFlash } from '@kenn-io/kit-ui';
+  import { Button, showFlash, Tooltip } from '@kenn-io/kit-ui';
   import PlayIcon from '@lucide/svelte/icons/play';
   import SaveIcon from '@lucide/svelte/icons/save';
   import XIcon from '@lucide/svelte/icons/x';
@@ -73,9 +73,9 @@
       {#if dirty}<span class="dot">●</span>{/if}
     </div>
     <span class="sp"></span>
-    <Button size="sm" onclick={run} disabled={running}><PlayIcon size={13} /> Run</Button>
-    <Button size="sm" tone="accent" onclick={() => save()} disabled={saving || !dirty}><SaveIcon size={13} /> Save</Button>
-    <button class="x" title="Close editor" onclick={onclose}><XIcon size={16} /></button>
+    <Tooltip text="Run — evaluate the buffer as your character"><Button size="sm" onclick={run} disabled={running}><PlayIcon size={13} /> Run</Button></Tooltip>
+    <Tooltip text="Save program (⌘S)"><Button size="sm" tone="accent" onclick={() => save()} disabled={saving || !dirty}><SaveIcon size={13} /> Save</Button></Tooltip>
+    <Tooltip text="Close editor" align="end"><button class="x" aria-label="Close editor" onclick={onclose}><XIcon size={16} /></button></Tooltip>
   </header>
 
   <div class="edit">
@@ -90,7 +90,7 @@
 
   {#if output}
     <div class="out" class:err={!output.ok}>
-      <div class="oh">{output.ok ? 'output' : 'error'}<button onclick={() => (output = null)}>✕</button></div>
+      <div class="oh">{output.ok ? 'output' : 'error'}<Tooltip text="Dismiss" align="end"><button aria-label="Dismiss output" onclick={() => (output = null)}>✕</button></Tooltip></div>
       <pre>{output.text}</pre>
     </div>
   {/if}

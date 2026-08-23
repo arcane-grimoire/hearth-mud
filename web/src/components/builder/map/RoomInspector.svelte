@@ -88,7 +88,7 @@
           <h4>Encounters <span class="dim">{(c.encounters || []).length || ''}</span></h4>
           {#each c.encounters || [] as en, i}
             <div class="mini">
-              <button class="del" onclick={() => rmEnc(i)}>×</button>
+              <button class="del" title="Remove encounter" aria-label="Remove encounter" onclick={() => rmEnc(i)}>×</button>
               <div class="enc">
                 <div><div class="lbl">monster</div><input value={en.monster || ''} oninput={(e) => encField(en, 'monster', e.target.value)} /></div>
                 <div><div class="lbl">min</div><input type="number" min="1" value={en.count ? en.count[0] : 1} oninput={(e) => encField(en, 'min', e.target.value)} /></div>
@@ -103,7 +103,7 @@
           <h4>Objects <span class="dim">{(c.objects || []).length || ''}</span></h4>
           {#each c.objects || [] as ob, i}
             <div class="mini">
-              <button class="del" onclick={() => rmObj(i)}>×</button>
+              <button class="del" title="Remove object" aria-label="Remove object" onclick={() => rmObj(i)}>×</button>
               <div class="obj2">
                 <div><div class="lbl">key</div><input value={ob.key || ''} oninput={(e) => objField(ob, 'key', e.target.value)} /></div>
                 <div><div class="lbl">kind</div>

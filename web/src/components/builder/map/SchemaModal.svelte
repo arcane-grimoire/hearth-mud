@@ -24,7 +24,7 @@
     <p class="intro">Declare the attributes your spawn / populate hooks read. A defined attribute gets a typed input wherever you use it — a dropdown for <b>enums</b>, a checkbox for <b>booleans</b>, a number field for <b>ints</b>. Anything undeclared stays free text. Exports as <code>[[terrain_attr]]</code> blocks in <code>terrain.toml</code>.</p>
     {#each rows as row, i (i)}
       <div class="mini">
-        <button class="del" onclick={() => remove(i)}>×</button>
+        <button class="del" title="Remove attribute type" aria-label="Remove attribute type" onclick={() => remove(i)}>×</button>
         <div class="grid">
           <div><div class="lbl">attribute key</div><input spellcheck="false" placeholder="danger" bind:value={row.key} oninput={emit} /></div>
           <div><div class="lbl">type</div>

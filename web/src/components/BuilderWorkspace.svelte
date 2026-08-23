@@ -11,7 +11,7 @@
   import FileCodeIcon from '@lucide/svelte/icons/file-code';
   import BoxIcon from '@lucide/svelte/icons/box';
   import MessagesSquareIcon from '@lucide/svelte/icons/messages-square';
-  import { showFlash } from '@kenn-io/kit-ui';
+  import { showFlash, Tooltip } from '@kenn-io/kit-ui';
   import { api } from '../lib/api.js';
   import { selection, selectRef, clearSelection } from '../lib/selection.svelte.js';
   import ObjectTable from './builder/ObjectTable.svelte';
@@ -198,15 +198,19 @@
 
 <div class="ws">
   <header class="top">
-    <button class="back" onclick={onexit}><ArrowLeftIcon size={16} /> <span>Game</span></button>
-    <button class="icon-btn" title="Toggle sidebar (⌘B)" aria-label="Toggle sidebar" onclick={() => (sidebarOpen = !sidebarOpen)}>
-      <PanelLeftIcon size={15} />
-    </button>
+    <Tooltip text="Back to the game"><button class="back" onclick={onexit}><ArrowLeftIcon size={16} /> <span>Game</span></button></Tooltip>
+    <Tooltip text="Toggle sidebar (⌘B)">
+      <button class="icon-btn" aria-label="Toggle sidebar" onclick={() => (sidebarOpen = !sidebarOpen)}>
+        <PanelLeftIcon size={15} />
+      </button>
+    </Tooltip>
     <div class="title"><LayersIcon size={16} /> <h1>Builder</h1></div>
     <span class="sp"></span>
-    <button class="find" onclick={() => (finderOpen = true)} title="Find any object (⌘K)">
-      <SearchIcon size={14} /> <span>Find</span> <kbd>⌘K</kbd>
-    </button>
+    <Tooltip text="Find any object or map (⌘K)">
+      <button class="find" onclick={() => (finderOpen = true)}>
+        <SearchIcon size={14} /> <span>Find</span> <kbd>⌘K</kbd>
+      </button>
+    </Tooltip>
   </header>
 
   <div class="body" class:no-sidebar={!sidebarOpen}>
@@ -287,7 +291,7 @@
               </span>
               <span class="tl">{tabLabel(t)}</span>
               {#if t.type === 'code' || t.type === 'object' || t.type === 'ink'}<span class="tref">{t.ref}</span>{/if}
-              <button class="tc-x" title="Close" onclick={(e) => closeTab(t.id, e)}><XIcon size={12} /></button>
+              <Tooltip text="Close tab"><button class="tc-x" aria-label="Close tab" onclick={(e) => closeTab(t.id, e)}><XIcon size={12} /></button></Tooltip>
             </div>
           {/each}
         </div>

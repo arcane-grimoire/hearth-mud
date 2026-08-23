@@ -1,6 +1,7 @@
 <script>
   import PlayIcon from '@lucide/svelte/icons/play';
   import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
+  import { Tooltip } from '@kenn-io/kit-ui';
   import { api } from '../../lib/api.js';
 
   // A live playtest of the dialogue, driven by the ink_play_* REST actions.
@@ -68,9 +69,11 @@
     <span class="lbl">Playtest</span>
     <span class="sp"></span>
     {#if running}
-      <button class="pt-btn" onclick={start} disabled={busy} title="Restart from the top">
-        <RotateCcwIcon size={13} /> Restart
-      </button>
+      <Tooltip text="Restart from the top" align="end">
+        <button class="pt-btn" onclick={start} disabled={busy}>
+          <RotateCcwIcon size={13} /> Restart
+        </button>
+      </Tooltip>
     {/if}
   </div>
 
