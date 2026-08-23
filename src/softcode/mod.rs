@@ -567,7 +567,7 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                         return Err("destroy: cannot destroy player objects".into());
                     }
                     Some(_) => {
-                        world.objects.remove(target);
+                        world.remove_object(target);
                     }
                     None => return Err(format!("destroy: no object '{}'", target)),
                 }
@@ -878,6 +878,12 @@ fn describe_lua_value(lua: &Lua, value: LuaValue) -> Option<String> {
 pub struct SoftcodeRuntime {
     lua: Lua,
     chunk_cache: std::cell::RefCell<HashMap<u64, mlua::RegistryKey>>,
+    /// Whether [`Self::sync_user_lib_sources`] needs to rebuild the
+    /// user-lib sources table before the next Program execution. Set by
+    /// [`Self::mark_libs_dirty`] (called from the cache-invalidation entry
+    /// points the engine already invokes on every program mutation), so
+    /// per-hook-fire syncs become no-ops while libs are unchanged.
+    libs_dirty: std::cell::Cell<bool>,
     ink: RefCell<ink::InkRuntime>,
 }
 
@@ -918,6 +924,8 @@ impl SoftcodeRuntime {
         Self {
             lua,
             chunk_cache: std::cell::RefCell::new(HashMap::new()),
+            // Start dirty: nothing has been synced yet.
+            libs_dirty: std::cell::Cell::new(true),
             ink: RefCell::new(ink::InkRuntime::new()),
         }
     }
@@ -1012,6 +1020,7 @@ impl SoftcodeRuntime {
     /// it. Clearing it here without a reload would make shipped modules
     /// unresolvable until the next `@reload-world`.
     pub fn invalidate_module_cache(&self) {
+        self.mark_libs_dirty();
         let cache: mlua::Table = self
             .lua
             .named_registry_value(MODULE_CACHE_KEY)
@@ -1037,11 +1046,24 @@ impl SoftcodeRuntime {
 
     /// Refresh the user-library source table from `world` — every enabled
     /// `lib_<name>` Program on a `Kind::Code` object, keyed by `<name>`.
-    /// Called at the start of every Program execution so `require` always
-    /// sees the current DB state; combined with `invalidate_module_cache`
-    /// at write time, an edit takes effect on the *next* `require` call
-    /// without needing to track who required what.
+    /// Flag the user-lib sources table as stale so the next Program
+    /// execution re-syncs it from `World`. Every program-mutation path in
+    /// the engine already funnels through `invalidate_module_cache` /
+    /// `invalidate_cache`, which call this — see
+    /// `Engine::invalidate_libs_touched_by` and the `@program`/`@lib`/
+    /// `@script`/restore command handlers.
+    pub fn mark_libs_dirty(&self) {
+        self.libs_dirty.set(true);
+    }
+
+    /// Rebuild the user-lib sources table only when something changed since
+    /// the last sync. Combined with `invalidate_module_cache` at write time
+    /// (which marks the table dirty), an edit takes effect on the *next*
+    /// `require` call without needing to track who required what.
     fn sync_user_lib_sources(&self, world: &World) {
+        if !self.libs_dirty.replace(false) {
+            return;
+        }
         let table: mlua::Table = self
             .lua
             .named_registry_value(USER_LIB_SOURCES_KEY)
@@ -1085,6 +1107,7 @@ impl SoftcodeRuntime {
     }
 
     pub fn invalidate_cache(&self) {
+        self.mark_libs_dirty();
         self.chunk_cache.borrow_mut().clear();
         let sources: mlua::Table = self
             .lua
@@ -2663,6 +2686,47 @@ mod tests {
             .filter(|o| o.attrs.get("map_name").and_then(|v| v.as_str()) == Some("iron_hills"))
             .collect();
         assert_eq!(map_rooms.len(), 4);
+    }
+
+    /// The user-lib sources table is only rebuilt when marked dirty — a
+    /// second sync with no intervening invalidation is a no-op, and an
+    /// `invalidate_module_cache` (fired on every lib program write) makes
+    /// the next sync pick up the change.
+    #[test]
+    fn user_lib_sync_is_skipped_until_marked_dirty() {
+        use super::hooks;
+
+        let runtime = SoftcodeRuntime::new();
+        let mut world = World::new();
+        let mut obj = GameObject::new("#1", "lib", Kind::Code);
+        hooks::set_program(&mut obj, "lib_m", "return 1".into()).unwrap();
+        world.add_object(obj);
+
+        let table: mlua::Table = runtime
+            .lua
+            .named_registry_value(crate::softcode::USER_LIB_SOURCES_KEY)
+            .unwrap();
+
+        runtime.sync_user_lib_sources(&world);
+        assert_eq!(table.get::<String>("m").unwrap(), "return 1");
+
+        // Mutate the world without invalidating: sync must be a no-op and
+        // the table keeps the old source.
+        world
+            .get_mut("#1")
+            .unwrap()
+            .programs
+            .get_mut("lib_m")
+            .unwrap()
+            .source = "return 2".into();
+        runtime.sync_user_lib_sources(&world);
+        assert_eq!(table.get::<String>("m").unwrap(), "return 1");
+
+        // Invalidate (what the engine does on every program write): next
+        // sync picks up the new source.
+        runtime.invalidate_module_cache();
+        runtime.sync_user_lib_sources(&world);
+        assert_eq!(table.get::<String>("m").unwrap(), "return 2");
     }
 
     #[test]

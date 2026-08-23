@@ -418,6 +418,76 @@ impl Database {
         tx.commit()
     }
 
+    /// Persist only the objects changed since the last drain of
+    /// `World::dirty` — upserts for writes/creations, deletes for removals.
+    /// Avoids the full-world DELETE+re-serialize of [`Self::save_world`] on
+    /// the periodic autosave. Falls back to semantics identical to a full
+    /// save when the caller passes an empty change set (no-op).
+    pub fn save_world_delta(
+        &self,
+        world: &World,
+        changes: &HashMap<String, bool>,
+    ) -> rusqlite::Result<()> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('next_id', ?1)",
+            params![world.next_id.to_string()],
+        )?;
+
+        {
+            let mut obj_stmt = tx.prepare(
+                "INSERT OR REPLACE INTO objects (ref_id, key, kind, title, description, location_ref, target_ref, attrs_json, aliases_json, programs_json, locks_json, id, owner_ref) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            )?;
+            let mut tag_del = tx.prepare("DELETE FROM tags WHERE object_ref = ?1")?;
+            let mut tag_stmt = tx.prepare(
+                "INSERT INTO tags (object_ref, category, key) VALUES (?1, ?2, ?3)",
+            )?;
+            let mut obj_del = tx.prepare("DELETE FROM objects WHERE ref_id = ?1")?;
+
+            for (ref_id, exists) in changes {
+                if !exists {
+                    tag_del.execute(params![ref_id])?;
+                    obj_del.execute(params![ref_id])?;
+                    continue;
+                }
+                let Some(obj) = world.get(ref_id) else { continue };
+                let kind_str = obj.kind.to_string();
+                let attrs_json = serde_json::to_string(&obj.attrs).unwrap_or_else(|_| "{}".into());
+                let aliases: Vec<&String> = obj.aliases.iter().collect();
+                let aliases_json = serde_json::to_string(&aliases).unwrap_or_else(|_| "[]".into());
+                let programs_json =
+                    serde_json::to_string(&obj.programs).unwrap_or_else(|_| "{}".into());
+                let locks_json =
+                    serde_json::to_string(&obj.locks).unwrap_or_else(|_| "{}".into());
+                // Tags are cheap to rewrite wholesale per object.
+                tag_del.execute(params![ref_id])?;
+                obj_stmt.execute(params![
+                    obj.ref_id,
+                    obj.key,
+                    kind_str,
+                    obj.title,
+                    obj.description,
+                    obj.location_ref,
+                    obj.target_ref,
+                    attrs_json,
+                    aliases_json,
+                    programs_json,
+                    locks_json,
+                    obj.id,
+                    obj.owner_ref,
+                ])?;
+                for tag in &obj.tags {
+                    tag_stmt.execute(params![obj.ref_id, tag.category, tag.key])?;
+                }
+            }
+        }
+
+        tx.commit()
+    }
+
     pub fn load_world(&self) -> rusqlite::Result<World> {
         let mut world = World::new();
 
@@ -801,6 +871,39 @@ mod tests {
 
     fn temp_db() -> Database {
         Database::open(Path::new(":memory:")).unwrap()
+    }
+
+    /// Delta saves must compose with a prior full/delta save: upserts
+    /// update in place, removals delete rows, and unchanged objects are
+    /// left alone but still load.
+    #[test]
+    fn world_delta_round_trip() {
+        let db = temp_db();
+        let mut world = World::new();
+
+        let room_ref = world.next_dbref();
+        world.add_object(GameObject::new(&room_ref, "hall", Kind::Room));
+        let item_ref = world.next_dbref();
+        world.add_object(
+            GameObject::new(&item_ref, "sword", Kind::Item).with_location(&room_ref),
+        );
+
+        // First save: everything is dirty (loader-style fresh start).
+        let changes = world.drain_dirty();
+        assert_eq!(changes.len(), 2);
+        db.save_world_delta(&world, &changes).unwrap();
+
+        // Mutate one object, delete the other.
+        world.get_mut(&room_ref).unwrap().title = Some("Renamed".into());
+        world.remove_object(&item_ref);
+        let changes = world.drain_dirty();
+        assert_eq!(changes.len(), 2);
+        db.save_world_delta(&world, &changes).unwrap();
+
+        let loaded = db.load_world().unwrap();
+        assert!(loaded.get(&room_ref).is_some());
+        assert_eq!(loaded.get(&room_ref).unwrap().title.as_deref(), Some("Renamed"));
+        assert!(loaded.get(&item_ref).is_none());
     }
 
     #[test]

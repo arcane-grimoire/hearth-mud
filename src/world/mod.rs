@@ -10,6 +10,17 @@ use std::collections::HashMap;
 pub struct World {
     pub objects: HashMap<String, GameObject>,
     pub next_id: u64,
+    /// Bumped on every potential mutation (`add_object`, `remove_object`,
+    /// `get_mut`). Derived indexes elsewhere (engine-side tick/global/troupe
+    /// caches) compare their epoch against this to know when to rebuild.
+    /// Deliberately conservative: `get_mut` may be called without an actual
+    /// write, but a spurious rebuild is only a perf cost, never a bug.
+    pub version: u64,
+    /// Refs written via [`Self::get_mut`] / added via [`Self::add_object`]
+    /// since the last drain — used for incremental persistence. Removals are
+    /// recorded here with an empty entry (see [`Self::remove_object`]).
+    /// Drained by the engine's save path (`db::save_world_delta`).
+    pub(crate) dirty: HashMap<String, bool>,
 }
 
 impl World {
@@ -17,6 +28,8 @@ impl World {
         Self {
             objects: HashMap::new(),
             next_id: 0,
+            version: 0,
+            dirty: HashMap::new(),
         }
     }
 
@@ -27,7 +40,16 @@ impl World {
     }
 
     pub fn add_object(&mut self, obj: GameObject) {
+        self.version += 1;
+        self.dirty.insert(obj.ref_id.clone(), true);
         self.objects.insert(obj.ref_id.clone(), obj);
+    }
+
+    /// Remove an object, recording the removal for incremental saves.
+    pub fn remove_object(&mut self, ref_id: &str) -> Option<GameObject> {
+        self.version += 1;
+        self.dirty.insert(ref_id.to_string(), false);
+        self.objects.remove(ref_id)
     }
 
     pub fn get(&self, ref_id: &str) -> Option<&GameObject> {
@@ -35,7 +57,17 @@ impl World {
     }
 
     pub fn get_mut(&mut self, ref_id: &str) -> Option<&mut GameObject> {
+        self.version += 1;
+        if let Some(obj) = self.objects.get(ref_id) {
+            self.dirty.insert(obj.ref_id.clone(), true);
+        }
         self.objects.get_mut(ref_id)
+    }
+
+    /// Take the pending change set for incremental saves: refs to upsert
+    /// (value `true`) and refs to delete (value `false`).
+    pub fn drain_dirty(&mut self) -> HashMap<String, bool> {
+        std::mem::take(&mut self.dirty)
     }
 
     pub fn exits_from(&self, room_ref: &str) -> Vec<&GameObject> {
@@ -102,5 +134,28 @@ mod tests {
         let refs: Vec<&str> = contents.iter().map(|o| o.ref_id.as_str()).collect();
         assert!(refs.contains(&item_ref.as_str()), "ordinary item should still be listed");
         assert!(!refs.contains(&code_ref.as_str()), "Code object must be excluded");
+    }
+
+    #[test]
+    fn dirty_tracking_records_writes_and_removals() {
+        let mut w = World::new();
+        let obj = GameObject::new("#1", "rock", Kind::Item);
+        w.add_object(obj.clone());
+        assert_eq!(w.drain_dirty().get("#1"), Some(&true));
+
+        // Clean after drain.
+        assert!(w.drain_dirty().is_empty());
+
+        w.get_mut("#1").unwrap().title = Some("a rock".into());
+        let dirty = w.drain_dirty();
+        assert_eq!(dirty.get("#1"), Some(&true));
+
+        w.remove_object("#1");
+        let dirty = w.drain_dirty();
+        assert_eq!(dirty.get("#1"), Some(&false));
+
+        // Unknown ref: no dirty entry, no panic.
+        assert!(w.get_mut("#999").is_none());
+        assert!(w.drain_dirty().is_empty());
     }
 }

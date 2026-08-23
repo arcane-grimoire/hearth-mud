@@ -328,6 +328,68 @@ pub struct Engine {
     /// Content hashes from the last load/reload, used to skip unchanged files.
     file_hashes: HashMap<std::path::PathBuf, String>,
     max_characters: u8,
+    /// Cached command list from `send_commands`, keyed by (location,
+    /// builder scope, admin scope, world version) so repeated looks/updates
+    /// in the same room skip the rebuild-and-sort.
+    commands_cache: Option<(Option<String>, bool, bool, u64, Vec<String>)>,
+    /// Lazily rebuilt derived indexes (tickables, global hooks by name,
+    /// troupe followers). Rebuilt in one O(N) pass whenever
+    /// `world.version` changes — see `Engine::indexes`.
+    derived: Option<DerivedIndexes>,
+}
+
+/// World-derived lookup structures, invalidated wholesale on any world
+/// mutation via `World::version`. Conservative: `get_mut` bumps the version
+/// even for read-modify writes that change nothing, but a spurious rebuild
+/// is only a perf cost. One O(N) pass fills every structure so a burst of
+/// queries after a mutation shares a single scan.
+#[derive(Default, Clone)]
+struct DerivedIndexes {
+    epoch: u64,
+    /// `(ref_id, tick_interval)` for every object with an enabled `on_tick`
+    /// program.
+    tickables: Vec<(String, u64)>,
+    /// `system:global`-tagged objects that have an enabled program for a
+    /// given hook, e.g. `"on_enter" -> ["#12", "#40"]`.
+    globals_by_hook: HashMap<String, Vec<String>>,
+    /// Followers per troupe leader: `troupe:<leader_ref>` tag → member refs.
+    troupes: HashMap<String, Vec<String>>,
+}
+
+impl DerivedIndexes {
+    fn build(world: &World) -> Self {
+        let mut idx = DerivedIndexes {
+            epoch: world.version,
+            tickables: Vec::new(),
+            globals_by_hook: HashMap::new(),
+            troupes: HashMap::new(),
+        };
+        for obj in world.objects.values() {
+            if let Some(program) = hooks::get_program(obj, "on_tick")
+                && program.enabled
+            {
+                let interval = obj
+                    .attrs
+                    .get("tick_interval")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1);
+                idx.tickables.push((obj.ref_id.clone(), interval));
+            }
+            if obj.tags.iter().any(|t| t.category == "system" && t.key == "global") {
+                for hook in obj.programs.keys() {
+                    if obj.programs.get(hook).is_some_and(|p| p.enabled) {
+                        idx.globals_by_hook.entry(hook.clone()).or_default().push(obj.ref_id.clone());
+                    }
+                }
+            }
+            for tag in &obj.tags {
+                if tag.category == "troupe" {
+                    idx.troupes.entry(tag.key.clone()).or_default().push(obj.ref_id.clone());
+                }
+            }
+        }
+        idx
+    }
 }
 
 use crate::softcode::ScheduledHook;
@@ -499,6 +561,22 @@ impl Engine {
             api_tokens,
             file_hashes,
             max_characters: config.max_characters,
+            derived: None,
+            commands_cache: None,
+        }
+    }
+
+    /// Derived world indexes, rebuilt lazily in one pass when the world has
+    /// changed since the last build. Returns owned data (cloned ref lists)
+    /// so the borrow is released before callers touch the world again.
+    fn indexes(&mut self) -> DerivedIndexes {
+        match &self.derived {
+            Some(d) if d.epoch == self.world.version => d.clone(),
+            _ => {
+                let idx = DerivedIndexes::build(&self.world);
+                self.derived = Some(idx.clone());
+                idx
+            }
         }
     }
 
@@ -556,7 +634,6 @@ impl Engine {
     fn do_tick(&mut self) {
         self.tick_count += 1;
         let tick = self.tick_count;
-        let start = std::time::Instant::now();
         let tick_budget = std::time::Duration::from_millis(500);
         let mut ran = 0u32;
 
@@ -564,22 +641,10 @@ impl Engine {
         // Every object with an on_tick Program ticks here, including
         // Kind::Code objects — a "global script" is just a Code object with
         // no location, so it needs no separate scheduler (see
-        // docs/plans/program-authoring.md Stage 2).
-        let mut tickable: Vec<(String, u64)> = Vec::new();
-        for obj in self.world.objects.values() {
-            if let Some(program) = hooks::get_program(obj, "on_tick") {
-                if !program.enabled {
-                    continue;
-                }
-                let interval = obj
-                    .attrs
-                    .get("tick_interval")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(1);
-                tickable.push((obj.ref_id.clone(), interval));
-            }
-        }
-        tickable.sort_by(|a, b| a.0.cmp(&b.0));
+        // docs/plans/program-authoring.md Stage 2). The tickable list comes
+        // from the derived index (rebuilt only when the world changed).
+        let tickable = self.indexes().tickables;
+        let start = std::time::Instant::now();
 
         for (ref_id, interval) in &tickable {
             if start.elapsed() > tick_budget {
@@ -798,9 +863,20 @@ impl Engine {
 
     fn do_save(&mut self) {
         self.fire_lifecycle_hook("on_save");
-        match self.db.save_world(&self.world) {
+        // Incremental: only objects touched since the last drain are
+        // serialized. On a fresh DB the change set holds every object (the
+        // loader's add_object calls mark them), so behavior matches a full
+        // save there.
+        let changes = self.world.drain_dirty();
+        let saved = if changes.is_empty() {
+            Ok(())
+        } else {
+            self.db.save_world_delta(&self.world, &changes)
+        };
+        match saved {
             Ok(()) => tracing::info!(
                 objects = self.world.objects.len(),
+                changed = changes.len(),
                 "World saved"
             ),
             Err(e) => tracing::error!(error = %e, "Failed to save world"),
@@ -1265,7 +1341,7 @@ impl Engine {
                 if self.world.get(&ref_id).map(|o| o.kind == Kind::Player).unwrap_or(false) {
                     return ApiResponse::error("Cannot delete player objects");
                 }
-                if self.world.objects.remove(&ref_id).is_some() {
+                if self.world.remove_object(&ref_id).is_some() {
                     ApiResponse::ok()
                 } else {
                     ApiResponse::error(format!("No object with ref '{}'", ref_id))
@@ -2720,11 +2796,11 @@ impl Engine {
                     .map(|o| o.ref_id.clone())
                     .collect();
                 for r in exit_refs {
-                    self.world.objects.remove(&r);
+                    self.world.remove_object(&r);
                 }
             }
             let _ = self.fire_hook(target_ref, "on_destroy", actor_ref, None, None);
-            self.world.objects.remove(target_ref);
+            self.world.remove_object(target_ref);
             format!("Destroyed {} ({}).\r\n", name, target_ref)
         } else {
             format!("No object with ref '{}'.\r\n", target_ref)
@@ -3339,18 +3415,7 @@ impl Engine {
         room_ref: Option<&str>,
         args: Option<&str>,
     ) {
-        let global_tag = crate::world::Tag {
-            category: "system".into(),
-            key: "global".into(),
-        };
-        let refs: Vec<String> = self
-            .world
-            .objects
-            .values()
-            .filter(|o| o.tags.contains(&global_tag))
-            .filter(|o| hooks::get_program(o, hook_name).is_some())
-            .map(|o| o.ref_id.clone())
-            .collect();
+        let refs = self.indexes().globals_by_hook.get(hook_name).cloned().unwrap_or_default();
         for ref_id in refs {
             let _ = self.fire_hook(&ref_id, hook_name, actor_ref, room_ref, args);
         }
@@ -4203,9 +4268,24 @@ impl Engine {
         }
     }
 
-    fn send_commands(&self, session_id: &str, actor_ref: &str) {
+    fn send_commands(&mut self, session_id: &str, actor_ref: &str) {
         let is_builder = self.session_has_scope(session_id, Scope::Builder);
         let is_admin = self.session_has_scope(session_id, Scope::Admin);
+        let room_ref = self.world.get(actor_ref).and_then(|a| a.location_ref.clone());
+
+        // Reuse the cached list when nothing relevant changed: same room,
+        // same scopes, and no world mutation since it was built.
+        if let Some((cache_room, cache_builder, cache_admin, epoch, cmds)) = &self.commands_cache
+            && *cache_room == room_ref
+            && *cache_builder == is_builder
+            && *cache_admin == is_admin
+            && *epoch == self.world.version
+        {
+            if let Some(session) = self.sessions.get(session_id) {
+                let _ = session.tx.send(ClientMessage::Commands { commands: cmds.clone() });
+            }
+            return;
+        }
 
         let mut cmds: Vec<String> = vec![
             "look", "say", "go", "quit", "inventory", "get", "put", "drop",
@@ -4234,7 +4314,6 @@ impl Engine {
             ].iter().map(|s| String::from(*s)));
         }
 
-        let room_ref = self.world.get(actor_ref).and_then(|a| a.location_ref.clone());
         if let Some(room_ref) = &room_ref {
             for exit in self.world.exits_from(room_ref) {
                 cmds.push(exit.key.clone());
@@ -4262,6 +4341,8 @@ impl Engine {
 
         cmds.sort();
         cmds.dedup();
+
+        self.commands_cache = Some((room_ref.clone(), is_builder, is_admin, self.world.version, cmds.clone()));
 
         if let Some(session) = self.sessions.get(session_id) {
             let _ = session.tx.send(ClientMessage::Commands { commands: cmds });
@@ -4458,7 +4539,7 @@ impl Engine {
                 let obj = self.world.get_mut(&ref_id).unwrap();
                 hooks::remove_program(obj, "on_tick");
                 if obj.programs.is_empty() {
-                    self.world.objects.remove(&ref_id);
+                    self.world.remove_object(&ref_id);
                 }
                 self.record_program_tombstone(&ref_id, "on_tick", Some(actor_ref));
                 format!("Script '{}' removed.\r\n", name)
@@ -4581,7 +4662,7 @@ impl Engine {
                 let obj = self.world.get_mut(&ref_id).unwrap();
                 hooks::remove_program(obj, &hook);
                 if obj.programs.is_empty() {
-                    self.world.objects.remove(&ref_id);
+                    self.world.remove_object(&ref_id);
                 }
                 self.softcode.invalidate_module_cache();
                 self.record_program_tombstone(&ref_id, &hook, Some(actor_ref));
@@ -4763,6 +4844,12 @@ impl Engine {
         ) {
             Ok(report) => {
                 if !dry_run {
+                    // Imported objects may carry Programs (including
+                    // `lib_*` user libraries) — drop stale compiled chunks,
+                    // cached modules, and the user-lib sources table so the
+                    // next run sees the imported state. Same reasoning as
+                    // `cmd_reload_world`.
+                    self.softcode.invalidate_cache();
                     self.reload_map_sources_from_db();
                 }
                 crate::import_export::render_import_report(&report, dry_run, path)
@@ -5404,15 +5491,9 @@ impl Engine {
             actor.location_ref = Some(target_ref.to_string());
         }
 
-        // Move followers (troupe members tagged troupe:<actor_ref>)
-        let troupe_tag = crate::world::Tag {
-            category: "troupe".to_string(),
-            key: actor_ref.to_string(),
-        };
-        let followers: Vec<String> = self.world.objects.values()
-            .filter(|o| o.tags.contains(&troupe_tag))
-            .map(|o| o.ref_id.clone())
-            .collect();
+        // Move followers (troupe members tagged troupe:<actor_ref>) — from
+        // the derived index, not a full-world scan.
+        let followers = self.indexes().troupes.get(actor_ref).cloned().unwrap_or_default();
         for ref_id in followers {
             if let Some(obj) = self.world.get_mut(&ref_id) {
                 obj.location_ref = Some(target_ref.to_string());
@@ -6011,7 +6092,7 @@ impl Engine {
         if let Some(account) = self.accounts.get_mut(&account_id) {
             account.characters.retain(|r| r != &target_ref);
         }
-        self.world.objects.remove(&target_ref);
+        self.world.remove_object(&target_ref);
         self.db.save_accounts(&self.accounts).ok();
 
         format!("Character '{}' deleted.\r\n", char_name)

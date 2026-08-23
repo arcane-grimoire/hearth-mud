@@ -9,6 +9,34 @@ use bladeink_compiler::Compiler;
 
 type ConversationKey = (String, String);
 
+/// Send-erasure wrapper for `bladeink::Story`, which is `Rc`-based and
+/// therefore `!Send`. The engine is single-threaded by design (ADR 0002:
+/// one writer owns the world) and the whole `Engine` — including this
+/// runtime — lives and is polled on that one thread, so cross-thread
+/// access to the wrapped story can never happen. Without this, storing a
+/// live story would make the engine future `!Send` and unspawnable by
+/// tokio.
+struct SingleThreaded<T>(T);
+// SAFETY: see struct docs — only ever accessed from the engine thread.
+unsafe impl<T> Send for SingleThreaded<T> {}
+
+impl<T> SingleThreaded<T> {
+    fn get_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
+    fn get(&self) -> &T {
+        &self.0
+    }
+}
+
+struct ActiveConversation {
+    /// Live story instance — kept across actions so `continue`/`choose`/
+    /// variable access don't re-parse the compiled JSON and reload state
+    /// per call. Serialized back to JSON only when a conversation ends
+    /// with `save`.
+    story: SingleThreaded<Story>,
+}
+
 pub struct InkOutput {
     pub text: String,
     pub choices: Vec<InkChoice>,
@@ -21,11 +49,6 @@ pub struct InkChoice {
     pub index: usize,
     pub text: String,
     pub tags: Vec<String>,
-}
-
-struct ActiveConversation {
-    compiled_json: String,
-    state_json: String,
 }
 
 pub struct InkRuntime {
@@ -87,16 +110,10 @@ impl InkRuntime {
         }
 
         let output = run_story_to_output(&mut story)?;
-        let state_json = story.save_state().map_err(|e| format!("{e}"))?;
 
         let key = (player_ref.to_string(), npc_ref.to_string());
-        self.active.insert(
-            key,
-            ActiveConversation {
-                compiled_json,
-                state_json,
-            },
-        );
+        self.active
+            .insert(key, ActiveConversation { story: SingleThreaded(story) });
         Ok(output)
     }
 
@@ -111,13 +128,7 @@ impl InkRuntime {
             .get_mut(&key)
             .ok_or_else(|| "no active conversation".to_string())?;
 
-        let mut story = Story::new(&conv.compiled_json).map_err(|e| format!("{e}"))?;
-        story
-            .load_state(&conv.state_json)
-            .map_err(|e| format!("{e}"))?;
-
-        let output = run_story_to_output(&mut story)?;
-        conv.state_json = story.save_state().map_err(|e| format!("{e}"))?;
+        let output = run_story_to_output(conv.story.get_mut())?;
         Ok(output)
     }
 
@@ -133,16 +144,12 @@ impl InkRuntime {
             .get_mut(&key)
             .ok_or_else(|| "no active conversation".to_string())?;
 
-        let mut story = Story::new(&conv.compiled_json).map_err(|e| format!("{e}"))?;
-        story
-            .load_state(&conv.state_json)
-            .map_err(|e| format!("{e}"))?;
-        story
+        conv.story
+            .get_mut()
             .choose_choice_index(choice_index)
             .map_err(|e| format!("{e}"))?;
 
-        let output = run_story_to_output(&mut story)?;
-        conv.state_json = story.save_state().map_err(|e| format!("{e}"))?;
+        let output = run_story_to_output(conv.story.get_mut())?;
         Ok(output)
     }
 
@@ -158,15 +165,8 @@ impl InkRuntime {
             .get(&key)
             .ok_or_else(|| "no active conversation".to_string())?;
 
-        let story = Story::new(&conv.compiled_json).map_err(|e| format!("{e}"))?;
-        // Note: must load state to see variable values set during conversation
-        // But load_state takes &mut, so we need a mutable story
-        // For get_variable we can just create a fresh story with state loaded
-        let mut story = story;
-        story
-            .load_state(&conv.state_json)
-            .map_err(|e| format!("{e}"))?;
-        match story.get_variable(name) {
+        // Reads straight off the live story — no state reload needed.
+        match conv.story.get().get_variable(name) {
             Some(v) => Ok(Some(value_type_to_json(&v))),
             None => Ok(None),
         }
@@ -185,14 +185,8 @@ impl InkRuntime {
             .get_mut(&key)
             .ok_or_else(|| "no active conversation".to_string())?;
 
-        let mut story = Story::new(&conv.compiled_json).map_err(|e| format!("{e}"))?;
-        story
-            .load_state(&conv.state_json)
-            .map_err(|e| format!("{e}"))?;
         let vt = json_to_value_type(value)?;
-        story.set_variable(name, &vt).map_err(|e| format!("{e}"))?;
-        conv.state_json = story.save_state().map_err(|e| format!("{e}"))?;
-        Ok(())
+        conv.story.get_mut().set_variable(name, &vt).map_err(|e| format!("{e}"))
     }
 
     pub fn end_conversation(
@@ -203,7 +197,9 @@ impl InkRuntime {
     ) -> Result<Option<String>, String> {
         let key = (player_ref.to_string(), npc_ref.to_string());
         let state = if save {
-            self.active.get(&key).map(|c| c.state_json.clone())
+            self.active
+                .get_mut(&key)
+                .and_then(|c| c.story.get_mut().save_state().ok())
         } else {
             None
         };
@@ -223,16 +219,12 @@ impl InkRuntime {
             .get_mut(&key)
             .ok_or_else(|| "no active conversation".to_string())?;
 
-        let mut story = Story::new(&conv.compiled_json).map_err(|e| format!("{e}"))?;
-        story
-            .load_state(&conv.state_json)
-            .map_err(|e| format!("{e}"))?;
-        story
+        conv.story
+            .get_mut()
             .choose_path_string(path, true, None)
             .map_err(|e| format!("{e}"))?;
 
-        let output = run_story_to_output(&mut story)?;
-        conv.state_json = story.save_state().map_err(|e| format!("{e}"))?;
+        let output = run_story_to_output(conv.story.get_mut())?;
         Ok(output)
     }
 
