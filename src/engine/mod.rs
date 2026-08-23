@@ -88,6 +88,19 @@ pub enum ApiRequest {
     /// Move an object into a new location (e.g. an NPC/item into a room) — the
     /// builder's place/relocate action. Builder-gated.
     SetLocation { ref_id: String, location: String },
+    /// Edit an existing exit in place: change its direction (`key`) and/or
+    /// retarget it. Validates the target exists and the object is an exit.
+    /// Builder-gated.
+    UpdateExit {
+        ref_id: String,
+        #[serde(default)]
+        direction: Option<String>,
+        #[serde(default)]
+        target: Option<String>,
+    },
+    /// Replace an object's aliases (name-match aliases for items/npcs, or an
+    /// exit's alt directions). Builder-gated.
+    SetAliases { ref_id: String, aliases: Vec<String> },
     AddTag { ref_id: String, tag: String },
     RemoveTag { ref_id: String, tag: String },
     DeleteObject { ref_id: String },
@@ -1081,6 +1094,35 @@ impl Engine {
                 match self.world.get_mut(&ref_id) {
                     Some(obj) => {
                         obj.location_ref = Some(location);
+                        ApiResponse::ok()
+                    }
+                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
+            ApiRequest::UpdateExit { ref_id, direction, target } => {
+                if let Some(t) = &target
+                    && self.world.get(t).is_none()
+                {
+                    return ApiResponse::error(format!("Target '{}' not found", t));
+                }
+                match self.world.get_mut(&ref_id) {
+                    Some(obj) if obj.kind == Kind::Exit => {
+                        if let Some(d) = direction {
+                            obj.key = d;
+                        }
+                        if let Some(t) = target {
+                            obj.target_ref = Some(t);
+                        }
+                        ApiResponse::ok()
+                    }
+                    Some(_) => ApiResponse::error("Object is not an exit"),
+                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
+            ApiRequest::SetAliases { ref_id, aliases } => {
+                match self.world.get_mut(&ref_id) {
+                    Some(obj) => {
+                        obj.aliases = aliases.into_iter().filter(|a| !a.trim().is_empty()).collect();
                         ApiResponse::ok()
                     }
                     None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
@@ -7351,6 +7393,60 @@ mod tests {
             Some(token),
         );
         assert!(bad.error.as_deref().unwrap().contains("not found"));
+    }
+
+    #[test]
+    fn update_exit_redirects_retargets_validates_and_set_aliases() {
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
+        let a = mk_room(&mut engine, &token, "town", "a");
+        let b = mk_room(&mut engine, &token, "town", "b");
+        let c = mk_room(&mut engine, &token, "town", "c");
+        let exit = engine
+            .handle_api_request(
+                ApiRequest::CreateExit { source: a.clone(), direction: "north".into(), target: b, aliases: None },
+                Some(token.clone()),
+            )
+            .data
+            .unwrap()["ref_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // rename direction + retarget to c
+        let up = engine.handle_api_request(
+            ApiRequest::UpdateExit { ref_id: exit.clone(), direction: Some("up".into()), target: Some(c.clone()) },
+            Some(token.clone()),
+        );
+        assert!(up.ok, "{:?}", up.error);
+        let listed = engine
+            .handle_api_request(ApiRequest::ListExits { room_ref: a.clone() }, Some(token.clone()))
+            .data
+            .unwrap();
+        let e = listed.as_array().unwrap().iter().find(|e| e["ref_id"] == exit).unwrap();
+        assert_eq!(e["direction"].as_str(), Some("up"));
+        assert_eq!(e["target_ref"].as_str(), Some(c.as_str()));
+
+        // bad target rejected; non-exit rejected
+        let bad = engine.handle_api_request(
+            ApiRequest::UpdateExit { ref_id: exit.clone(), direction: None, target: Some("#999999".into()) },
+            Some(token.clone()),
+        );
+        assert!(bad.error.as_deref().unwrap().contains("not found"));
+        let notexit = engine.handle_api_request(
+            ApiRequest::UpdateExit { ref_id: a, direction: Some("x".into()), target: None },
+            Some(token.clone()),
+        );
+        assert!(notexit.error.as_deref().unwrap().contains("not an exit"));
+
+        // aliases
+        let al = engine.handle_api_request(
+            ApiRequest::SetAliases { ref_id: exit.clone(), aliases: vec!["u".into(), "climb".into(), " ".into()] },
+            Some(token.clone()),
+        );
+        assert!(al.ok, "{:?}", al.error);
+        let ex = engine.handle_api_request(ApiRequest::Examine { ref_id: exit }, Some(token)).data.unwrap();
+        let aliases: Vec<&str> = ex["aliases"].as_array().unwrap().iter().filter_map(|a| a.as_str()).collect();
+        assert!(aliases.contains(&"u") && aliases.contains(&"climb") && aliases.len() == 2);
     }
 
     /// `Eval` over the REST API is arbitrary code with the full write API —

@@ -28,9 +28,15 @@
   let newHook = $state('');
   let newObjKind = $state('item');
   let newObjKey = $state('');
+  let aliases = $state([]);
+  let newAlias = $state('');
+  let exitDir = $state('');
+  let exitTarget = $state('');
+  let exitDirty = $state(false);
   let confirmDelete = $state(false);
 
   const isRoom = $derived(obj?.kind === 'room');
+  const isExit = $derived(obj?.kind === 'exit');
 
   const AREA_OF = (a) => {
     const fk = a?._file_key;
@@ -51,6 +57,10 @@
     attrs = Object.entries(obj.attrs || {})
       .filter(([k]) => !['_rx', '_ry'].includes(k))
       .map(([key, value]) => ({ key, value: fmt(value), dirty: false }));
+    aliases = [...(obj.aliases || [])];
+    exitDir = obj.kind === 'exit' ? obj.key || '' : '';
+    exitTarget = obj.kind === 'exit' ? obj.target_ref || '' : '';
+    exitDirty = false;
     const room = obj.kind === 'room';
     const [ex, pr, co] = await Promise.all([
       room ? api('list_exits', { room_ref: refId }).catch(() => ({ ok: false })) : Promise.resolve({ ok: false }),
@@ -150,6 +160,27 @@
     else showFlash?.({ message: r?.error || 'Move failed', tone: 'critical' });
   }
 
+  // Exit — change its direction / target in place.
+  async function saveExit() {
+    const r = await api('update_exit', { ref_id: ref, direction: exitDir.trim() || null, target: exitTarget.trim() || null });
+    if (r?.ok) { exitDirty = false; obj.key = exitDir.trim(); obj.target_ref = exitTarget.trim(); onchanged(); showFlash?.({ message: 'Exit updated', tone: 'success' }); }
+    else showFlash?.({ message: r?.error || 'Update failed', tone: 'critical' });
+  }
+
+  // Aliases — replace the whole set (works for any object).
+  async function saveAliases(next) {
+    const r = await api('set_aliases', { ref_id: ref, aliases: next });
+    if (r?.ok) { aliases = next; onchanged(); }
+    else showFlash?.({ message: r?.error || 'Failed', tone: 'critical' });
+  }
+  function addAlias() {
+    const a = newAlias.trim();
+    if (!a || aliases.includes(a)) { newAlias = ''; return; }
+    saveAliases([...aliases, a]);
+    newAlias = '';
+  }
+  const removeAlias = (a) => saveAliases(aliases.filter((x) => x !== a));
+
   async function addHook() {
     const h = newHook.trim();
     if (!h) return;
@@ -215,7 +246,7 @@
       {#each exits as e}
         <div class="rem-exit">
           <span class="rem-dir">{e.direction}</span>
-          <span class="rem-to">→ {e.target_ref}</span>
+          <button class="rem-cname" onclick={() => onedit(e.ref_id)}>→ {e.target_ref}</button>
           <button class="rem-del" aria-label="Delete exit" onclick={() => deleteExit(e)}><TrashIcon size={13} /></button>
         </div>
       {:else}
@@ -240,6 +271,17 @@
         <TextInput bind:value={newObjKey} placeholder="key" size="sm" />
         <Button size="sm" onclick={addObject}><PlusIcon size={13} /> Add</Button>
       </form>
+    {:else if isExit}
+      <div class="rem-sec">Exit</div>
+      <label class="rem-lbl" for="rem-dir">Direction</label>
+      <input id="rem-dir" class="rem-in ri-mono" bind:value={exitDir} oninput={() => (exitDirty = true)} />
+      <label class="rem-lbl" for="rem-tgt">Target room</label>
+      <input id="rem-tgt" class="rem-in ri-mono" bind:value={exitTarget} oninput={() => (exitDirty = true)} placeholder="#12" />
+      <div class="rem-add">
+        <span class="rem-dim">from {obj.location_ref || '(unplaced)'}</span>
+        <span style="flex:1"></span>
+        <Button size="sm" disabled={!exitDirty} onclick={saveExit}>Save exit</Button>
+      </div>
     {:else}
       <div class="rem-sec">Location</div>
       <div class="rem-exit"><span class="rem-to">in {obj.location_ref || '(nowhere)'}</span></div>
@@ -248,6 +290,19 @@
         <Button size="sm" onclick={moveTo}>Move</Button>
       </form>
     {/if}
+
+    <div class="rem-sec">Aliases</div>
+    <div class="rem-tags">
+      {#each aliases as a}
+        <span class="rem-tag">{a}<button aria-label="Remove alias" onclick={() => removeAlias(a)}><XIcon size={11} /></button></span>
+      {:else}
+        <span class="rem-dim">No aliases.</span>
+      {/each}
+    </div>
+    <form class="rem-add" onsubmit={(e) => { e.preventDefault(); addAlias(); }}>
+      <TextInput bind:value={newAlias} placeholder={isExit ? 'alt direction (e.g. n)' : 'name people can use'} size="sm" />
+      <Button size="sm" onclick={addAlias}><PlusIcon size={13} /> Alias</Button>
+    </form>
 
     <div class="rem-sec">Attributes</div>
     {#each attrs as a}
