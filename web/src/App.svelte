@@ -16,7 +16,8 @@
   import Admin from './components/Admin.svelte';
   import Settings from './components/Settings.svelte';
   import { setToken, getSavedToken } from './lib/api.js';
-  import { navigate, matches } from './lib/router.svelte.js';
+  import { navigate, matches, route } from './lib/router.svelte.js';
+  import TerminalIcon from '@lucide/svelte/icons/terminal';
   import WaypointsIcon from '@lucide/svelte/icons/waypoints';
   import CodeIcon from '@lucide/svelte/icons/code';
   import ShieldIcon from '@lucide/svelte/icons/shield-alert';
@@ -71,7 +72,7 @@
       try {
         const msg = JSON.parse(e.data);
         switch (msg.type) {
-          case 'text': output?.append(msg.text); break;
+          case 'text': output?.append(msg.text); feed = [...feed.slice(-300), msg.text]; break;
           case 'room': roomData = msg; break;
           case 'auth':
             setToken(msg.token);
@@ -156,6 +157,22 @@
     }
   });
   function openWorldCheck() { navigate('/builder/problems'); toolsOpen = false; }
+
+  // Playtest console — a live game terminal riding on top of the builder
+  // routes, wired to the real command loop (handleCommand). `feed` mirrors the
+  // game output. `jumpRef` teleports the test character to the room in focus.
+  let feed = $state([]);
+  let consoleOpen = $state(false);
+  let PlaytestConsole = $state(null);
+  let onAnyBuilder = $derived(onBuilderRoute || onCodeRoute || onProblemsRoute);
+  let jumpRef = $derived(route.query.focus || route.query.ref || '');
+  $effect(() => {
+    if (consoleOpen && !PlaytestConsole) {
+      import('./components/PlaytestConsole.svelte').then((m) => { PlaytestConsole = m.default; });
+    }
+    if (!onAnyBuilder) consoleOpen = false; // leaving the builder closes it
+  });
+
   let inputBar;
 
   function handleKeydown(e) {
@@ -297,7 +314,25 @@
   <WorldCheck onexit={() => navigate('/')} />
 {/if}
 
+{#if onAnyBuilder && !consoleOpen}
+  <button class="pt-toggle" onclick={() => (consoleOpen = true)} title="Open playtest console">
+    <TerminalIcon size={15} /> Playtest
+  </button>
+{/if}
+{#if consoleOpen && PlaytestConsole}
+  <PlaytestConsole {feed} roomData={roomData} {jumpRef} oncommand={handleCommand} onclose={() => (consoleOpen = false)} />
+{/if}
+
 <style>
+  .pt-toggle {
+    position: fixed; right: 16px; bottom: 16px; z-index: 310;
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12.5px; font-weight: 500;
+    color: var(--bg-primary, #12100c); background: var(--accent-amber, #c9956b);
+    border: none; border-radius: 999px; padding: 8px 15px; cursor: pointer;
+    box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.5);
+  }
+  .pt-toggle:hover { filter: brightness(1.08); }
   .app {
     height: 100%;
     display: flex;
