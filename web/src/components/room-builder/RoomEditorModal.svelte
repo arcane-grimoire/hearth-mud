@@ -1,11 +1,12 @@
 <script>
-  import { Button, TextInput, Chip, showFlash } from '@kenn-io/kit-ui';
+  import { Button, TextInput, Chip, showFlash, Typeahead } from '@kenn-io/kit-ui';
   import PlusIcon from '@lucide/svelte/icons/plus';
   import TrashIcon from '@lucide/svelte/icons/trash-2';
   import XIcon from '@lucide/svelte/icons/x';
   import CodeIcon from '@lucide/svelte/icons/code';
   import { api } from '../../lib/api.js';
   import { navigate } from '../../lib/router.svelte.js';
+  import { loadHooks, hookOptions, isValidHookName } from '../../lib/hooks.js';
 
   // Jump to the full code editor for a hook (leaving /builder/rooms unmounts
   // the modal). The code editor loads it via ?ref=&hook=.
@@ -33,6 +34,10 @@
   let newTag = $state('');
   let newAttrKey = $state('');
   let newHook = $state('');
+  let hooksData = $state(null);
+  let hookErr = $state('');
+  const hookOpts = $derived(hookOptions(hooksData));
+  loadHooks().then((d) => (hooksData = d));
   let newObjKind = $state('item');
   let newObjKey = $state('');
   let aliases = $state([]);
@@ -188,9 +193,21 @@
   }
   const removeAlias = (a) => saveAliases(aliases.filter((x) => x !== a));
 
+  // Validate a picked/typed hook against the engine's vocabulary; returning
+  // false keeps the Typeahead open with the error row so a typo is caught
+  // before the set_program round-trip.
+  function pickHook(v) {
+    if (!isValidHookName(v, hooksData)) {
+      hookErr = `“${v}” isn't a valid hook — use a known hook or an on_/cmd_/lib_ name`;
+      return false;
+    }
+    hookErr = '';
+    newHook = v;
+  }
   async function addHook() {
     const h = newHook.trim();
     if (!h) return;
+    if (!isValidHookName(h, hooksData)) { hookErr = `“${h}” isn't a valid hook name`; return; }
     const src = `-- ${h} hook\n`;
     const r = await api('set_program', { ref_id: ref, hook: h, source: src });
     if (r?.ok) { programs = [...programs, { hook: h, source: src, dirty: false, saving: false }]; newHook = ''; onchanged(); }
@@ -343,9 +360,21 @@
       <div class="rem-dim">No programs.</div>
     {/each}
     <form class="rem-add" onsubmit={(e) => { e.preventDefault(); addHook(); }}>
-      <TextInput bind:value={newHook} placeholder="hook name (e.g. on_enter)" size="sm" />
+      <div class="rem-add-hook">
+        <Typeahead
+          options={hookOpts}
+          value={newHook}
+          fallbackLabel="hook name"
+          placeholder="on_enter, cmd_talk…"
+          emptyLabel="No matching hook"
+          allowCustom
+          customLabel={'Use "{query}"'}
+          onselect={pickHook}
+        />
+      </div>
       <Button size="sm" onclick={addHook}><PlusIcon size={13} /> Hook</Button>
     </form>
+    {#if hookErr}<div class="rem-hook-err">{hookErr}</div>{/if}
 
     <div class="rem-danger">
       {#if confirmDelete}
@@ -385,7 +414,8 @@
   .rem-tag button:hover { color: var(--accent-red, #d07a5a); }
 
   .rem-add { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
-  .rem-add :global(.kit-text-input), .rem-add :global(input) { flex: 1; }
+  .rem-add-hook { flex: 1; min-width: 0; }
+  .rem-hook-err { color: var(--accent-red, #d07a5a); font-size: 11px; margin: 2px 0 4px; }
 
   .rem-exit { display: flex; align-items: center; gap: 9px; padding: 6px 8px; background: var(--bg-primary, #12100c); border: 1px solid var(--border-muted, #2a2419); border-radius: 7px; margin-bottom: 5px; }
   .rem-dir { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; text-transform: uppercase; color: var(--bg-primary, #12100c); background: var(--edge, #9c8863); border-radius: 4px; padding: 1px 6px; }

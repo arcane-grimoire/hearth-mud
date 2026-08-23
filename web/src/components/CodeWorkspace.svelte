@@ -1,5 +1,5 @@
 <script>
-  import { Button, showFlash } from '@kenn-io/kit-ui';
+  import { Button, showFlash, Typeahead } from '@kenn-io/kit-ui';
   import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
   import PlayIcon from '@lucide/svelte/icons/play';
   import SaveIcon from '@lucide/svelte/icons/save';
@@ -9,6 +9,7 @@
   import CodeEditor from './code/CodeEditor.svelte';
   import { api } from '../lib/api.js';
   import { route } from '../lib/router.svelte.js';
+  import { loadHooks, hookOptions, isValidHookName } from '../lib/hooks.js';
 
   // Full-page Luau workspace at /builder/code: explorer (objects → hooks) |
   // editor | output panel. Deep-linkable via ?ref=#9&hook=on_enter.
@@ -27,6 +28,9 @@
   let showHist = $state(false);
   let newRef = $state('');
   let newHook = $state('');
+  let hooksData = $state(null);
+  let hookErr = $state('');
+  const hookOpts = $derived(hookOptions(hooksData));
 
   const wantRef = $derived(route.query.ref || '');
   const wantHook = $derived(route.query.hook || '');
@@ -56,7 +60,19 @@
   }
 
   onMountLike();
-  function onMountLike() { loadExplorer(); }
+  function onMountLike() { loadExplorer(); loadHooks().then((d) => (hooksData = d)); }
+
+  // Validate a picked/typed hook name against the engine's vocabulary before
+  // it reaches set_program. Returning false keeps the Typeahead open with the
+  // error row so the user can correct a typo without a round-trip.
+  function pickHook(v) {
+    if (!isValidHookName(v, hooksData)) {
+      hookErr = `“${v}” isn't a valid hook — use a known hook or an on_/cmd_/lib_ name`;
+      return false;
+    }
+    hookErr = '';
+    newHook = v;
+  }
 
   // Open the hook named in the URL once the explorer is loaded.
   let opened = null;
@@ -159,9 +175,21 @@
       </div>
       <form class="cw-newhook" onsubmit={(e) => { e.preventDefault(); addHookToRef(); }}>
         <input class="cw-nh-ref" bind:value={newRef} placeholder="#ref" spellcheck="false" />
-        <input class="cw-nh-hook" bind:value={newHook} placeholder="new hook (on_open…)" spellcheck="false" />
+        <div class="cw-nh-hook">
+          <Typeahead
+            options={hookOpts}
+            value={newHook}
+            fallbackLabel="new hook"
+            placeholder="on_enter, cmd_talk…"
+            emptyLabel="No matching hook"
+            allowCustom
+            customLabel={'Use "{query}"'}
+            onselect={pickHook}
+          />
+        </div>
         <button type="submit" title="Create hook and open it"><PlusIcon size={13} /></button>
       </form>
+      {#if hookErr}<div class="cw-nh-err">{hookErr}</div>{/if}
       <div class="cw-tree">
         {#if loading}
           <div class="cw-dim">Loading…</div>
@@ -238,12 +266,15 @@
   .cw-search { display: flex; align-items: center; gap: 7px; padding: 9px 11px; border-bottom: 1px solid var(--border-muted, #2a2419); color: var(--text-muted, #9a9186); }
   .cw-search input { flex: 1; background: none; border: none; color: var(--text-primary, #ece0c8); font: inherit; font-size: 12.5px; outline: none; }
   .cw-newhook { display: flex; align-items: center; gap: 5px; padding: 7px 9px; border-bottom: 1px solid var(--border-muted, #2a2419); }
-  .cw-newhook input { background: var(--bg-primary, #12100c); border: 1px solid var(--border-default, #332c22); border-radius: 6px; color: var(--text-primary, #ece0c8); font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; padding: 4px 6px; outline: none; min-width: 0; }
-  .cw-newhook input:focus { border-color: var(--accent-amber, #c9956b); }
-  .cw-nh-ref { width: 48px; flex: none; }
-  .cw-nh-hook { flex: 1; }
-  .cw-newhook button { background: var(--bg-primary, #12100c); border: 1px solid var(--border-default, #332c22); border-radius: 6px; color: var(--text-muted, #9a9186); cursor: pointer; padding: 4px; line-height: 0; }
-  .cw-newhook button:hover { border-color: var(--accent-amber, #c9956b); color: var(--accent-amber, #c9956b); }
+  .cw-nh-ref { background: var(--bg-primary, #12100c); border: 1px solid var(--border-default, #332c22); border-radius: 6px; color: var(--text-primary, #ece0c8); font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; padding: 4px 6px; outline: none; width: 48px; flex: none; }
+  .cw-nh-ref:focus { border-color: var(--accent-amber, #c9956b); }
+  .cw-nh-hook { flex: 1; min-width: 0; }
+  /* The explorer is narrow; let the hook picker's popover spill wider so the
+     descriptions stay readable (it floats over the editor pane, which is fine). */
+  .cw-nh-hook :global(.kit-typeahead__panel) { min-width: 300px; }
+  .cw-nh-err { color: var(--accent-red, #d07a5a); font-size: 10.5px; padding: 4px 9px 0; }
+  .cw-newhook > button { background: var(--bg-primary, #12100c); border: 1px solid var(--border-default, #332c22); border-radius: 6px; color: var(--text-muted, #9a9186); cursor: pointer; padding: 4px; line-height: 0; }
+  .cw-newhook > button:hover { border-color: var(--accent-amber, #c9956b); color: var(--accent-amber, #c9956b); }
   .cw-tree { flex: 1; overflow-y: auto; padding: 6px 0 20px; }
   .cw-area { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent-amber, #c9956b); padding: 10px 12px 3px; }
   .cw-obj { font-size: 12px; color: var(--text-secondary, #b6a888); padding: 3px 12px 1px; font-weight: 600; }
