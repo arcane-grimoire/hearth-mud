@@ -1,10 +1,12 @@
 <script>
   import { SegmentedControl, Modal } from '@kenn-io/kit-ui';
   import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
+  import SearchIcon from '@lucide/svelte/icons/search';
   import { route, setQuery } from '../lib/router.svelte.js';
   import RoomGraph from './room-builder/RoomGraph.svelte';
   import RoomTable from './room-builder/RoomTable.svelte';
   import RoomEditorModal from './room-builder/RoomEditorModal.svelte';
+  import ObjectFinder from './room-builder/ObjectFinder.svelte';
 
   // Full-page builder surface. Reached at /builder/rooms via the client
   // router, lazy-loaded so the play client never pulls this or the Svelte
@@ -30,6 +32,13 @@
   function openEditor(ref) { editingRef = ref; }
   function closeEditor() { editingRef = null; }
 
+  // Find any object by name/ref (⌘K / the Find button) — items and NPCs aren't
+  // in the room graph/table, so this reaches them directly.
+  let finderOpen = $state(false);
+  function onGlobalKey(e) {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); finderOpen = true; }
+  }
+
   // Bumped when the modal makes a structural change (tag/exit/delete) so the
   // active graph/table view reloads its slice.
   let dataVersion = $state(0);
@@ -52,6 +61,9 @@
       </span>
     </div>
     <div class="rb-spacer"></div>
+    <button class="rb-find" onclick={() => (finderOpen = true)} title="Find any object (⌘K)">
+      <SearchIcon size={14} /> <span>Find</span> <kbd>⌘K</kbd>
+    </button>
     <SegmentedControl
       options={viewOptions}
       value={view}
@@ -75,7 +87,21 @@
   </Modal>
 {/if}
 
+{#if finderOpen}
+  <ObjectFinder onpick={(ref) => { finderOpen = false; openEditor(ref); }} onclose={() => (finderOpen = false)} />
+{/if}
+
+<svelte:window onkeydown={onGlobalKey} />
+
 <style>
+  .rb-find {
+    display: inline-flex; align-items: center; gap: 6px;
+    font: inherit; font-size: 12.5px; color: var(--text-secondary, #b6a888);
+    background: var(--bg-primary, #12100c); border: 1px solid var(--border-default, #332c22);
+    border-radius: 8px; padding: 5px 10px; cursor: pointer;
+  }
+  .rb-find:hover { border-color: var(--accent-amber, #c9956b); color: var(--text-primary, #ece0c8); }
+  .rb-find kbd { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; color: var(--text-muted, #8c8378); border: 1px solid var(--border-muted, #2a2419); border-radius: 4px; padding: 0 4px; }
   .room-builder {
     position: fixed; inset: 0; z-index: 200;
     display: flex; flex-direction: column;
