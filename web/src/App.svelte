@@ -19,6 +19,7 @@
   import { navigate, matches } from './lib/router.svelte.js';
   import WaypointsIcon from '@lucide/svelte/icons/waypoints';
   import CodeIcon from '@lucide/svelte/icons/code';
+  import ShieldIcon from '@lucide/svelte/icons/shield-alert';
 
   let output;
   let status = $state('connecting');
@@ -145,6 +146,16 @@
     }
   });
   function openCodeEditor() { navigate('/builder/code'); toolsOpen = false; }
+
+  // World check — the problems panel (/builder/problems).
+  let onProblemsRoute = $derived(matches('/builder/problems'));
+  let WorldCheck = $state(null);
+  $effect(() => {
+    if (onProblemsRoute && !WorldCheck) {
+      import('./components/WorldCheck.svelte').then((m) => { WorldCheck = m.default; });
+    }
+  });
+  function openWorldCheck() { navigate('/builder/problems'); toolsOpen = false; }
   let inputBar;
 
   function handleKeydown(e) {
@@ -213,6 +224,9 @@
                 <button class="tools-item" role="menuitem" onclick={openCodeEditor}>
                   <CodeIcon size={14} /> Code editor
                 </button>
+                <button class="tools-item" role="menuitem" onclick={openWorldCheck}>
+                  <ShieldIcon size={14} /> World check
+                </button>
               {/if}
             </div>
           {/if}
@@ -277,6 +291,10 @@
 
 {#if onCodeRoute && CodeWorkspace}
   <CodeWorkspace onexit={() => navigate('/')} />
+{/if}
+
+{#if onProblemsRoute && WorldCheck}
+  <WorldCheck onexit={() => navigate('/')} />
 {/if}
 
 <style>

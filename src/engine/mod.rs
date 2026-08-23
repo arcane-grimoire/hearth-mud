@@ -99,6 +99,11 @@ pub enum ApiRequest {
     /// Every object that carries programs, with its hook names — the code
     /// editor's explorer feed, in one call instead of per-object. Builder-gated.
     ListProgramsAll,
+    /// A whole-world health check for the builder's Problems panel: dangling
+    /// exits, unreachable / exitless / description-less rooms, and every hook
+    /// program that fails to compile. One server-side pass (the engine holds
+    /// the whole world) instead of many client round-trips. Builder-gated.
+    WorldCheck,
     /// Version history for one `(ref_id, hook)` — the REST counterpart of
     /// `@program/history`. Requires auth like any other write-tier action
     /// (see `is_read` below): it serves full historical Program source,
@@ -1414,6 +1419,84 @@ impl Engine {
                     .collect();
                 out.sort_by(|a, b| a["ref_id"].as_str().cmp(&b["ref_id"].as_str()));
                 ApiResponse::success(serde_json::json!(out))
+            }
+            ApiRequest::WorldCheck => {
+                use std::collections::{HashMap, HashSet};
+                let mut problems: Vec<serde_json::Value> = Vec::new();
+
+                let exists: HashSet<&str> = self.world.objects.keys().map(|s| s.as_str()).collect();
+                let is_room: HashSet<&str> = self
+                    .world
+                    .objects
+                    .values()
+                    .filter(|o| o.kind == Kind::Room)
+                    .map(|o| o.ref_id.as_str())
+                    .collect();
+
+                // Walk exits once: flag dangling targets, tally in/out degree.
+                let mut incoming: HashMap<&str, u32> = HashMap::new();
+                let mut outgoing: HashMap<&str, u32> = HashMap::new();
+                for e in self.world.objects.values().filter(|o| o.kind == Kind::Exit) {
+                    if let Some(f) = e.location_ref.as_deref() {
+                        *outgoing.entry(f).or_insert(0) += 1;
+                    }
+                    match e.target_ref.as_deref() {
+                        Some(t) if exists.contains(t) => {
+                            if is_room.contains(t) {
+                                *incoming.entry(t).or_insert(0) += 1;
+                            }
+                        }
+                        target => problems.push(serde_json::json!({
+                            "kind": "broken_exit", "severity": "high",
+                            "ref": e.ref_id, "from": e.location_ref, "dir": e.key, "target": target,
+                            "message": format!("exit '{}' points at a target that no longer exists", e.key),
+                        })),
+                    }
+                }
+
+                // Per-room structural checks.
+                for o in self.world.objects.values().filter(|o| o.kind == Kind::Room) {
+                    let r = o.ref_id.as_str();
+                    if o.description.trim().is_empty() {
+                        problems.push(serde_json::json!({
+                            "kind": "no_description", "severity": "low",
+                            "ref": o.ref_id, "key": o.key, "message": "room has no description",
+                        }));
+                    }
+                    if outgoing.get(r).copied().unwrap_or(0) == 0 {
+                        problems.push(serde_json::json!({
+                            "kind": "no_exits", "severity": "low",
+                            "ref": o.ref_id, "key": o.key, "message": "room has no exits out (dead end)",
+                        }));
+                    }
+                    if incoming.get(r).copied().unwrap_or(0) == 0 {
+                        problems.push(serde_json::json!({
+                            "kind": "unreachable", "severity": "medium",
+                            "ref": o.ref_id, "key": o.key,
+                            "message": "no exits lead into this room (unreachable unless it's an entry point)",
+                        }));
+                    }
+                }
+
+                // Compile every hook program; report the ones that don't parse.
+                for o in self.world.objects.values().filter(|o| !o.programs.is_empty()) {
+                    for p in hooks::list_programs(o) {
+                        if let Err(err) = self.softcode.check_syntax(&p.source) {
+                            problems.push(serde_json::json!({
+                                "kind": "syntax_error", "severity": "high",
+                                "ref": o.ref_id, "key": o.key, "hook": p.hook, "message": err,
+                            }));
+                        }
+                    }
+                }
+
+                let rank = |s: &str| match s { "high" => 0, "medium" => 1, _ => 2 };
+                problems.sort_by(|a, b| {
+                    rank(a["severity"].as_str().unwrap_or("low"))
+                        .cmp(&rank(b["severity"].as_str().unwrap_or("low")))
+                        .then_with(|| a["ref"].as_str().cmp(&b["ref"].as_str()))
+                });
+                ApiResponse::success(serde_json::json!({ "problems": problems, "count": problems.len() }))
             }
             ApiRequest::SaveWorld => {
                 self.do_save();
@@ -7180,6 +7263,38 @@ mod tests {
         let entry = data.as_array().unwrap().iter().find(|e| e["ref_id"] == r).unwrap();
         assert_eq!(entry["hooks"].as_array().unwrap()[0].as_str(), Some("on_enter"));
         assert_eq!(entry["area"].as_str(), Some("town"));
+    }
+
+    #[test]
+    fn world_check_flags_broken_exits_unreachable_and_syntax_errors() {
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
+        let a = mk_room(&mut engine, &token, "town", "a");
+        let b = mk_room(&mut engine, &token, "town", "b");
+        mk_exit(&mut engine, &token, &a, &b); // a -> b
+        // Delete b so the a->b exit dangles.
+        engine.handle_api_request(ApiRequest::DeleteObject { ref_id: b.clone() }, Some(token.clone()));
+        // Inject a program that doesn't compile (bypassing SetProgram's own check).
+        if let Some(obj) = engine.world.get_mut(&a) {
+            let _ = hooks::set_program(obj, "on_enter", "local x = (".to_string());
+        }
+
+        let data = engine
+            .handle_api_request(ApiRequest::WorldCheck, Some(token))
+            .data
+            .unwrap();
+        let kinds: Vec<&str> = data["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["kind"].as_str())
+            .collect();
+        assert!(kinds.contains(&"broken_exit"), "dangling exit: {:?}", kinds);
+        assert!(kinds.contains(&"syntax_error"), "bad program: {:?}", kinds);
+        assert!(kinds.contains(&"unreachable"), "'a' has no incoming exits: {:?}", kinds);
+
+        // Requires Builder (not public).
+        let resp = engine.handle_api_request(ApiRequest::WorldCheck, None);
+        assert_eq!(resp.error.as_deref(), Some("Authentication required"));
     }
 
     /// `Eval` over the REST API is arbitrary code with the full write API —
