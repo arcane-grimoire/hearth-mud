@@ -12,10 +12,11 @@
   // `list_hooks`) and API (static function reference from hearth-api.js).
   // Rows expand inline for the signature + doc. Pure read-only data — nothing
   // here writes to the world.
-  let { sel = null, onclose = () => {} } = $props();
+  let { sel = null, open = true, onclose = () => {} } = $props();
 
   let q = $state('');
-  let expanded = $state(null); // expanded row id ("api:emit", "hook:on_enter"…)
+  let expanded = $state(null); // expanded row id ("fns:emit", "members:attrs"…)
+  let searchInput = $state(null);
 
   // Context: the hook currently open in the editor gets a pinned card (doc +
   // signature + copy-template) at the top of the panel, and its row in the
@@ -41,6 +42,13 @@
     requestAnimationFrame(() => {
       document.getElementById(`hp-hook-${h}`)?.scrollIntoView({ block: 'nearest' });
     });
+  });
+  // Focus the search box when the panel is explicitly opened — not on mount,
+  // so restoring a persisted-open panel never steals focus from the editor.
+  let wasOpen = false;
+  $effect(() => {
+    if (open && !wasOpen) requestAnimationFrame(() => searchInput?.focus());
+    wasOpen = open;
   });
 
   // Engine-backed hook vocabulary (cached module-wide in lib/hooks.js).
@@ -70,17 +78,20 @@
     return [
       { label: 'Functions', id: 'fns', items: API_FUNCTIONS.filter(match), triple: true },
       { label: 'Hook arguments', id: 'globals', items: API_GLOBALS.filter(match), triple: true },
-      { label: 'Object members', id: 'members', items: OBJECT_MEMBERS.filter(([m]) => !needle || m.includes(needle)), pair: true },
+      { label: 'Object members', id: 'members', items: OBJECT_MEMBERS.filter(([m]) => !needle || m.toLowerCase().includes(needle)), pair: true },
     ].filter((g) => g.items.length);
   });
 </script>
+
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape') onclose(); }} />
 
 <aside class="hp" aria-label="Scripting reference">
   <header class="hp-top">
     <div class="hp-search">
       <SearchIcon size={13} />
-      <!-- svelte-ignore a11y_autofocus -->
-      <input placeholder="Search the reference…" bind:value={q} autofocus />
+      <!-- Focus follows explicit opens only (see effect below) — never mount,
+           so a persisted-open panel doesn't yank focus from the editor. -->
+      <input placeholder="Search the reference…" bind:value={q} bind:this={searchInput} />
     </div>
     <button class="hp-x" onclick={onclose} aria-label="Close reference panel" title="Close">
       <XIcon size={14} />
@@ -93,7 +104,10 @@
         <div class="hp-h">Current · {sel.key || sel.ref}</div>
         <span class="hp-name hp-cur-name">{sel.hook}</span>
         {#if currentDoc}<p class="hp-cur-doc">{currentDoc}</p>{/if}
-        <code class="hp-sig">function {sel.hook}(this, actor, room, args)</code>
+        <!-- No rendered signature: hook arg-lists differ per hook
+             (on_tick(this), can_get(this, actor, item), …) and the engine
+             doesn't expose them yet. A made-up uniform signature would read
+             as authoritative and be wrong for most hooks. -->
         <button class="hp-copy" onclick={copyTemplate} title="Copy the starter example for this hook">
           {#if copied}<CheckIcon size={12} /> Copied{:else}<CopyIcon size={12} /> Copy starter{/if}
         </button>
@@ -104,18 +118,10 @@
       {#each hookGroups as g}
         <div class="hp-h">{g.label}</div>
         {#each g.items as h (h.name)}
-          {@const id = `hook:${h.name}`}
-          <button id={`hp-hook-${h.name}`} class="hp-row" class:cur={sel && sel.hook === h.name}
-            class:open={expanded === id} aria-expanded={expanded === id}
-            onclick={() => toggle(id)}>
+          <div id={`hp-hook-${h.name}`} class="hp-row" class:cur={sel && sel.hook === h.name}>
             <span class="hp-name">{h.name}</span>
             <span class="hp-doc">{h.describes}</span>
-          </button>
-          {#if expanded === id}
-            <div class="hp-detail">
-              <code>function {h.name}(this, actor, room, args)</code>
-            </div>
-          {/if}
+          </div>
         {/each}
       {/each}
     {:else if !hooksData}
@@ -180,6 +186,10 @@
   .hp-sig { display: block; font-family: var(--font-mono, ui-monospace, monospace); font-size: 10.5px; color: var(--accent-green, #8fb877); white-space: pre-wrap; word-break: break-word; margin-bottom: 7px; }
   .hp-copy { display: inline-flex; align-items: center; gap: 5px; font: inherit; font-size: 11px; color: var(--accent-amber, #c9956b); background: none; border: 1px solid color-mix(in srgb, var(--accent-amber, #c9956b) 40%, transparent); border-radius: 6px; padding: 3px 9px; cursor: pointer; }
   .hp-copy:hover { background: color-mix(in srgb, var(--accent-amber, #c9956b) 12%, transparent); }
+
+  /* Hook rows are informational (doc-only — the engine doesn't expose
+     per-hook arg lists), so they're divs, not clickable buttons. */
+  .hp-row:not(button):hover { background: color-mix(in srgb, var(--accent-amber, #c9956b) 6%, transparent); }
 
   /* The row matching the hook open in the editor */
   .hp-row.cur { box-shadow: inset 3px 0 0 var(--accent-amber, #c9956b); background: color-mix(in srgb, var(--accent-amber, #c9956b) 8%, transparent); }

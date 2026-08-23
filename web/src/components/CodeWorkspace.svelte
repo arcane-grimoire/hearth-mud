@@ -204,7 +204,7 @@
     </div>
     <div class="cw-spacer"></div>
     <button class="cw-help" class:on={helpOpen} aria-expanded={helpOpen}
-      aria-controls="cw-help-panel" onclick={() => (helpOpen = !helpOpen)}
+      aria-controls={helpOpen ? 'cw-help-panel' : undefined} onclick={() => (helpOpen = !helpOpen)}
       title="Scripting reference">
       <BookOpenIcon size={14} /> <span>Reference</span>
     </button>
@@ -288,11 +288,11 @@
     </section>
 
     {#if helpOpen}
-      <div id="cw-help-panel" class="cw-help-col"><HelpPanel {sel} onclose={() => (helpOpen = false)} /></div>
+      <div id="cw-help-panel" class="cw-help-col"><HelpPanel {sel} open={helpOpen} onclose={() => (helpOpen = false)} /></div>
     {:else}
       <!-- Slim rail so the panel stays discoverable when closed -->
       <button id="cw-help-rail" class="cw-rail" aria-expanded="false"
-        aria-controls="cw-help-panel" onclick={() => (helpOpen = true)}
+        onclick={() => (helpOpen = true)}
         title="Scripting reference"><BookOpenIcon size={15} /></button>
     {/if}
   </div>

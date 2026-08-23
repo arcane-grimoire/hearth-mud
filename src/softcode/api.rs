@@ -1610,7 +1610,8 @@ fn ink_output_to_table(lua: &Lua, output: &ink::InkOutput) -> mlua::Result<Value
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // (No `use super::*` — this test only needs include_str! + std, and an
+    // unused glob dirties the build.)
 
     /// The web editor's Help panel renders `hearth-api.js` as the scripting
     /// reference. This test keeps that static list honest against what
@@ -1618,6 +1619,11 @@ mod tests {
     /// in both directions — additions, removals, and renames all fail here
     /// (a count alone would let a swap through silently). Signature/doc text
     /// is out of scope; that needs the future introspection endpoint.
+    ///
+    /// Known fragility: this is a textual scan for literal
+    /// `env.set("name",` calls. If a function is ever registered via a
+    /// helper, a namespace table, or a non-literal name, the scan will miss
+    /// it silently — revisit if `install()` grows indirection.
     #[test]
     fn help_panel_api_reference_matches_installed_functions() {
         let api_rs = include_str!("api.rs");
