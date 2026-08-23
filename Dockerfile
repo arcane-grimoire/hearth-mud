@@ -9,6 +9,9 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 COPY lib/ lib/
+# benches/ must exist for cargo to parse the manifest (the [[bench]] target
+# references it), even though `cargo build` itself doesn't compile it.
+COPY benches/ benches/
 COPY --from=web /build/web/dist/ web/dist/
 RUN cargo build --release --features bundle-web
 
