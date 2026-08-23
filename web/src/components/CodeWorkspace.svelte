@@ -6,7 +6,9 @@
   import HistoryIcon from '@lucide/svelte/icons/history';
   import SearchIcon from '@lucide/svelte/icons/search';
   import PlusIcon from '@lucide/svelte/icons/plus';
+  import BookOpenIcon from '@lucide/svelte/icons/book-open';
   import CodeEditor from './code/CodeEditor.svelte';
+  import HelpPanel from './code/HelpPanel.svelte';
   import { api } from '../lib/api.js';
   import { route } from '../lib/router.svelte.js';
   import { loadHooks, hookOptions, isValidHookName } from '../lib/hooks.js';
@@ -32,6 +34,12 @@
   let hooksData = $state(null);
   let hookErr = $state('');
   const hookOpts = $derived(hookOptions(hooksData));
+
+  // Scripting reference panel (right side). Local state — one boolean, nothing
+  // else needs it. Default closed; remembered across visits. The slim rail
+  // keeps it discoverable when closed.
+  let helpOpen = $state((typeof localStorage !== 'undefined' && localStorage.getItem('cw-help')) === '1');
+  $effect(() => { try { localStorage.setItem('cw-help', helpOpen ? '1' : '0'); } catch {} });
 
   const wantRef = $derived(route.query.ref || '');
   const wantHook = $derived(route.query.hook || '');
@@ -195,6 +203,11 @@
       {#if sel}<span class="cw-cur">{sel.key} · <b>{sel.hook}</b>{#if dirty} <span class="cw-dot">●</span>{/if}</span>{/if}
     </div>
     <div class="cw-spacer"></div>
+    <button class="cw-help" class:on={helpOpen} aria-expanded={helpOpen}
+      aria-controls="cw-help-panel" onclick={() => (helpOpen = !helpOpen)}
+      title="Scripting reference">
+      <BookOpenIcon size={14} /> <span>Reference</span>
+    </button>
     {#if sel}
       <Button size="sm" onclick={toggleHistory}><HistoryIcon size={14} /> History</Button>
       <Button size="sm" onclick={run} disabled={running}><PlayIcon size={14} /> Run</Button>
@@ -202,7 +215,7 @@
     {/if}
   </header>
 
-  <div class="cw-main">
+  <div class="cw-main" class:help-open={helpOpen}>
     <aside class="cw-explorer">
       <div class="cw-search">
         <SearchIcon size={13} />
@@ -273,6 +286,15 @@
         </div>
       {/if}
     </section>
+
+    {#if helpOpen}
+      <div id="cw-help-panel" class="cw-help-col"><HelpPanel onclose={() => (helpOpen = false)} /></div>
+    {:else}
+      <!-- Slim rail so the panel stays discoverable when closed -->
+      <button id="cw-help-rail" class="cw-rail" aria-expanded="false"
+        aria-controls="cw-help-panel" onclick={() => (helpOpen = true)}
+        title="Scripting reference"><BookOpenIcon size={15} /></button>
+    {/if}
   </div>
 
   {#if output}
@@ -296,7 +318,14 @@
   .cw-dot { color: var(--accent-amber, #c9956b); }
   .cw-spacer { flex: 1; }
 
-  .cw-main { display: grid; grid-template-columns: 244px 1fr; min-height: 0; }
+  .cw-main { display: grid; grid-template-columns: 244px 1fr; min-height: 0; position: relative; }
+  .cw-main.help-open { grid-template-columns: 244px 1fr 320px; }
+  .cw-help { display: inline-flex; align-items: center; gap: 6px; font: inherit; font-size: 12px; color: var(--text-muted, #9a9186); background: none; border: 1px solid var(--border-default, #332c22); border-radius: var(--radius-md, 8px); padding: 4px 10px; cursor: pointer; }
+  .cw-help:hover, .cw-help.on { border-color: color-mix(in srgb, var(--accent-amber, #c9956b) 45%, transparent); color: var(--accent-amber, #c9956b); }
+  .cw-help-col { min-height: 0; min-width: 0; }
+  .cw-rail { position: absolute; right: 0; top: 50%; transform: translateY(-50%); z-index: 210; display: flex; flex-direction: column; align-items: center; justify-content: center; width: 26px; height: 56px; background: var(--bg-surface, #17140f); border: 1px solid var(--border-default, #2a2419); border-right: none; border-radius: 8px 0 0 8px; color: var(--text-muted, #9a9186); cursor: pointer; box-shadow: -6px 0 18px -12px rgba(0,0,0,.6); }
+  .cw-rail:hover { color: var(--accent-amber, #c9956b); width: 30px; }
+
   .cw-explorer { border-right: 1px solid var(--border-default, #2a2419); background: var(--bg-surface, #17140f); display: flex; flex-direction: column; min-height: 0; }
   .cw-search { display: flex; align-items: center; gap: 7px; padding: 9px 11px; border-bottom: 1px solid var(--border-muted, #2a2419); color: var(--text-muted, #9a9186); }
   .cw-search input { flex: 1; background: none; border: none; color: var(--text-primary, #ece0c8); font: inherit; font-size: 12.5px; outline: none; }
