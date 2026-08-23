@@ -5,10 +5,11 @@
   import XIcon from '@lucide/svelte/icons/x';
   import { api } from '../../lib/api.js';
 
-  // The room editor body (RoomBuilder wraps this in a kit-ui Modal). Edits the
-  // live world directly. `onchanged` tells the parent to reload the graph/table
-  // after a structural change (tag, exit, delete); `onclose` dismisses.
-  let { ref, onclose = () => {}, onchanged = () => {} } = $props();
+  // The object editor body (RoomBuilder wraps this in a kit-ui Modal). Works on
+  // any object — rooms get Exits + Contents, other kinds (npc/item) get a
+  // Location. Edits the live world directly. `onchanged` tells the parent to
+  // reload after a structural change; `onedit` opens another object in place.
+  let { ref, onclose = () => {}, onchanged = () => {}, onedit = () => {} } = $props();
 
   let loading = $state(true);
   let error = $state(null);
@@ -20,11 +21,16 @@
   let tags = $state([]);
   let attrs = $state([]); // [{key, value, dirty}]
   let exits = $state([]); // {ref_id, direction, target_ref}
+  let contents = $state([]); // objects located in this room (rooms only)
   let programs = $state([]); // {hook, source, dirty, saving}
   let newTag = $state('');
   let newAttrKey = $state('');
   let newHook = $state('');
+  let newObjKind = $state('item');
+  let newObjKey = $state('');
   let confirmDelete = $state(false);
+
+  const isRoom = $derived(obj?.kind === 'room');
 
   const AREA_OF = (a) => {
     const fk = a?._file_key;
@@ -45,12 +51,15 @@
     attrs = Object.entries(obj.attrs || {})
       .filter(([k]) => !['_rx', '_ry'].includes(k))
       .map(([key, value]) => ({ key, value: fmt(value), dirty: false }));
-    const [ex, pr] = await Promise.all([
-      api('list_exits', { room_ref: refId }).catch(() => ({ ok: false })),
+    const room = obj.kind === 'room';
+    const [ex, pr, co] = await Promise.all([
+      room ? api('list_exits', { room_ref: refId }).catch(() => ({ ok: false })) : Promise.resolve({ ok: false }),
       api('list_programs', { ref_id: refId }).catch(() => ({ ok: false })),
+      room ? api('list_objects', { location: refId }).catch(() => ({ ok: false })) : Promise.resolve({ ok: false }),
     ]);
     exits = ex?.ok ? ex.data : [];
     programs = pr?.ok ? pr.data.map((p) => ({ hook: p.hook, source: p.source || '', dirty: false, saving: false })) : [];
+    contents = co?.ok ? co.data : [];
     loading = false;
   }
 
@@ -105,6 +114,40 @@
     const r = await api('delete_object', { ref_id: e.ref_id });
     if (r?.ok) { exits = exits.filter((x) => x.ref_id !== e.ref_id); onchanged(); }
     else showFlash?.({ message: r?.error || 'Failed', tone: 'critical' });
+  }
+
+  // Contents — objects located in this room (npcs, items).
+  async function addObject() {
+    const key = newObjKey.trim();
+    if (!key) return;
+    const r = await api('create_object', {
+      area: AREA_OF(obj.attrs) || '',
+      key,
+      kind: newObjKind,
+      title: `New ${newObjKind}`,
+      description: '',
+      location: ref,
+    });
+    if (r?.ok) {
+      contents = [...contents, { ref_id: r.data.ref_id, key, kind: newObjKind, title: `New ${newObjKind}`, location_ref: ref }];
+      newObjKey = '';
+      onchanged();
+    } else showFlash?.({ message: r?.error || 'Failed', tone: 'critical' });
+  }
+  async function removeContent(o) {
+    const r = await api('delete_object', { ref_id: o.ref_id });
+    if (r?.ok) { contents = contents.filter((x) => x.ref_id !== o.ref_id); onchanged(); }
+    else showFlash?.({ message: r?.error || 'Failed', tone: 'critical' });
+  }
+
+  // Location — move a non-room object into another ref.
+  let newLocation = $state('');
+  async function moveTo() {
+    const dest = newLocation.trim();
+    if (!dest) return;
+    const r = await api('set_location', { ref_id: ref, location: dest });
+    if (r?.ok) { obj.location_ref = dest; newLocation = ''; onchanged(); showFlash?.({ message: `Moved to ${dest}`, tone: 'success' }); }
+    else showFlash?.({ message: r?.error || 'Move failed', tone: 'critical' });
   }
 
   async function addHook() {
@@ -167,16 +210,44 @@
       <Button size="sm" onclick={addTag}><PlusIcon size={13} /> Tag</Button>
     </form>
 
-    <div class="rem-sec">Exits ({exits.length})</div>
-    {#each exits as e}
-      <div class="rem-exit">
-        <span class="rem-dir">{e.direction}</span>
-        <span class="rem-to">→ {e.target_ref}</span>
-        <button class="rem-del" aria-label="Delete exit" onclick={() => deleteExit(e)}><TrashIcon size={13} /></button>
-      </div>
+    {#if isRoom}
+      <div class="rem-sec">Exits ({exits.length})</div>
+      {#each exits as e}
+        <div class="rem-exit">
+          <span class="rem-dir">{e.direction}</span>
+          <span class="rem-to">→ {e.target_ref}</span>
+          <button class="rem-del" aria-label="Delete exit" onclick={() => deleteExit(e)}><TrashIcon size={13} /></button>
+        </div>
+      {:else}
+        <div class="rem-dim">No exits. Draw one from the graph.</div>
+      {/each}
+
+      <div class="rem-sec">Contents ({contents.length})</div>
+      {#each contents as o}
+        <div class="rem-exit">
+          <span class="rem-ckind">{o.kind}</span>
+          <button class="rem-cname" onclick={() => onedit(o.ref_id)}>{o.title || o.key}</button>
+          <button class="rem-del" aria-label="Remove object" onclick={() => removeContent(o)}><TrashIcon size={13} /></button>
+        </div>
+      {:else}
+        <div class="rem-dim">Empty. Add an NPC or item below.</div>
+      {/each}
+      <form class="rem-add" onsubmit={(e) => { e.preventDefault(); addObject(); }}>
+        <select class="rem-kindsel" bind:value={newObjKind}>
+          <option value="item">item</option>
+          <option value="npc">npc</option>
+        </select>
+        <TextInput bind:value={newObjKey} placeholder="key" size="sm" />
+        <Button size="sm" onclick={addObject}><PlusIcon size={13} /> Add</Button>
+      </form>
     {:else}
-      <div class="rem-dim">No exits. Draw one from the graph.</div>
-    {/each}
+      <div class="rem-sec">Location</div>
+      <div class="rem-exit"><span class="rem-to">in {obj.location_ref || '(nowhere)'}</span></div>
+      <form class="rem-add" onsubmit={(e) => { e.preventDefault(); moveTo(); }}>
+        <TextInput bind:value={newLocation} placeholder="move to a room ref, e.g. #12" size="sm" />
+        <Button size="sm" onclick={moveTo}>Move</Button>
+      </form>
+    {/if}
 
     <div class="rem-sec">Attributes</div>
     {#each attrs as a}
@@ -217,7 +288,7 @@
         <Button size="sm" tone="critical" onclick={doDelete}>Delete</Button>
         <Button size="sm" onclick={() => (confirmDelete = false)}>Cancel</Button>
       {:else}
-        <button class="rem-dellink" onclick={() => (confirmDelete = true)}><TrashIcon size={13} /> Delete room</button>
+        <button class="rem-dellink" onclick={() => (confirmDelete = true)}><TrashIcon size={13} /> Delete {obj.kind}</button>
       {/if}
     </div>
   {/if}
@@ -253,6 +324,10 @@
   .rem-dir { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; text-transform: uppercase; color: var(--bg-primary, #12100c); background: var(--edge, #9c8863); border-radius: 4px; padding: 1px 6px; }
   .rem-to { flex: 1; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; color: var(--text-secondary, #b6a888); }
 
+  .rem-ckind { font-family: var(--font-mono, ui-monospace, monospace); font-size: 9px; text-transform: uppercase; color: var(--bg-primary, #12100c); background: var(--edge, #9c8863); border-radius: 4px; padding: 1px 6px; }
+  .rem-cname { flex: 1; text-align: left; background: none; border: none; cursor: pointer; font: inherit; font-size: 12.5px; color: var(--text-primary, #ece0c8); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rem-cname:hover { color: var(--accent-amber, #c9956b); text-decoration: underline; }
+  .rem-kindsel { font: inherit; font-size: 12px; color: var(--text-primary, #ece0c8); background: var(--bg-primary, #12100c); border: 1px solid var(--border-default, #332c22); border-radius: 6px; padding: 5px 6px; }
   .rem-attr { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
   .rem-akey { flex: 0 0 38%; font-family: var(--font-mono, ui-monospace, monospace); font-size: 11.5px; color: var(--text-secondary, #b6a888); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .rem-akey.internal { color: var(--text-muted, #8c8378); }
