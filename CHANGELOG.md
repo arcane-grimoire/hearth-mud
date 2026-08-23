@@ -9,6 +9,31 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## 0.1.0-rc.7 — 2026-08-23
+
+### Added
+
+- **Engine-owned softcode API types** — `types/hearth.d.luau` is now the
+  canonical, engine-owned LSP type surface, living beside the functions it
+  describes and hard-checked against drift (a test builds the registered
+  function set from every install site and verifies it against both the
+  `.d.luau` and the web editor's completion data). Fills 24 functions the old
+  hand-maintained game copy lacked (`all_objects`, `get_contents`,
+  `find_by_attr`, `resolve_key`, `set_val`, `transfer_attr`, `apply_template`,
+  `json_encode`/`json_decode`, the `ink_*` family, `emit_nearby`/`emit_radius`,
+  …), plus the grid surface (`grid_new`, `Grid2D`) and Ink/MapTemplate types.
+- **Builder tooltips** — hover tooltips (kit-ui `Tooltip`) on the builder IDE's
+  icon-only and keyboard-shortcut buttons.
+
+### Docs
+
+- Refreshed the docs and skills to match the current engine: `#N` dbref refs
+  (the old `area/<kind>/<key>` scheme is gone) and title-only `@dig`/`@create`
+  syntax; documented boot-time world-content reconciliation (hash-based
+  skip-unchanged, DB as source of truth) and `@reload-world`; corrected the
+  `prompt(actor, obj, hook)` signature and the softcode skill's API counts.
+  Removed design plans that have shipped.
+
 ## 0.1.0-rc.6 — 2026-08-23
 
 ### Added
