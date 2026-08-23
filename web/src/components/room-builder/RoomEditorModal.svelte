@@ -7,6 +7,7 @@
   import { api } from '../../lib/api.js';
   import { navigate } from '../../lib/router.svelte.js';
   import { loadHooks, hookOptions, isValidHookName } from '../../lib/hooks.js';
+  import { hookTemplate } from '../../lib/hook-templates.js';
 
   // Jump to the full code editor for a hook (leaving /builder/rooms unmounts
   // the modal). The code editor loads it via ?ref=&hook=.
@@ -208,7 +209,7 @@
     const h = newHook.trim();
     if (!h) return;
     if (!isValidHookName(h, hooksData)) { hookErr = `“${h}” isn't a valid hook name`; return; }
-    const src = `-- ${h} hook\n`;
+    const src = hookTemplate(h);
     const r = await api('set_program', { ref_id: ref, hook: h, source: src });
     if (r?.ok) { programs = [...programs, { hook: h, source: src, dirty: false, saving: false }]; newHook = ''; onchanged(); }
     else showFlash?.({ message: r?.error || 'Failed', tone: 'critical' });

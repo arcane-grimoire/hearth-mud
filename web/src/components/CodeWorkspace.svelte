@@ -10,6 +10,7 @@
   import { api } from '../lib/api.js';
   import { route } from '../lib/router.svelte.js';
   import { loadHooks, hookOptions, isValidHookName } from '../lib/hooks.js';
+  import { hookTemplate } from '../lib/hook-templates.js';
 
   // Full-page Luau workspace at /builder/code: explorer (objects → hooks) |
   // editor | output panel. Deep-linkable via ?ref=#9&hook=on_enter.
@@ -50,7 +51,7 @@
     const r = newRef.trim();
     const h = newHook.trim();
     if (!r || !h) return;
-    const res = await api('set_program', { ref_id: r, hook: h, source: `-- ${h} hook\n` });
+    const res = await api('set_program', { ref_id: r, hook: h, source: hookTemplate(h) });
     if (!res?.ok) { showFlash?.({ message: res?.error || 'Failed to add hook', tone: 'critical' }); return; }
     newRef = '';
     newHook = '';
@@ -74,16 +75,30 @@
     newHook = v;
   }
 
-  // Open the hook named in the URL once the explorer is loaded.
+  // Open the hook named in the URL once the explorer has loaded — even if the
+  // object has no programs yet (so a deep link to a brand-new hook still opens,
+  // seeded with a starter template).
   let opened = null;
   $effect(() => {
     const key = `${wantRef}|${wantHook}`;
-    if (wantRef && wantHook && key !== opened && entries.length) {
+    if (wantRef && wantHook && key !== opened && !loading) {
       opened = key;
-      const e = entries.find((x) => x.ref_id === wantRef);
-      if (e) openHook(e, wantHook);
+      openDeepLink(wantRef, wantHook);
     }
   });
+  async function openDeepLink(refId, hook) {
+    let e = entries.find((x) => x.ref_id === refId);
+    if (!e) {
+      // Not in the explorer (no programs yet): look up its name so the header
+      // reads nicely, then open an empty hook to seed a template into.
+      try {
+        const ex = await api('examine', { ref_id: refId });
+        e = ex?.ok ? { ref_id: refId, key: ex.data.key, title: ex.data.title } : null;
+      } catch (err) { /* ignore */ }
+      e = e || { ref_id: refId, key: refId, title: refId };
+    }
+    openHook(e, hook);
+  }
 
   const grouped = $derived.by(() => {
     const needle = filter.trim().toLowerCase();
@@ -104,12 +119,23 @@
     output = null;
     showHist = false;
     versions = [];
+    let existing = null;
     try {
       const res = await api('list_programs', { ref_id: entry.ref_id });
-      const p = res?.ok ? res.data.find((x) => x.hook === hook) : null;
-      source = p?.source || '';
-    } catch (e) { source = ''; }
-    dirty = false;
+      existing = res?.ok ? res.data.find((x) => x.hook === hook) : null;
+    } catch (e) { existing = null; }
+    // A program that defines no function is just a placeholder (e.g. the old
+    // "-- on_enter hook" stub) — treat it as empty and seed a real example.
+    const hasCode = existing?.source && /\bfunction\b/.test(existing.source);
+    if (hasCode) {
+      source = existing.source;
+      dirty = false;
+    } else {
+      // Start from a working example. Mark it dirty so ⌘S / Save persists the
+      // starter and the "unsaved" state shows.
+      source = hookTemplate(hook);
+      dirty = true;
+    }
   }
 
   async function save(src) {
@@ -118,7 +144,12 @@
     const body = src ?? source;
     const res = await api('set_program', { ref_id: sel.ref, hook: sel.hook, source: body });
     saving = false;
-    if (res?.ok) { dirty = false; showFlash?.({ message: `Saved ${sel.hook}`, tone: 'success' }); }
+    if (res?.ok) {
+      dirty = false;
+      showFlash?.({ message: `Saved ${sel.hook}`, tone: 'success' });
+      // A newly-created hook (or a new object) should show up in the explorer.
+      if (!entries.some((e) => e.ref_id === sel.ref && e.hooks?.includes(sel.hook))) loadExplorer();
+    }
     else { output = { ok: false, text: res?.error || 'Save failed' }; }
   }
 
