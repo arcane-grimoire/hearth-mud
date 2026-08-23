@@ -1690,4 +1690,102 @@ mod tests {
             stale_in_js
         );
     }
+
+    /// The `Object` shape lives in three hand-maintained places: the engine
+    /// snapshot (`object_to_table` here), the editor's `OBJECT_MEMBERS` (drives
+    /// `x.` completion and the Help panel), and the game's `hearth.d.luau`
+    /// (`type Object`, for luau-lsp). This keeps them from drifting apart the
+    /// way `get_val` did: the first two are checked hard (both in this repo);
+    /// the third is checked when the reference game is present beside us, and
+    /// skipped otherwise since it's a separate repo and can't be a hard
+    /// compile-time include.
+    #[test]
+    fn object_member_reference_matches_engine_snapshot() {
+        use std::collections::BTreeSet;
+        let api_rs = include_str!("api.rs");
+        let js = include_str!("../../web/src/components/code/hearth-api.js");
+
+        // Fields the engine sets on each object table: `t.set("field", …)` in
+        // object_to_table. The attrs/tags sub-tables use their own handles, so
+        // scanning `t.set(` captures only the top-level object fields.
+        let snapshot: BTreeSet<String> = {
+            let start = api_rs
+                .find("fn object_to_table")
+                .expect("object_to_table gone from api.rs");
+            let body = &api_rs[start..];
+            // Stop at the next top-level `fn ` so we scan only this function.
+            let end = body[3..].find("\nfn ").map(|p| p + 3).unwrap_or(body.len());
+            let body = &body[..end];
+            let mut names = BTreeSet::new();
+            let mut rest = body;
+            while let Some(pos) = rest.find("t.set(\"") {
+                rest = &rest[pos + "t.set(\"".len()..];
+                if let Some(e) = rest.find('"') {
+                    names.insert(rest[..e].to_string());
+                }
+            }
+            names
+        };
+        assert!(
+            snapshot.len() >= 8,
+            "object_to_table scan found only {} fields — the parser is broken",
+            snapshot.len()
+        );
+
+        // Names in the `OBJECT_MEMBERS = [ ['name', 'doc'], … ]` block.
+        let members: BTreeSet<String> = {
+            let section = js
+                .split("export const OBJECT_MEMBERS")
+                .nth(1)
+                .expect("OBJECT_MEMBERS missing from hearth-api.js");
+            let section = section.split("];").next().unwrap();
+            let mut names = BTreeSet::new();
+            let mut rest = section;
+            while let Some(pos) = rest.find("['") {
+                rest = &rest[pos + 2..];
+                if let Some(e) = rest.find('\'') {
+                    names.insert(rest[..e].to_string());
+                    rest = &rest[e..];
+                } else {
+                    break;
+                }
+            }
+            names
+        };
+
+        let missing: Vec<_> = snapshot.difference(&members).collect();
+        let stale: Vec<_> = members.difference(&snapshot).collect();
+        assert!(
+            missing.is_empty() && stale.is_empty(),
+            "OBJECT_MEMBERS drifted from the engine object snapshot:\n  missing (add to hearth-api.js): {:?}\n  stale (remove from hearth-api.js): {:?}",
+            missing,
+            stale
+        );
+
+        // Best-effort: the reference game's LSP types, when checked out beside
+        // this repo, must describe the same fields. Skipped where the game
+        // isn't present (CI, a bare checkout).
+        if let Ok(dts) =
+            std::fs::read_to_string("../the-last-stag-mud/types/hearth.d.luau")
+        {
+            if let Some(after) = dts.split("type Object = {").nth(1) {
+                // Terminate at the closing brace on its own line, not the inline
+                // `{ [string]: any }` braces on the attrs/tags fields.
+                let block = after.split("\n}").next().unwrap_or("");
+                let typed: BTreeSet<String> = block
+                    .lines()
+                    .filter_map(|l| l.trim().split_once(':').map(|(n, _)| n.trim().to_string()))
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let missing_t: Vec<_> = snapshot.difference(&typed).collect();
+                let stale_t: Vec<_> = typed.difference(&snapshot).collect();
+                assert!(
+                    missing_t.is_empty() && stale_t.is_empty(),
+                    "hearth.d.luau `type Object` drifted from the engine snapshot:\n  missing (add to the .d.luau): {:?}\n  stale (remove from the .d.luau): {:?}",
+                    missing_t,
+                    stale_t
+                );
+            }
+        }
+    }
 }

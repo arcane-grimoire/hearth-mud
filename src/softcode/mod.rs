@@ -2071,6 +2071,21 @@ mod tests {
     }
 
     #[test]
+    fn check_syntax_accepts_type_annotations() {
+        // The editor seeds fresh hooks with typed signatures
+        // (function on_enter(this: Object, actor: Object, room: Object)). Luau
+        // erases type annotations at compile time and mlua's loader doesn't run
+        // the analyzer, so an undefined `Object` type must still compile — if
+        // this ever failed, every newly-opened hook would lint red.
+        let runtime = SoftcodeRuntime::new();
+        runtime
+            .check_syntax(
+                "function on_enter(this: Object, actor: Object, room: Object)\n  return true\nend",
+            )
+            .expect("typed Luau signature should compile");
+    }
+
+    #[test]
     fn run_eval_reports_compile_error() {
         let runtime = SoftcodeRuntime::new();
         let world = test_world();

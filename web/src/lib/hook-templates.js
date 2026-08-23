@@ -236,9 +236,39 @@ function customName(name) {
   return name.replace(/[^a-zA-Z0-9_]/g, '_');
 }
 
-// Return starter source for `name`. KNOWN hooks get a hand-written example;
-// open-ended cmd_/lib_/on_/can_ names get a shaped stub for that family.
+// Luau types for the standard hook parameters. Annotations are erased at
+// runtime (mlua compiles Luau bytecode and ignores them), so they never affect
+// execution or the engine's compile-check; their value is real completion and
+// type-checking in an external editor with luau-lsp, where `Object` resolves
+// from the game's hearth.d.luau. `Object` is the field set the engine hands
+// each hook — see object_to_table in src/softcode/api.rs and OBJECT_MEMBERS in
+// hearth-api.js (kept in sync by a cargo test).
+const PARAM_TYPES = { this: 'Object', actor: 'Object', room: 'Object', args: 'any' };
+
+// Annotate the parameters on a hook's `function <name>(...)` signature line.
+function typeSignature(src) {
+  return src.replace(
+    /^(\s*function\s+[A-Za-z_]\w*\s*\()([^)]*)(\))/m,
+    (_, pre, params, post) =>
+      pre +
+      params
+        .split(',')
+        .map((p) => {
+          const name = p.trim();
+          return name && PARAM_TYPES[name] ? `${name}: ${PARAM_TYPES[name]}` : p;
+        })
+        .join(', ') +
+      post,
+  );
+}
+
+// Return starter source for `name`, with typed parameters. KNOWN hooks get a
+// hand-written example; open-ended cmd_/lib_/on_/can_ names get a shaped stub.
 export function hookTemplate(name) {
+  return typeSignature(rawTemplate(name));
+}
+
+function rawTemplate(name) {
   const n = (name || '').trim();
   if (!n) return '';
   if (KNOWN[n]) return KNOWN[n];

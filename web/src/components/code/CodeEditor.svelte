@@ -17,14 +17,35 @@
   let view;
   let syncing = false;
 
+  // Identifiers known to hold a GameObject, so `x.` completes object fields.
+  // The three hook params are always objects; add any local bound from an
+  // object-returning call or an object-list loop. A heuristic, not real type
+  // inference — enough to stop offering object fields after every dot.
+  function objectIdents(doc) {
+    const set = new Set(['this', 'actor', 'room']);
+    const assign = /\b([A-Za-z_]\w*)\s*=\s*(?:get_object|get_location|get_owner|spawn)\s*\(/g;
+    const loop = /\bfor\b[^\n=]*?\b([A-Za-z_]\w*)\s+in\b[^\n]*?(?:get_room_contents|get_inventory|all_objects|find_by_tag|find_by_attr)\s*\(/g;
+    let m;
+    while ((m = assign.exec(doc))) set.add(m[1]);
+    while ((m = loop.exec(doc))) set.add(m[1]);
+    return set;
+  }
+
   // --- Hearth API autocomplete ---
   function hearthComplete(context) {
-    const member = context.matchBefore(/\.\w*$/);
-    if (member && member.from < member.to - 0) {
-      return {
-        from: member.from + 1,
-        options: OBJECT_MEMBERS.map(([label, info]) => ({ label, type: 'property', info })),
-      };
+    // Member access: only offer object fields when the receiver is known to be
+    // an object (a hook param or an object-bound local), not after any dot —
+    // `str.` and nested tables like `actor.attrs.` shouldn't get object fields.
+    const member = context.matchBefore(/[A-Za-z_]\w*\.\w*$/);
+    if (member) {
+      const recv = /([A-Za-z_]\w*)\.\w*$/.exec(member.text)?.[1];
+      if (recv && objectIdents(context.state.doc.toString()).has(recv)) {
+        return {
+          from: member.from + member.text.indexOf('.') + 1,
+          options: OBJECT_MEMBERS.map(([label, info]) => ({ label, type: 'property', info })),
+        };
+      }
+      return null; // unknown receiver — don't guess object fields
     }
     const word = context.matchBefore(/\w*/);
     if (!word || (word.from === word.to && !context.explicit)) return null;
