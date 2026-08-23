@@ -3808,6 +3808,13 @@ mod tests {
 
         let game_path = std::path::Path::new(&game_dir);
         let runtime = SoftcodeRuntime::new();
+        // Wire the game dir into the Ink runtime so file-based dialogue
+        // (`ink_start(actor, npc, { file = "..." })`) is exercisable from
+        // integration tests, the same as it is at runtime.
+        runtime
+            .ink_runtime()
+            .borrow_mut()
+            .set_ink_dir(game_path.to_path_buf());
         let modules = crate::loader::load_modules(game_path);
         runtime.load_modules(modules);
 
