@@ -7,7 +7,23 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
-Nothing yet.
+### Added
+
+- **Property-style object access** (issue #19) — hook-facing objects (`this`,
+  `actor`, `get_object`/`get_location` results) now support direct field reads
+  and writes: `this.hp = 0` is exactly `set_attr(this, "hp", 0)`;
+  `this.title = "x"` / `this.description = ...` map to the title/description
+  intents; assigning `nil` unsets. Reads are pending-aware, so property syntax
+  and `get_attr` always agree within a script. Protected fields (`ref_id`,
+  `key`, `kind`, `location_ref`, …) reject writes with errors naming the owning
+  API (`move_object` for location). Generalized iteration (`for k, v in this`)
+  works over a snapshot view. List results (`all_objects`, `get_contents`, …)
+  stay plain snapshot tables — property writes only apply to single-object
+  handles.
+- **O(1) pending attribute lookups** — `IntentBatch` maintains an index of the
+  latest `SetAttr`/`UnsetAttr` per `(target, key)`, replacing the reverse scan.
+  This matters because every property read routes through it; it also speeds up
+  existing `get_attr`/`has_attr` in write-heavy scripts.
 
 ## 0.1.0-rc.4 — 2026-08-23
 

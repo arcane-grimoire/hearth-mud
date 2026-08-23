@@ -244,6 +244,28 @@ impl IntentBatch {
             _ => None,
         }
     }
+
+    /// Latest pending `SetTitle` for `target`, if any. A reverse scan is fine
+    /// here (unlike `pending_attr`, which property access hammers): title
+    /// writes within one script run are rare, and there is no unset intent to
+    /// index for.
+    pub fn pending_title(&self, target: &str) -> Option<&str> {
+        self.intents.iter().rev().find_map(|i| match i {
+            Intent::SetTitle { target: t, title } if t == target => Some(title.as_str()),
+            _ => None,
+        })
+    }
+
+    /// Latest pending `SetDescription` for `target`, if any. Same shape and
+    /// reasoning as [`Self::pending_title`].
+    pub fn pending_description(&self, target: &str) -> Option<&str> {
+        self.intents.iter().rev().find_map(|i| match i {
+            Intent::SetDescription { target: t, description } if t == target => {
+                Some(description.as_str())
+            }
+            _ => None,
+        })
+    }
 }
 
 /// An outward-facing side effect produced by applying an [`IntentBatch`].
@@ -1229,7 +1251,7 @@ impl SoftcodeRuntime {
         let run_result: mlua::Result<LuaValue> = self.lua.scope(|scope| {
             let env = self.lua.create_table()?;
             api::install_stdlib(&self.lua, &env)?;
-            api::install(
+            let obj_mt = api::install(
                 &self.lua,
                 scope,
                 &env,
@@ -1255,7 +1277,8 @@ impl SoftcodeRuntime {
                 None => return Ok(LuaValue::Nil),
             };
 
-            let this_val = api::object_to_value(&self.lua, world, this_ref)?;
+            let this_val =
+                api::object_to_value(&self.lua, world, this_ref, Some(&obj_mt))?;
 
             if is_tick {
                 let state_tbl = self.lua.create_table()?;
@@ -1263,7 +1286,9 @@ impl SoftcodeRuntime {
                     state_tbl.set(k.clone(), self.lua.to_value(v)?)?;
                 }
                 let room_val = match room_ref.or(default_location.as_deref()) {
-                    Some(r) => api::object_to_value(&self.lua, world, r)?,
+                    Some(r) => {
+                        api::object_to_value(&self.lua, world, r, Some(&obj_mt))?
+                    }
                     None => LuaValue::Nil,
                 };
                 let ret = func.call::<LuaValue>((this_val, state_tbl.clone(), room_val))?;
@@ -1277,9 +1302,12 @@ impl SoftcodeRuntime {
                 }
                 Ok(ret)
             } else {
-                let actor_val = api::object_to_value(&self.lua, world, actor_ref)?;
+                let actor_val =
+                    api::object_to_value(&self.lua, world, actor_ref, Some(&obj_mt))?;
                 let room_val = match room_ref.or(default_location.as_deref()) {
-                    Some(r) => api::object_to_value(&self.lua, world, r)?,
+                    Some(r) => {
+                        api::object_to_value(&self.lua, world, r, Some(&obj_mt))?
+                    }
                     None => LuaValue::Nil,
                 };
                 let ret = match args {
@@ -1365,7 +1393,7 @@ impl SoftcodeRuntime {
         let run_result: mlua::Result<LuaValue> = self.lua.scope(|scope| {
             let env = self.lua.create_table()?;
             api::install_stdlib(&self.lua, &env)?;
-            api::install(
+            let obj_mt = api::install(
                 &self.lua,
                 scope,
                 &env,
@@ -1382,7 +1410,10 @@ impl SoftcodeRuntime {
 
             // The caller running the eval, for convenience — same name a
             // hook's `actor` parameter would use.
-            env.set("actor", api::object_to_value(&self.lua, world, actor_ref)?)?;
+            env.set(
+                "actor",
+                api::object_to_value(&self.lua, world, actor_ref, Some(&obj_mt))?,
+            )?;
 
             compiled.set_environment(env)?;
             compiled.call::<LuaValue>(())
@@ -1708,7 +1739,7 @@ impl SoftcodeRuntime {
                 if let Some(w) = world {
                     let batch = Rc::new(RefCell::new(IntentBatch::default()));
                     let dbref_counter = Rc::new(Cell::new(w.next_id));
-                    api::install(
+                    let _obj_mt = api::install(
                         &self.lua,
                         scope,
                         &env,
@@ -4323,5 +4354,176 @@ mod tests {
 
         let batch = batch_as(None, intents);
         apply_batch(&mut world, &batch).expect("system broadcasts are unbounded");
+    }
+
+    // -- Property-style object access (issue #19) --
+
+    #[test]
+    fn property_writes_persist_through_the_batch() {
+        let world = test_world();
+        let result = run_script(
+            &world,
+            r#"
+            function on_get(this, actor, room)
+                this.mood = "sunny"
+                this.title = "Shiny Thing"
+                this.description = "It gleams."
+            end
+        "#,
+        );
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        assert_eq!(w.get("#5").unwrap().attrs["mood"], "sunny");
+        assert_eq!(w.get("#5").unwrap().title.as_deref(), Some("Shiny Thing"));
+        assert_eq!(w.get("#5").unwrap().description, "It gleams.");
+    }
+
+    #[test]
+    fn property_reads_match_get_attr_including_same_script_writes() {
+        let world = test_world();
+        let result = run_script(
+            &world,
+            r#"
+            function on_get(this, actor, room)
+                set_attr(this, "hp", 10)
+                local a = this.hp
+                local b = get_attr(this, "hp")
+                this.hp = nil
+                local c = this.hp
+                local d = get_attr(this, "hp")
+                assert(a == 10 and b == 10)
+                assert(c == nil and d == nil)
+            end
+        "#,
+        );
+        // Two writes: the set_attr and the nil-assignment's UnsetAttr. The
+        // reads push nothing.
+        assert_eq!(result.batch.len(), 2);
+        assert!(matches!(
+            result.batch.intents[1],
+            crate::softcode::Intent::UnsetAttr { .. }
+        ));
+    }
+
+    #[test]
+    fn property_nil_write_is_an_unset_not_a_null_set() {
+        let world = test_world();
+        let result = run_script(
+            &world,
+            r#"
+            function on_get(this, actor, room) this.torch = nil end
+        "#,
+        );
+        assert_eq!(result.batch.len(), 1);
+        assert!(matches!(
+            result.batch.intents[0],
+            crate::softcode::Intent::UnsetAttr { .. }
+        ));
+    }
+
+    fn run_script_raw(
+        world: &World,
+        source: &str,
+    ) -> Result<ProgramResult, SoftcodeError> {
+        run_script_raw_budget(world, source, Budget::default())
+    }
+
+    fn run_script_raw_budget(
+        world: &World,
+        source: &str,
+        budget: Budget,
+    ) -> Result<ProgramResult, SoftcodeError> {
+        let runtime = SoftcodeRuntime::new();
+        let program = ProgramRecord::new("on_get", source);
+        runtime.run_hook(
+            world,
+            &program,
+            "#5",
+            "#3",
+            Some("#1"),
+            None,
+            budget,
+            counter(world),
+            &test_themes(),
+            &test_map_templates(),
+            &[],
+            0,
+        )
+    }
+
+    #[test]
+    fn protected_fields_raise_errors_naming_the_owner_api() {
+        let world = test_world();
+        for (field, needle) in [
+            ("location_ref", "move_object"),
+            ("ref_id", "cannot be changed"),
+            ("kind", "cannot be changed"),
+            ("display_name", "computed"),
+        ] {
+            let err = run_script_raw(
+                &world,
+                &format!(r#"function on_get(this, actor, room) this.{field} = "x" end"#),
+            )
+            .expect_err("protected write must fail");
+            assert!(
+                format!("{err:?}").contains(needle),
+                "{field}: error should mention '{needle}', got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_pairs_enumerates_fields_and_attrs() {
+        let world = test_world();
+        // Metamethod dispatch per field costs VM instructions — give the
+        // iteration room beyond the default hook budget.
+        let result = run_script_raw_budget(
+            &world,
+            r#"
+            function on_get(this, actor, room)
+                local names = {}
+                for k, v in this do names[#names + 1] = k end
+                set_attr(this, "_seen", #names)
+
+                local anames = {}
+                for k, v in this.attrs do anames[#anames + 1] = k end
+                set_attr(this, "_attrs_seen", #anames)
+            end
+        "#,
+            Budget::new(1_000_000),
+        )
+        .expect("script should run");
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        // The real assertion: pairs() yields at all through __pairs — a raw
+        // empty proxy table would yield nothing.
+        let obj = w.get("#5").unwrap();
+        let seen = obj.attrs["_seen"].as_u64().unwrap();
+        assert!(seen >= 8, "object pairs() yielded only {seen} fields");
+        assert!(
+            obj.attrs.get("_attrs_seen").map(|v| v.as_u64().unwrap_or(0)).unwrap_or(0) >= 1,
+            "attrs iteration should see at least the two attrs written above"
+        );
+    }
+
+    #[test]
+    fn list_results_stay_plain_tables() {
+        let world = test_world();
+        let result = run_script(
+            &world,
+            r#"
+            function on_get(this, actor, room)
+                local objs = get_contents(room)
+                local o = objs[1]
+                -- Raw writes to plain tables must NOT push intents.
+                o.anything = 1
+            end
+        "#,
+        );
+        assert!(
+            result.batch.is_empty(),
+            "list results must not be proxies: {:?}",
+            result.batch.intents
+        );
     }
 }

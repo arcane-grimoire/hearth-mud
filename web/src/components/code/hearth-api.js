@@ -1,8 +1,13 @@
 // The Hearth Luau API surface exposed to hooks, for editor autocomplete.
 // Enumerated from src/softcode/api.rs (the env functions) plus the object
-// fields object_to_value builds. Signatures are hints, not enforced — keep in
-// sync as the engine API grows; a future engine introspection endpoint could
-// replace this static list.
+// fields object_to_value builds. Signatures are hints, not enforced — kept
+// honest by the sync-guard tests in api.rs (help_panel_api_reference_matches,
+// object_member_reference_matches_engine_snapshot); a future engine
+// introspection endpoint could replace these static lists.
+//
+// Note: hook-facing objects also support PROPERTY syntax — `this.hp = 0` ≡
+// `set_attr(this, "hp", 0)`, `this.title = "x"` ≡ `set_title(...)`, and reads
+// are pending-aware like get_attr. See docs/softcode-guide.md.
 
 // Callable API functions: [name, signature, doc]
 // Kept honest by src/softcode/api.rs's help_panel_api_reference_matches test:

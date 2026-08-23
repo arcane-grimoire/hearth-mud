@@ -162,6 +162,40 @@ Each object parameter is a table with the object's data:
 These tables are snapshots — changing them in Lua has no effect. Use the write
 API functions to actually change the world.
 
+## Property syntax
+
+Hook-facing objects (`this`, `actor`, results of `get_object`/`get_location`)
+support reading and writing fields and attributes directly:
+
+```lua
+function on_get(this, actor, room)
+  this.picked_up_count = (this.picked_up_count or 0) + 1   -- attrs
+  this.title = "The Shiny Sword"                            -- title
+  this.description = "It gleams."                           -- description
+  emit(actor, this.description)                             -- reads are pending-aware
+end
+```
+
+Rules:
+
+- **Writes push intents** — `this.hp = 0` is exactly `set_attr(this, "hp", 0)`;
+  `this.title = ...` is `set_title`; `this.description = ...` is
+  `set_description`. Nothing touches the world until the batch applies.
+- **Reads see your own writes** — `this.hp` resolves through the same path as
+  `get_attr(this, "hp")`: pending writes first, then the snapshot. Both syntaxes
+  always agree.
+- **`this.key = nil` unsets** — it's `unset_attr(this, "key")`, not a null set.
+- **Protected fields reject writes** with an error: `ref_id`, `key`, `kind`,
+  `location_ref` (use `move_object(ref, destination)`), plus computed/container
+  fields (`display_name`, `attrs`, `tags`).
+- **Iteration** works via generalized iteration (`for k, v in this do`) and sees
+  the snapshot as the script entered it, not same-script writes. Each access to
+  `this.attrs` returns a fresh proxy table, so proxies shouldn't be compared or
+  used as table keys.
+- **List results stay plain tables** — `all_objects()`, `get_contents()`, etc.
+  return ordinary snapshot tables (writes to them evaporate silently, as before);
+  only single-object handles carry the live property behavior.
+
 ## Read API
 
 These functions read from the world. They're safe to call anytime.
