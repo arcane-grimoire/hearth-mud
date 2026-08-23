@@ -177,10 +177,46 @@ pub struct IntentBatch {
     /// recorded now so that enforcement is a change inside `apply_to` later
     /// rather than a retrofit through every call site.
     pub authority: Option<String>,
+    /// `target -> (attr key -> index in `intents`)` of the *latest*
+    /// `SetAttr`/`UnsetAttr` for that pair. Lets [`pending_attr`] answer in
+    /// O(1) instead of reverse-scanning the whole vector on every read —
+    /// which matters because property-style access routes every `this.x`
+    /// through `pending_attr`, so a write-then-read loop was O(n·k).
+    ///
+    /// Maintained exclusively by [`push`]; the batch is append-only at
+    /// runtime (nothing removes or reorders intents), so a stored index stays
+    /// valid for the batch's whole life. **Do not push onto `intents`
+    /// directly** — that desyncs this map. Build pre-populated batches with
+    /// [`IntentBatch::from_intents`], not a struct literal.
+    ///
+    /// [`pending_attr`]: IntentBatch::pending_attr
+    /// [`push`]: IntentBatch::push
+    attr_index: HashMap<String, HashMap<String, usize>>,
 }
 
 impl IntentBatch {
+    /// Build a batch from a pre-existing intent list, keeping `attr_index` in
+    /// sync. Use this instead of the struct literal when you already hold a
+    /// `Vec<Intent>` (tests, generators), so `pending_attr` stays correct.
+    pub fn from_intents(intents: Vec<Intent>) -> Self {
+        let mut batch = IntentBatch::default();
+        for intent in intents {
+            batch.push(intent);
+        }
+        batch
+    }
+
     pub fn push(&mut self, intent: Intent) {
+        let idx = self.intents.len();
+        match &intent {
+            Intent::SetAttr { target, key, .. } | Intent::UnsetAttr { target, key } => {
+                self.attr_index
+                    .entry(target.clone())
+                    .or_default()
+                    .insert(key.clone(), idx);
+            }
+            _ => {}
+        }
         self.intents.push(intent);
     }
 
@@ -192,22 +228,21 @@ impl IntentBatch {
         self.intents.len()
     }
 
-    /// Check for a pending write to `target`/`key`, scanning in reverse so
-    /// the latest write wins. Returns `Some(Some(value))` for a pending set,
-    /// `Some(None)` for a pending unset, or `None` if no write is pending.
+    /// Check for a pending write to `target`/`key`. Returns `Some(Some(value))`
+    /// for a pending set, `Some(None)` for a pending unset, or `None` if no
+    /// write is pending.
+    ///
+    /// O(1): `attr_index` points straight at the latest `SetAttr`/`UnsetAttr`
+    /// for the pair (later `push`es overwrite the entry), so "latest write
+    /// wins" holds without the old reverse scan of every intent.
     pub fn pending_attr(&self, target: &str, key: &str) -> Option<Option<&serde_json::Value>> {
-        for intent in self.intents.iter().rev() {
-            match intent {
-                Intent::SetAttr { target: t, key: k, value } if t == target && k == key => {
-                    return Some(Some(value));
-                }
-                Intent::UnsetAttr { target: t, key: k } if t == target && k == key => {
-                    return Some(None);
-                }
-                _ => {}
-            }
+        let idx = *self.attr_index.get(target)?.get(key)?;
+        match &self.intents[idx] {
+            Intent::SetAttr { value, .. } => Some(Some(value)),
+            Intent::UnsetAttr { .. } => Some(None),
+            // attr_index only ever records the two variants above.
+            _ => None,
         }
-        None
     }
 }
 
@@ -3817,10 +3852,8 @@ mod tests {
 
     fn batch_as(authority: Option<&str>, intents: Vec<Intent>) -> IntentBatch {
         IntentBatch {
-            intents,
-            actor_ref: None,
             authority: authority.map(|s| s.to_string()),
-            ..Default::default()
+            ..IntentBatch::from_intents(intents)
         }
     }
 
