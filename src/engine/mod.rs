@@ -120,6 +120,17 @@ pub enum ApiRequest {
     /// program that fails to compile. One server-side pass (the engine holds
     /// the whole world) instead of many client round-trips. Builder-gated.
     WorldCheck,
+    /// A flat, richer object listing for the builder's table view: every
+    /// non-exit object (rooms, npcs, items, players) with its area, location
+    /// and tags — the columns the table renders. `ListObjects` deliberately
+    /// stays lean and public (see `is_read`), so this Builder-gated variant
+    /// carries the tag/area detail the same way `ListWorldSlice` does.
+    /// Optional `kind` ("room"/"npc"/"item"/"player") and `area` narrow it.
+    ListObjectsFull {
+        kind: Option<String>,
+        area: Option<String>,
+        limit: Option<u32>,
+    },
     /// Version history for one `(ref_id, hook)` — the REST counterpart of
     /// `@program/history`. Requires auth like any other write-tier action
     /// (see `is_read` below): it serves full historical Program source,
@@ -965,6 +976,49 @@ impl Engine {
                     }))
                     .collect();
                 ApiResponse::success(serde_json::json!(objs))
+            }
+            ApiRequest::ListObjectsFull { kind, area, limit } => {
+                let limit = limit.unwrap_or(600).min(3000) as usize;
+                let kind_want = kind.as_deref().filter(|k| !k.is_empty());
+                let area_want = area.as_deref().filter(|a| !a.is_empty());
+
+                let mut objs: Vec<&GameObject> = self
+                    .world
+                    .objects
+                    .values()
+                    .filter(|o| o.kind != Kind::Exit)
+                    .filter(|o| kind_want.is_none_or(|k| o.kind.to_string() == k))
+                    .filter(|o| area_want.is_none_or(|a| Self::room_area(o) == a))
+                    .collect();
+                // Stable order (title, then ref) so the table's initial sort is
+                // deterministic and truncation drops a consistent tail.
+                objs.sort_by(|a, b| {
+                    let at = a.title.as_deref().unwrap_or(&a.key);
+                    let bt = b.title.as_deref().unwrap_or(&b.key);
+                    at.to_lowercase().cmp(&bt.to_lowercase()).then_with(|| a.ref_id.cmp(&b.ref_id))
+                });
+                let truncated = objs.len() > limit;
+                objs.truncate(limit);
+
+                let rows: Vec<serde_json::Value> = objs
+                    .iter()
+                    .map(|o| {
+                        let tags: Vec<String> = o.tags.iter().map(|t| t.as_spec()).collect();
+                        serde_json::json!({
+                            "ref_id": o.ref_id,
+                            "key": o.key,
+                            "kind": o.kind.to_string(),
+                            "title": o.title,
+                            "area": Self::room_area(o),
+                            "location_ref": o.location_ref,
+                            "tags": tags,
+                        })
+                    })
+                    .collect();
+                ApiResponse::success(serde_json::json!({
+                    "objects": rows,
+                    "truncated": truncated,
+                }))
             }
             ApiRequest::CreateRoom { area, key, title, description } => {
                 // `key` and `area` feed the room's `_file_key`, which drives
@@ -7218,6 +7272,93 @@ mod tests {
         assert_eq!(boundary[0]["ref_id"].as_str(), Some(gate.as_str()));
         let exits = data["exits"].as_array().unwrap();
         assert!(exits.iter().any(|e| e["to"].as_str() == Some(gate.as_str())));
+    }
+
+    #[test]
+    fn list_objects_full_filters_by_kind_and_area_and_is_builder_gated() {
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
+        let square = mk_room(&mut engine, &token, "village", "square");
+        let cave = mk_room(&mut engine, &token, "hills", "cave");
+        // An NPC in the square and an item in the cave — both non-room objects
+        // that the room graph/table would never surface on their own.
+        let mk = |engine: &mut Engine, kind: &str, key: &str, loc: &str| {
+            engine
+                .handle_api_request(
+                    ApiRequest::CreateObject {
+                        area: "village".into(),
+                        key: key.into(),
+                        kind: kind.into(),
+                        title: Some(key.into()),
+                        description: None,
+                        location: Some(loc.to_string()),
+                    },
+                    Some(token.clone()),
+                )
+                .data
+                .unwrap()["ref_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let kael = mk(&mut engine, "npc", "kael", &square);
+        let chest = mk(&mut engine, "item", "chest", &cave);
+
+        // Public (no token) is refused — it carries tags like the slice reads.
+        let pub_resp = engine.handle_api_request(
+            ApiRequest::ListObjectsFull { kind: None, area: None, limit: None },
+            None,
+        );
+        assert_eq!(pub_resp.error.as_deref(), Some("Authentication required"));
+
+        // Unfiltered: both rooms + npc + item, never an exit.
+        let all = engine
+            .handle_api_request(
+                ApiRequest::ListObjectsFull { kind: None, area: None, limit: None },
+                Some(token.clone()),
+            )
+            .data
+            .unwrap();
+        let objs = all["objects"].as_array().unwrap();
+        assert!(objs.iter().all(|o| o["kind"] != "exit"), "exits must be excluded");
+        let has = |r: &str| objs.iter().any(|o| o["ref_id"].as_str() == Some(r));
+        assert!(has(&square) && has(&cave) && has(&kael) && has(&chest));
+
+        // kind filter narrows to just the npc, with location + tags present.
+        let npcs = engine
+            .handle_api_request(
+                ApiRequest::ListObjectsFull {
+                    kind: Some("npc".into()),
+                    area: None,
+                    limit: None,
+                },
+                Some(token.clone()),
+            )
+            .data
+            .unwrap();
+        let npcs = npcs["objects"].as_array().unwrap();
+        assert_eq!(npcs.len(), 1);
+        assert_eq!(npcs[0]["ref_id"].as_str(), Some(kael.as_str()));
+        assert_eq!(npcs[0]["location_ref"].as_str(), Some(square.as_str()));
+        assert!(npcs[0]["tags"].is_array());
+
+        // area filter scopes by `_file_key`, which only rooms carry (loose
+        // objects are "unfiled"): "hills" yields the cave room alone.
+        let hills = engine
+            .handle_api_request(
+                ApiRequest::ListObjectsFull {
+                    kind: None,
+                    area: Some("hills".into()),
+                    limit: None,
+                },
+                Some(token.clone()),
+            )
+            .data
+            .unwrap();
+        let hills = hills["objects"].as_array().unwrap();
+        assert_eq!(hills.len(), 1);
+        assert_eq!(hills[0]["key"].as_str(), Some("cave"));
+        // The loose npc/item report an empty area (they're located, not filed).
+        assert_eq!(npcs[0]["area"].as_str(), Some(""));
     }
 
     #[test]
