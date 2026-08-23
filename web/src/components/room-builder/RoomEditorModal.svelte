@@ -3,7 +3,14 @@
   import PlusIcon from '@lucide/svelte/icons/plus';
   import TrashIcon from '@lucide/svelte/icons/trash-2';
   import XIcon from '@lucide/svelte/icons/x';
+  import CodeIcon from '@lucide/svelte/icons/code';
   import { api } from '../../lib/api.js';
+  import { navigate } from '../../lib/router.svelte.js';
+
+  // Jump to the full code editor for a hook (leaving /builder/rooms unmounts
+  // the modal). The code editor loads it via ?ref=&hook=.
+  const openInCode = (hook) =>
+    navigate(`/builder/code?ref=${encodeURIComponent(ref)}&hook=${encodeURIComponent(hook)}`);
 
   // The object editor body (RoomBuilder wraps this in a kit-ui Modal). Works on
   // any object — rooms get Exits + Contents, other kinds (npc/item) get a
@@ -327,6 +334,7 @@
           <span class="rem-hook">{p.hook}</span>
           <span class="rem-spacer"></span>
           {#if p.dirty}<Button size="sm" disabled={p.saving} onclick={() => saveHook(p)}>Save</Button>{/if}
+          <button class="rem-codelink" title="Open in code editor" onclick={() => openInCode(p.hook)}><CodeIcon size={13} /></button>
           <button class="rem-del" aria-label="Remove hook" onclick={() => removeHook(p)}><TrashIcon size={13} /></button>
         </div>
         <textarea class="rem-in rem-src" bind:value={p.source} oninput={() => { p.dirty = true; programs = [...programs]; }}></textarea>
@@ -399,6 +407,8 @@
   .rem-src { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11.5px; min-height: 88px; line-height: 1.45; resize: vertical; }
 
   .rem-del { background: none; border: none; color: var(--text-muted, #9a9186); cursor: pointer; padding: 3px; border-radius: 5px; line-height: 0; }
+  .rem-codelink { background: none; border: none; color: var(--text-muted, #9a9186); cursor: pointer; padding: 3px; border-radius: 5px; line-height: 0; }
+  .rem-codelink:hover { color: var(--accent-amber, #c9956b); background: color-mix(in srgb, var(--accent-amber, #c9956b) 14%, transparent); }
   .rem-del:hover { color: var(--accent-red, #d07a5a); background: color-mix(in srgb, var(--accent-red, #d07a5a) 14%, transparent); }
 
   .rem-danger { display: flex; align-items: center; gap: 8px; margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--border-muted, #2a2419); }
