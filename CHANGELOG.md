@@ -9,6 +9,51 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## 0.1.0-rc.4 — 2026-08-23
+
+The in-browser builder grows up: a visual room graph, a code editor, a
+universal object editor, and a durability layer underneath it all.
+
+### Added
+
+- **Roomwright** — a visual room-graph builder in the web client, backed by a
+  scoped slice API, with a table view that toggles against the graph and
+  hand-arranged layout positions that persist and restore.
+
+- **Universal object editor.** Full modal editors for rooms (title,
+  description, tags, exits, attrs, programs, delete) and for NPCs, items, and
+  players, with room-contents editing and exit/alias editing. An object finder
+  reaches any object by name or ref, and the table view lists the whole world
+  (rooms, npcs, items, players).
+
+- **Code editor** — a CodeMirror workspace at `/builder/code`, with engine
+  foundations (`check_program`, `list_programs_all`), hook-name autocomplete,
+  inline validation, and a starter example scaffolded the instant a hook is
+  picked. The object modal bridges into it for editing hooks.
+
+- **Builder tooling** — a live playtest console, a whole-world "World check"
+  problems panel, full-screen mode for all builder panels, and map-builder
+  keybindings.
+
+- **Delta saves.** Per-object dirty-tracking so autosave writes only changed
+  objects instead of the whole world, with epoch-versioned derived indexes
+  that rebuild lazily rather than on every mutation.
+
+- **RBAC security audit** documenting the permission model
+  (`docs/audits/2024-rbac-security-audit.md`).
+
+### Changed
+
+- Ink runtime refactored.
+- Web client output batches appends, indexes the admin tree, and debounces
+  search; the map builder is integrated into the web client.
+- Auth re-resolves when the shared session token is stale.
+
+### Fixed
+
+- Hardened the `@export` path from a builder-set `_file_key` (review finding).
+- Guard `set_location` and validate exits/aliases (PR #9 review).
+
 ## 0.1.0-rc.3 — 2026-08-21
 
 The map builder, and the durability loop that makes it safe to use.
