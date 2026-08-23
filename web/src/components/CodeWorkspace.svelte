@@ -5,6 +5,7 @@
   import SaveIcon from '@lucide/svelte/icons/save';
   import HistoryIcon from '@lucide/svelte/icons/history';
   import SearchIcon from '@lucide/svelte/icons/search';
+  import PlusIcon from '@lucide/svelte/icons/plus';
   import CodeEditor from './code/CodeEditor.svelte';
   import { api } from '../lib/api.js';
   import { route } from '../lib/router.svelte.js';
@@ -24,6 +25,8 @@
   let output = $state(null); // {ok, text}
   let versions = $state([]);
   let showHist = $state(false);
+  let newRef = $state('');
+  let newHook = $state('');
 
   const wantRef = $derived(route.query.ref || '');
   const wantHook = $derived(route.query.hook || '');
@@ -35,6 +38,21 @@
       entries = res?.ok ? res.data : [];
     } catch (e) { entries = []; }
     loading = false;
+  }
+
+  // Add a hook to any object by ref (an object with no programs isn't in the
+  // explorer yet) — create it with a stub, refresh, and open it.
+  async function addHookToRef() {
+    const r = newRef.trim();
+    const h = newHook.trim();
+    if (!r || !h) return;
+    const res = await api('set_program', { ref_id: r, hook: h, source: `-- ${h} hook\n` });
+    if (!res?.ok) { showFlash?.({ message: res?.error || 'Failed to add hook', tone: 'critical' }); return; }
+    newRef = '';
+    newHook = '';
+    await loadExplorer();
+    const entry = entries.find((e) => e.ref_id === r) || { ref_id: r, key: r, title: r };
+    openHook(entry, h);
   }
 
   onMountLike();
@@ -139,6 +157,11 @@
         <SearchIcon size={13} />
         <input placeholder="Filter hooks…" bind:value={filter} />
       </div>
+      <form class="cw-newhook" onsubmit={(e) => { e.preventDefault(); addHookToRef(); }}>
+        <input class="cw-nh-ref" bind:value={newRef} placeholder="#ref" spellcheck="false" />
+        <input class="cw-nh-hook" bind:value={newHook} placeholder="new hook (on_open…)" spellcheck="false" />
+        <button type="submit" title="Create hook and open it"><PlusIcon size={13} /></button>
+      </form>
       <div class="cw-tree">
         {#if loading}
           <div class="cw-dim">Loading…</div>
@@ -214,6 +237,13 @@
   .cw-explorer { border-right: 1px solid var(--border-default, #2a2419); background: var(--bg-surface, #17140f); display: flex; flex-direction: column; min-height: 0; }
   .cw-search { display: flex; align-items: center; gap: 7px; padding: 9px 11px; border-bottom: 1px solid var(--border-muted, #2a2419); color: var(--text-muted, #9a9186); }
   .cw-search input { flex: 1; background: none; border: none; color: var(--text-primary, #ece0c8); font: inherit; font-size: 12.5px; outline: none; }
+  .cw-newhook { display: flex; align-items: center; gap: 5px; padding: 7px 9px; border-bottom: 1px solid var(--border-muted, #2a2419); }
+  .cw-newhook input { background: var(--bg-primary, #12100c); border: 1px solid var(--border-default, #332c22); border-radius: 6px; color: var(--text-primary, #ece0c8); font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; padding: 4px 6px; outline: none; min-width: 0; }
+  .cw-newhook input:focus { border-color: var(--accent-amber, #c9956b); }
+  .cw-nh-ref { width: 48px; flex: none; }
+  .cw-nh-hook { flex: 1; }
+  .cw-newhook button { background: var(--bg-primary, #12100c); border: 1px solid var(--border-default, #332c22); border-radius: 6px; color: var(--text-muted, #9a9186); cursor: pointer; padding: 4px; line-height: 0; }
+  .cw-newhook button:hover { border-color: var(--accent-amber, #c9956b); color: var(--accent-amber, #c9956b); }
   .cw-tree { flex: 1; overflow-y: auto; padding: 6px 0 20px; }
   .cw-area { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent-amber, #c9956b); padding: 10px 12px 3px; }
   .cw-obj { font-size: 12px; color: var(--text-secondary, #b6a888); padding: 3px 12px 1px; font-weight: 600; }
