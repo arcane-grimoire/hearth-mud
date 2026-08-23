@@ -3019,14 +3019,13 @@ impl Engine {
         Ok((resolved, hook.to_string()))
     }
 
-    /// Record a version of `(obj_ref, hook)`'s source — see
-    /// docs/plans/program-authoring.md Stage 3. Called from the *authoring*
-    /// write paths only (`@program`, `@lib`, REST `SetProgram`, and the
-    /// loader's file installs). Never called for softcode's
+    /// Record a version of `(obj_ref, hook)`'s source. Called from the
+    /// *authoring* write paths only (`@program`, `@lib`, REST `SetProgram`, and
+    /// the loader's file installs). Never called for softcode's
     /// `Intent::SetProgram` — that path is instantiation (attaching
     /// behaviour to a procedurally generated object from a source that's
-    /// already a string constant under git), not authoring; see the plan's
-    /// "Instantiation is not authoring".
+    /// already a string constant under git), not authoring: instantiation is
+    /// not authoring, so it gets no version history.
     ///
     /// A DB write on every call site, but small, rare (author-driven, not
     /// per-tick), and off the hot request-handling path — the engine loop

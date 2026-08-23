@@ -33,35 +33,44 @@ Account created! Welcome, admin. [admin, builder, player]
 
 ## The starter world
 
-You start in Town Square with exits to the Market (north) and the Rusty
-Flagon tavern (east). There's a rusty sword on the ground and a mug of ale
-in the tavern.
+This is the **framework** repo — it ships no game content. With no `game_dir`
+configured, a fresh `cargo run` drops you into a single empty room described
+"An empty room. Build your world from here." To play a real world, point
+`game_dir` at one in `hearth.toml`, e.g.:
 
-Try: `look`, `north`, `south`, `east`, `get sword`, `inventory`, `examine sword`.
+```toml
+game_dir = "../the-last-stag-mud/world"
+spawn_room = "town/crossroads"   # <area>/<key> of the room to spawn in
+```
+
+Then `look` shows the loaded world and you can move with `north`/`n`/etc. The
+rest of this guide builds a small world from the empty-room default.
 
 ## Building
 
-As a builder, you can create new rooms and connect them:
+As a builder, you can create new rooms and connect them. Object refs are
+`#N` dbrefs — the create commands print the ref they just made, and you use
+that ref in later commands:
 
 ```
-@dig dungeon = The Dark Dungeon
-@open down = area/built/room/dungeon
-down
+@dig The Dark Dungeon        # prints e.g. "Room created: The Dark Dungeon (#12)"
+@open down = #12             # exit "down" from here to the new room
+down                         # move into it
 @describe A damp, dark dungeon. Water drips from the ceiling.
 look
 ```
 
-Create items:
+Create items (again, note the `#N` the command prints):
 
 ```
-@create torch = a flickering torch
-@describe area/built/item/torch = A crude torch that casts dancing shadows.
+@create a flickering torch   # prints e.g. "Item created: ... (#13)"
+@describe #13 = A crude torch that casts dancing shadows.
 ```
 
-Set attributes:
+Set attributes (`here` is the current room):
 
 ```
-@set area/built/item/torch/lit = true
+@set #13/lit = true
 @set here/mood = "eerie"
 ```
 
@@ -70,7 +79,7 @@ Set attributes:
 Attach Luau programs to objects to make them interactive:
 
 ```
-@program area/built/item/torch/cmd_light = function cmd_light(this, actor, room, args) if get_attr(this, "lit") then emit(actor, "It's already lit.") else set_attr(this, "lit", true) emit(actor, "You light the torch. Shadows dance on the walls.") emit_room(room, actor.display_name .. " lights a torch.", {actor.ref_id}) end end
+@program #13/cmd_light = function cmd_light(this, actor, room, args) if get_attr(this, "lit") then emit(actor, "It's already lit.") else set_attr(this, "lit", true) emit(actor, "You light the torch. Shadows dance on the walls.") emit_room(room, actor.display_name .. " lights a torch.", {actor.ref_id}) end end
 ```
 
 Now any player can type `light torch` and it works.
@@ -119,9 +128,9 @@ export HEARTH_TOKEN=<token>
 Then, from a normal editor + shell:
 
 ```sh
-hearth program get area/town/room/crossroads/on_look > look.luau
+hearth program get #5/on_look > look.luau        # ref is the #N dbref from `examine`
 $EDITOR look.luau
-hearth program set area/town/room/crossroads/on_look look.luau
+hearth program set #5/on_look look.luau
 ```
 
 The change is live immediately — no restart, no `@reload-world`. `hearth
@@ -166,8 +175,8 @@ recovery both work even for content that was only ever authored in-game.
 `load_world_files = false` turns off the automatic boot-time load, so
 startup reads only the database — `@import` becomes the only way file
 content ever reaches the DB. This is a deliberate, one-line switch a
-maintainer flips when ready (see `docs/plans/program-authoring.md` Stage
-4), not something this version of Hearth does on its own.
+maintainer flips when ready, not something this version of Hearth does on
+its own.
 
 ## Saving
 

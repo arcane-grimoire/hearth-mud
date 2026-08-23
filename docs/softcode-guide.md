@@ -147,13 +147,13 @@ Each object parameter is a table with the object's data:
 
 ```lua
 {
-  ref_id = "player/sam",
+  ref_id = "#5",
   key = "sam",
   kind = "player",
   title = "Sam",
   display_name = "Sam",
   description = "A traveler.",
-  location_ref = "area/starter/room/town_square",
+  location_ref = "#3",
   attrs = { hp = 100, class = "warrior" },
   tags = { "quest:worthy", "faction:guild" }
 }
@@ -241,8 +241,8 @@ changes immediately within the same script.
 | `get_nearby(room, x, y, radius)` | table | All objects in `room` whose `_x`/`_y` attrs are within `radius` |
 | `get_rooms_in_radius(room, distance)` | table | BFS walk through exits, returns `{ {ref, distance, name}, ... }`. Respects `muffle` and `blocked_sound` exit attrs. |
 
-The `ref` argument can be either a ref string (`"area/starter/item/sword"`) or
-an object table (like `this` or `actor`). Both work everywhere.
+The `ref` argument can be either a dbref string (`"#5"`) or an object table
+(like `this` or `actor`). Both work everywhere.
 
 ## Predicates
 
@@ -329,8 +329,10 @@ how you build connected machinery, puzzles, and chain reactions.
 function cmd_pull(this, actor, room, args)
   emit(actor, "You pull the lever. A grinding sound echoes.")
   emit_room(room, actor.display_name .. " pulls the lever.", {actor.ref_id})
-  set_attr("area/dungeon/item/gate", "open", true)
-  trigger("area/dungeon/item/gate", "on_activate")
+  -- resolve the gate by its file key (a #N dbref would be brittle in an example)
+  local gate = resolve_key("dungeon/gate")
+  set_attr(gate, "open", true)
+  trigger(gate, "on_activate")
 end
 ```
 
@@ -397,7 +399,7 @@ Timers are persisted to the database and survive server restarts. Use
 | `emit_nearby(room, x, y, radius, message, exclude?)` | Send to players in `room` whose `_x`/`_y` attrs are within `radius`. For coordinate-based shared rooms. |
 | `emit_radius(room, distance, messages, exclude?)` | BFS walk through exits, delivers distance-keyed messages to players in reached rooms. |
 | `emit_data(ref, channel, data)` | Send structured JSON to a player's web client (see Widgets below). |
-| `prompt(ref, message)` | Prompt a player for input (fires `on_reply` with their response). |
+| `prompt(actor, obj, hook)` | Arm a one-shot input prompt: the actor's next line fires `hook` on `obj` instead of running as a command. (Stores `_prompt_object`/`_prompt_hook` on the actor.) |
 | `log(message)` | Write to the server log. |
 
 ### emit_radius — multi-room propagation
@@ -633,10 +635,10 @@ Combinators: `AND`, `OR`, `NOT`, parentheses.
 ### Builder commands for locks
 
 ```
-@lock area/starter/exit/square_to_tavern/traverse = has_tag(vip) OR perm(builder)
-@lock area/starter/item/rusty_sword/get = in_inventory(quest:key)
+@lock #8/traverse = has_tag(vip) OR perm(builder)
+@lock #12/get = in_inventory(quest:key)
 @lock here/enter = NOT is_kind(npc)
-@unlock area/starter/exit/square_to_tavern/traverse
+@unlock #8/traverse
 @locks                        -- locks on current room
 @locks <ref>                  -- locks on a specific object/exit
 ```
@@ -783,8 +785,7 @@ would, one write per Program, each versioned exactly like an authored write
 Full semantics — the four-case upgrade reconciliation, the recorded/current/
 incoming three-way comparison that resolves a conflicting edit, and why a
 conflict is always non-destructive — are in
-[the Command Reference](commands.md#import--export) and
-`docs/plans/program-authoring.md` Stage 4. The short version for softcode
+[the Command Reference](commands.md#import--export). The short version for softcode
 authors: a Program you write by hand in `@import`'s bundle and a Program you
 author with `@program`/`@lib` end up completely indistinguishable once
 installed — same version log, same `origin`-free representation. Re-importing

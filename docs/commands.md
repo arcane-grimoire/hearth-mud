@@ -9,8 +9,10 @@
 | `go <direction>` | or just type the direction (`n`, `north`, etc.) | Move through an exit |
 | `say <message>` | `"<message>` | Say something to the room |
 | `emote <action>` | `pose`, `:<action>` | Emote (shows "Name action") |
+| `whisper <player> <message>` | | Send a private message to one player (fires `on_whisper`) |
 | `get <item>` | `take` | Pick up an item |
 | `drop <item>` | | Drop an item you're carrying |
+| `put <item> in <container>` | `place` | Put an item into a container |
 | `use <target>` | | Use an object (fires `can_use`/`on_use`) |
 | `inventory` | `inv`, `i` | List what you're carrying |
 | `examine <target>` | `ex` | Examine an object (shows ref, attrs, tags) |
@@ -26,9 +28,9 @@ Require the `builder` scope. Use `@` prefix (MUSH convention).
 
 | Command | Description |
 |---------|-------------|
-| `@dig <key> = <title>` | Create a new room |
+| `@dig <title>` | Create a new room (its key is derived from the title) |
 | `@open <direction> = <room_ref>` | Create an exit from the current room |
-| `@create <key> = <title>` | Create an item in the current room |
+| `@create <title>` | Create an item in the current room (key derived from title) |
 | `@destroy <ref>` | Destroy an object (not players, not occupied rooms) |
 
 ### Editing
@@ -176,8 +178,7 @@ the `load_world_files` config option that controls file loading at boot).
 `@import` and `@export` are the explicit, admin-only crossing of that
 boundary in each direction — installing a TOML+`.luau` bundle into the
 database, and writing DB-owned content back out to the same format. See
-[Program version history](softcode-guide.md#program-version-history) and
-`docs/plans/program-authoring.md` Stage 4 for the full design.
+[Program version history](softcode-guide.md#program-version-history).
 
 ```
 @import <path> [--dry-run]
@@ -207,8 +208,7 @@ same bundle twice does not create duplicates — a second import is an
   import — the local edit is **kept**, nothing is overwritten.
 - In the DB (under one of the bundle's areas) but no longer in the bundle —
   **reported, never removed**. Auto-deleting on a file mismatch is exactly
-  the bug this whole mechanism exists to prevent (see
-  `docs/plans/program-authoring.md`'s "Superseded" section).
+  the bug this whole mechanism exists to prevent.
 
 **Two things refuse the whole import before anything is written:** the same
 identity declared twice within one bundle, and the same `cmd_` hook name
@@ -275,9 +275,8 @@ the `hearth-mud` binary doubles as a thin CLI client over the REST API, so
 softcode (and whole bundles) can be authored in a normal editor and pushed to
 an already-running server without a restart or `@reload-world`. This is a
 *client* — it does not start a server, and it only works against one that's
-already up. `hearth import` from the shell is the primary dev loop this
-plan is built around — see `docs/plans/program-authoring.md` Stage 4's "The
-dev loop: a CLI, not an overwrite mode."
+already up. `hearth import` from the shell is the primary dev loop: a CLI
+push, not a boot-time overwrite mode.
 
 ```sh
 hearth eval [FILE]                       # run one-shot Luau; stdin if FILE is '-' or omitted
@@ -329,10 +328,11 @@ CLI introduces — unrelated to `HEARTH_GAME_DIR`, which is test-only.
 
 ```sh
 # From an editor save hook: push the file straight to the live object.
-hearth program set area/town/room/crossroads/on_look crossroads_look.luau --addr localhost:8000
+# The ref is the object's #N dbref (from `examine`) plus the hook name.
+hearth program set #5/on_look crossroads_look.luau --addr localhost:8000
 
 # Pull current source down to edit locally.
-hearth program get area/town/room/crossroads/on_look > crossroads_look.luau
+hearth program get #5/on_look > crossroads_look.luau
 
 # One-shot data fixups, same job as @eval:
 hearth eval fixup.luau
@@ -345,20 +345,23 @@ syntax-checked identically — see
 
 ## Object refs
 
-Objects are identified by ref strings following the pattern:
+Every object — rooms, items, NPCs, exits, players, file-loaded content — is
+identified by an auto-assigned integer **dbref** of the form `#N`:
 
 ```
-area/<area>/<kind>/<key>
+#1
+#42
+#357
 ```
 
-Examples:
-- `area/starter/room/town_square`
-- `area/built/item/magic_sword`
-- `player/sam`
+Use `examine` to see an object's ref (it prints `Ref: #N`); builder commands
+that create objects print the ref of what they created. Use `here` as a
+shortcut for the current room in `@set`, `@tag`, `@lock`.
 
-Use `examine` to see an object's ref. Builder commands that create objects
-will print the ref of what they created. Use `here` as a shortcut for the
-current room in `@set`, `@tag`, `@lock`.
+File-loaded content also carries an area/key file identity (stored as a
+`_file_key` attr, used for export and reload), and softcode can resolve a
+path-style key to a dbref with `resolve_key("area/key")` — but the ref you
+pass to commands is always the `#N` dbref.
 
 ## Access
 

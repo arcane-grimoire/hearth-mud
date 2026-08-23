@@ -221,7 +221,7 @@ g:flood_fill(x, y, old, new)            -- fill connected region → count
 
 `generate_dungeon` stores a layout grid on the entrance room (`dungeon_layout` attr) mapping grid positions to room refs.
 
-## Read API (20 functions + 1 value)
+## Read API (22 functions + 1 value)
 
 All accept either an object table or a ref string (`"#5"`). `get_attr`, `has_attr`, and `pick` see pending writes from the current script (read-your-writes).
 
@@ -234,6 +234,7 @@ All accept either an object table or a ref string (`"#5"`). `get_attr`, `has_att
 | `has_tag(ref, "cat:key")` | bool | Whether tag exists |
 | `get_tags(ref)` | table | List of tag specs |
 | `get_room_contents(ref)` | table | Non-exit objects in room |
+| `get_contents(ref)` | table | Item objects located in ref (a container's contents) |
 | `get_exits(ref)` | table | Exits from room |
 | `get_location(ref)` | table or nil | Object's location |
 | `kind_of(ref)` | string or nil | "room", "item", "npc", "player", "exit" |
@@ -244,6 +245,7 @@ All accept either an object table or a ref string (`"#5"`). `get_attr`, `has_att
 | `get_inventory(ref)` | table | Items located in ref |
 | `get_players_in_room(room)` | table | Online players in room |
 | `get_all_by_kind("npc")` | table | All objects of kind |
+| `all_objects()` | table | Every object's ref_id in the world (flat list of ref strings) |
 | `get_tick` | number | Current engine tick count (a value, not a function). Use for cooldowns, time-based logic. |
 | `resolve_key(file_key)` | string or nil | Returns ref_id for a TOML-defined object by file key (e.g. `"town/crossroads"`) |
 | `get_owner(ref)` | string or nil | Owner's ref_id |
@@ -270,7 +272,7 @@ All accept either an object table or a ref string (`"#5"`). `get_attr`, `has_att
 | `get_nearby(room, x, y, radius)` | table | All objects in `room` whose `_x`/`_y` attrs are within `radius` of the given coords |
 | `get_rooms_in_radius(room, distance)` | table | BFS walk through exits, returns `{ {ref, distance, name}, ... }`. Respects `muffle` and `blocked_sound` exit attrs. |
 
-## Write API (20 functions)
+## Write API (24 functions)
 
 All queue Intents — nothing happens until the script returns and the batch applies.
 
@@ -289,6 +291,7 @@ All queue Intents — nothing happens until the script returns and the batch app
 | `set_tag(ref, "cat:key")` | Add tag |
 | `unset_tag(ref, "cat:key")` | Remove tag |
 | `spawn({key, kind, title, description, location})` | Create new object, returns dbref |
+| `create_exit({source, direction, target, aliases?})` | Create an exit from the source room to the target, returns dbref |
 | `set_title(ref, title)` | Change title |
 | `set_description(ref, desc)` | Change description |
 | `set_owner(ref, owner_ref)` | Set the object's owner |
