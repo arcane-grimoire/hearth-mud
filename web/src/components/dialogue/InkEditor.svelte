@@ -21,7 +21,20 @@
   let errors = $state(null);
   let showPlaytest = $state(true);
   let wiring = $state(false);
+  // 'rich' = full editor (highlight + lint + autocomplete); 'raw' = highlight
+  // only, distraction-free. `broken` flips on if CodeMirror can't start at all,
+  // dropping to a plain <textarea> that always works.
+  let mode = $state('rich');
+  let broken = $state(false);
   const dirty = $derived(source !== original);
+  const showPlay = $derived(mode === 'rich' && showPlaytest && !broken);
+
+  function rawKeydown(e) {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      save();
+    }
+  }
 
   // Note the leading `-> start`: Ink begins at the top of the file, so a
   // script that opens with a knot header needs a divert into it or nothing
@@ -102,12 +115,20 @@
     <span class="sub">dialogue</span>
     {#if dirty}<span class="dot">● unsaved</span>{/if}
     <span class="sp"></span>
+    {#if !broken}
+      <div class="seg" role="group" aria-label="Editor mode">
+        <button class="seg-b" class:on={mode === 'rich'} onclick={() => (mode = 'rich')} title="Highlighting, linting, autocomplete">Rich</button>
+        <button class="seg-b" class:on={mode === 'raw'} onclick={() => (mode = 'raw')} title="Highlighting only — no lint or autocomplete">Raw</button>
+      </div>
+    {/if}
     <button class="btn" onclick={wireUp} disabled={wiring} title="Give this NPC cmd_talk + on_dialog_choice hooks">
       <PlugIcon size={13} /> {wiring ? '…' : 'Wire up NPC'}
     </button>
-    <button class="btn" class:on={showPlaytest} onclick={() => (showPlaytest = !showPlaytest)} title="Toggle playtest pane">
-      <PanelRightIcon size={13} /> Playtest
-    </button>
+    {#if mode === 'rich' && !broken}
+      <button class="btn" class:on={showPlaytest} onclick={() => (showPlaytest = !showPlaytest)} title="Toggle playtest pane">
+        <PanelRightIcon size={13} /> Playtest
+      </button>
+    {/if}
     <button class="btn save" onclick={save} disabled={saving || !dirty}>
       <SaveIcon size={13} /> {saving ? '…' : 'Save'}
     </button>
@@ -116,11 +137,20 @@
   {#if loading}
     <div class="none">Loading…</div>
   {:else}
-    <div class="split" class:solo={!showPlaytest}>
+    <div class="split" class:solo={!showPlay}>
       <div class="edit-col">
-        {#key refId}
-          <InkCodeEditor bind:value={source} onsave={save} />
-        {/key}
+        {#if broken}
+          <textarea class="raw-fallback" bind:value={source} onkeydown={rawKeydown} spellcheck="false"
+            placeholder="=== start ===&#10;Hello, traveller.&#10;+ [Leave] -> END"></textarea>
+          <div class="fallback-note">
+            The rich editor couldn't load — editing as plain text (⌘S saves).
+            <button class="retry" onclick={() => (broken = false)}>Try rich editor again</button>
+          </div>
+        {:else}
+          {#key `${refId}:${mode}`}
+            <InkCodeEditor bind:value={source} onsave={save} minimal={mode === 'raw'} onfail={() => (broken = true)} />
+          {/key}
+        {/if}
         {#if errors}
           <div class="err"><b>Compile errors</b><pre>{typeof errors === 'string' ? errors : JSON.stringify(errors, null, 2)}</pre></div>
         {/if}
@@ -128,7 +158,7 @@
           <button class="seed" onclick={() => (source = SAMPLE)}>Insert a sample conversation</button>
         {/if}
       </div>
-      {#if showPlaytest}
+      {#if showPlay}
         <div class="play-col">
           {#key refId}
             <PlaytestPane {refId} {source} />
@@ -153,6 +183,17 @@
   .btn.on { color: var(--accent-amber, #c9956b); border-color: color-mix(in srgb, var(--accent-amber, #c9956b) 45%, transparent); }
   .btn.save { background: color-mix(in srgb, var(--accent-amber, #c9956b) 16%, transparent); border-color: color-mix(in srgb, var(--accent-amber, #c9956b) 45%, transparent); color: var(--accent-amber, #c9956b); }
   .btn.save:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-amber, #c9956b) 26%, transparent); }
+
+  .seg { display: inline-flex; border: 1px solid var(--border-default, #332c22); border-radius: 7px; overflow: hidden; }
+  .seg-b { background: var(--bg-primary, #12100c); border: none; color: var(--text-muted, #8c8378); cursor: pointer; font: inherit; font-size: 11.5px; padding: 5px 11px; }
+  .seg-b + .seg-b { border-left: 1px solid var(--border-default, #332c22); }
+  .seg-b:hover { color: var(--text-primary, #ece0c8); }
+  .seg-b.on { background: color-mix(in srgb, var(--accent-amber, #c9956b) 18%, transparent); color: var(--accent-amber, #c9956b); }
+
+  .raw-fallback { flex: 1; min-height: 0; width: 100%; resize: none; background: var(--bg-primary, #12100c); color: var(--text-primary, #ece0c8); border: none; padding: 12px 14px; outline: none; font-family: var(--font-mono, ui-monospace, monospace); font-size: 13px; line-height: 1.6; }
+  .fallback-note { display: flex; align-items: center; gap: 10px; flex: none; border-top: 1px solid var(--border-default, #2a2419); background: color-mix(in srgb, var(--accent-amber, #c9956b) 8%, transparent); padding: 7px 12px; font-size: 11.5px; color: var(--text-muted, #9a9186); }
+  .retry { margin-left: auto; background: none; border: 1px solid var(--border-default, #332c22); color: var(--text-secondary, #b6a888); border-radius: 6px; padding: 3px 9px; cursor: pointer; font: inherit; font-size: 11px; }
+  .retry:hover { border-color: var(--accent-amber, #c9956b); color: var(--text-primary, #ece0c8); }
 
   .split { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 380px; }
   .split.solo { grid-template-columns: 1fr; }

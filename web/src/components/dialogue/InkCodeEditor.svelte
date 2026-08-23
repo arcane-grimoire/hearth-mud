@@ -13,7 +13,12 @@
   // The Ink counterpart to code/CodeEditor.svelte — same shell (theme built
   // from kit-ui tokens, Mod-S to save, external-value sync), but with the Ink
   // language mode, Ink autocomplete, and a linter backed by `ink_compile`.
-  let { value = $bindable(''), onsave = () => {}, onchange = () => {} } = $props();
+  //
+  // `minimal` strips the linter and autocomplete for a distraction-free "raw"
+  // mode — highlighting only, nothing that pops up or underlines as you type.
+  // `onfail` fires if CodeMirror can't initialise, so the parent can drop to a
+  // plain-textarea fallback instead of showing a dead pane.
+  let { value = $bindable(''), onsave = () => {}, onchange = () => {}, minimal = false, onfail = () => {} } = $props();
 
   let host;
   let view;
@@ -73,29 +78,37 @@
   ]);
 
   onMount(() => {
-    view = new EditorView({
-      parent: host,
-      state: EditorState.create({
-        doc: value,
-        extensions: [
-          basicSetup,
-          StreamLanguage.define(inkStreamParser),
-          syntaxHighlighting(inkHighlight),
-          autocompletion({ override: [inkComplete] }),
-          inkLinter,
-          lintGutter(),
-          saveKeymap,
-          inkTheme,
-          EditorView.updateListener.of((u) => {
-            if (!u.docChanged || syncing) return;
-            syncing = true;
-            value = u.state.doc.toString();
-            onchange(value);
-            syncing = false;
-          }),
-        ],
-      }),
-    });
+    // Smart extensions (autocomplete + engine-backed lint) are omitted in
+    // `minimal` mode, leaving highlighting and the save keymap.
+    const smart = minimal
+      ? []
+      : [autocompletion({ override: [inkComplete] }), inkLinter, lintGutter()];
+    try {
+      view = new EditorView({
+        parent: host,
+        state: EditorState.create({
+          doc: value,
+          extensions: [
+            basicSetup,
+            StreamLanguage.define(inkStreamParser),
+            syntaxHighlighting(inkHighlight),
+            ...smart,
+            saveKeymap,
+            inkTheme,
+            EditorView.updateListener.of((u) => {
+              if (!u.docChanged || syncing) return;
+              syncing = true;
+              value = u.state.doc.toString();
+              onchange(value);
+              syncing = false;
+            }),
+          ],
+        }),
+      });
+    } catch (e) {
+      console.error('Ink editor failed to initialise', e);
+      onfail();
+    }
     return () => view?.destroy();
   });
 
