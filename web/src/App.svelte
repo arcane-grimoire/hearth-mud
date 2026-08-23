@@ -4,9 +4,7 @@
   import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
   import SettingsIcon from '@lucide/svelte/icons/settings';
   import DatabaseIcon from '@lucide/svelte/icons/database';
-  import MapIcon from '@lucide/svelte/icons/map';
   import WrenchIcon from '@lucide/svelte/icons/wrench';
-  import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
   import Maximize2 from '@lucide/svelte/icons/maximize-2';
   import Minimize2 from '@lucide/svelte/icons/minimize-2';
   import Output from './components/Output.svelte';
@@ -34,7 +32,6 @@
   let editingEntity = $state(null);
   let settingsOpen = $state(false);
   let adminOpen = $state(false);
-  let mapsOpen = $state(false);
   let panelFull = $state(false);
   let toolsOpen = $state(false);
   let ws;
@@ -113,11 +110,9 @@
   }
 
   function sendCommand(cmd) { handleCommand(cmd); }
-  function openEditor(entity) { editingEntity = entity; adminOpen = false; mapsOpen = false; }
+  function openEditor(entity) { editingEntity = entity; adminOpen = false; }
   function closeEditor() { editingEntity = null; }
-  function toggleAdmin() { adminOpen = !adminOpen; editingEntity = null; mapsOpen = false; toolsOpen = false; }
-  function openMaps() { mapsOpen = true; adminOpen = false; editingEntity = null; toolsOpen = false; }
-  function closeMaps() { mapsOpen = false; }
+  function toggleAdmin() { adminOpen = !adminOpen; editingEntity = null; toolsOpen = false; }
   function toggleSidebar() { sidebarOpen = !sidebarOpen; }
   function setAutocomplete(val) { autocomplete = val; localStorage.setItem('hearth-autocomplete', val); }
 
@@ -196,21 +191,9 @@
     }
   }
 
-  // Auto-clear full screen when no panel is open, and let the embedded map
-  // builder (a same-origin iframe) drive full-screen/Esc via postMessage, since
-  // its own keydowns don't reach this document.
+  // Auto-clear full screen when no panel is open.
   $effect(() => {
-    if (!mapsOpen && !adminOpen && !editingEntity) panelFull = false;
-  });
-  $effect(() => {
-    const onMsg = (e) => {
-      if (e.origin !== location.origin) return;
-      const t = e.data?.type;
-      if (t === 'mapwright:toggle-fullscreen') panelFull = !panelFull;
-      else if (t === 'mapwright:esc') { if (panelFull) panelFull = false; else closeMaps(); }
-    };
-    window.addEventListener('message', onMsg);
-    return () => window.removeEventListener('message', onMsg);
+    if (!adminOpen && !editingEntity) panelFull = false;
   });
 
   $effect(() => {
@@ -248,9 +231,6 @@
                 <DatabaseIcon size={14} /> World admin
               </button>
               {#if isAdmin}
-                <button class="tools-item" role="menuitem" onclick={openMaps}>
-                  <MapIcon size={14} /> Map builder
-                </button>
                 <button class="tools-item" role="menuitem" onclick={openRoomBuilder}>
                   <WaypointsIcon size={14} /> Room builder
                 </button>
@@ -265,7 +245,7 @@
           {/if}
         </div>
       {/if}
-      {#if mapsOpen || adminOpen || editingEntity}
+      {#if adminOpen || editingEntity}
         <IconButton ariaLabel={panelFull ? 'Exit full screen' : 'Full screen'} size="sm" onclick={() => panelFull = !panelFull}>
           {#if panelFull}<Minimize2 size={14} />{:else}<Maximize2 size={14} />{/if}
         </IconButton>
@@ -291,16 +271,7 @@
 
   <div class="main">
     <Output bind:this={output} oncommand={handleCommand} />
-    {#if mapsOpen}
-      <div class="pane maps-view" class:full={panelFull}>
-        <div class="maps-back">
-          <IconButton ariaLabel="Back to game" size="sm" onclick={closeMaps}>
-            <ArrowLeftIcon size={14} />
-          </IconButton>
-        </div>
-        <iframe class="maps-frame" src="/builder?embed=1" title="Map builder"></iframe>
-      </div>
-    {:else if adminOpen}
+    {#if adminOpen}
       <div class="pane" class:full={panelFull}>
         <Admin onclose={() => adminOpen = false} />
       </div>
@@ -408,17 +379,13 @@
   .tools-item.unified { color: var(--accent-amber, #c9956b); font-weight: 600; }
   .tools-badge { margin-left: auto; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; background: color-mix(in srgb, var(--accent-amber, #c9956b) 18%, transparent); color: var(--accent-amber, #c9956b); border-radius: 8px; padding: 1px 6px; }
 
-  /* embedded map builder fills the main area; the app supplies the back button */
-  /* a panel (map builder, admin, or entity editor) that can go full screen */
+  /* a panel (admin or entity editor) that can go full screen */
   .pane { display: flex; min-width: 0; }
-  .maps-view.pane { position: relative; flex: 1; }
   /* full screen: fill the window below the top bar, so the exit toggle up
-     there stays reachable — works for every panel, not just the map builder */
+     there stays reachable */
   .pane.full { position: fixed; inset: 44px 0 0 0; z-index: 100; background: var(--bg-primary); }
   .pane.full :global(.admin),
   .pane.full :global(.editor) { width: 100%; max-width: 100%; min-width: 0; flex: 1; }
-  .maps-frame { flex: 1; width: 100%; height: 100%; border: 0; background: var(--bg-primary); }
-  .maps-back { position: absolute; top: 6px; left: 7px; z-index: 5; }
 
   @media (max-width: 700px) {
     .main :global(.sidebar),
