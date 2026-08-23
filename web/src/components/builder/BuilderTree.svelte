@@ -1,0 +1,171 @@
+<script>
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import FolderIcon from '@lucide/svelte/icons/folder';
+  import FileCodeIcon from '@lucide/svelte/icons/file-code';
+  import Grid3x3Icon from '@lucide/svelte/icons/grid-3x3';
+  import PlusIcon from '@lucide/svelte/icons/plus';
+
+  // VS Code-style explorer: area (folder) → object → its hooks (files), plus a
+  // "Maps" folder for the tile/terrain maps. Stays pinned on the left while you
+  // edit. Clicking an object selects it; a hook opens the code editor; a map
+  // opens the map builder — all as tabs.
+  let {
+    objects = [],
+    selectedRef = null,
+    activeHook = null,
+    maps = [],
+    activeMap = null,
+    onselect = () => {},
+    onopenhook = () => {},
+    onopenmap = () => {},
+    onnewmap = () => {},
+  } = $props();
+
+  let mapsOpen = $state(true);
+
+  // Objects grouped into area "folders", each sorted by name.
+  const grouped = $derived.by(() => {
+    const m = new Map();
+    for (const o of objects) {
+      const a = o.area || 'unfiled';
+      if (!m.has(a)) m.set(a, []);
+      m.get(a).push(o);
+    }
+    return [...m.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([area, objs]) => [area, objs.sort((x, y) => (x.title || x.key || '').localeCompare(y.title || y.key || ''))]);
+  });
+
+  // Expansion state. Areas open by default (collapsed set); objects closed by
+  // default (expanded set) — most objects have no hooks worth unfolding.
+  let collapsedAreas = $state(new Set());
+  let expandedObjs = $state(new Set());
+
+  function toggleArea(a) {
+    const n = new Set(collapsedAreas);
+    n.has(a) ? n.delete(a) : n.add(a);
+    collapsedAreas = n;
+  }
+  function clickObject(o) {
+    onselect(o.ref_id);
+    if (o.hooks?.length) {
+      const n = new Set(expandedObjs);
+      n.has(o.ref_id) ? n.delete(o.ref_id) : n.add(o.ref_id);
+      expandedObjs = n;
+    }
+  }
+  function kindClass(k) {
+    return ({ room: 'k-room', npc: 'k-npc', item: 'k-item', player: 'k-player', code: 'k-code', exit: 'k-exit' })[k] || '';
+  }
+</script>
+
+<div class="tree">
+  <!-- Maps folder — the tile/terrain maps live alongside object areas. -->
+  <div class="area maps-folder">
+    <button class="area-btn" onclick={() => (mapsOpen = !mapsOpen)}>
+      <span class="chev" class:open={mapsOpen}><ChevronRight size={12} /></span>
+      <FolderIcon size={13} />
+      <span class="area-name">Maps</span>
+      <span class="area-count">{maps.length}</span>
+    </button>
+    <button class="area-add" title="Map builder (new / all)" onclick={onnewmap}><PlusIcon size={12} /></button>
+  </div>
+  {#if mapsOpen}
+    {#each maps as m}
+      <button class="map-leaf" class:active={m === activeMap} onclick={() => onopenmap(m)}>
+        <Grid3x3Icon size={12} />
+        <span class="hook-name">{m}</span>
+      </button>
+    {/each}
+    {#if maps.length === 0}<div class="none sub">No maps yet</div>{/if}
+  {/if}
+
+  {#each grouped as [area, objs]}
+    <button class="area" onclick={() => toggleArea(area)}>
+      <span class="chev" class:open={!collapsedAreas.has(area)}><ChevronRight size={12} /></span>
+      <FolderIcon size={13} />
+      <span class="area-name">{area}</span>
+      <span class="area-count">{objs.length}</span>
+    </button>
+    {#if !collapsedAreas.has(area)}
+      {#each objs as o (o.ref_id)}
+        <button class="obj" class:sel={o.ref_id === selectedRef} onclick={() => clickObject(o)}>
+          {#if o.hooks?.length}
+            <span class="chev sm" class:open={expandedObjs.has(o.ref_id)}><ChevronRight size={11} /></span>
+          {:else}
+            <span class="chev sm spacer"></span>
+          {/if}
+          <span class="kb {kindClass(o.kind)}">{o.kind.slice(0, 3)}</span>
+          <span class="obj-name">{o.title || o.key}</span>
+          {#if o.hooks?.length}<span class="obj-count">{o.hooks.length}</span>{/if}
+        </button>
+        {#if expandedObjs.has(o.ref_id)}
+          {#each [...o.hooks].sort() as h}
+            <button
+              class="hook"
+              class:active={o.ref_id === selectedRef && h === activeHook}
+              onclick={() => onopenhook(o.ref_id, h)}
+            >
+              <FileCodeIcon size={12} />
+              <span class="hook-name">{h}</span>
+            </button>
+          {/each}
+        {/if}
+      {/each}
+    {/if}
+  {/each}
+  {#if grouped.length === 0}
+    <div class="none">No objects match.</div>
+  {/if}
+</div>
+
+<style>
+  .tree { height: 100%; overflow-y: auto; padding: 4px 0 20px; font-size: 12.5px; }
+  button { display: flex; align-items: center; gap: 5px; width: 100%; text-align: left; background: none; border: none; cursor: pointer; font: inherit; }
+  .chev { display: inline-flex; color: var(--text-muted, #8c8378); transition: transform 0.12s; flex: none; }
+  .chev.open { transform: rotate(90deg); }
+  .chev.sm { width: 12px; }
+  .chev.spacer { width: 12px; }
+
+  .area { padding: 5px 10px; color: var(--text-secondary, #b6a888); font-weight: 600; }
+  .area:hover { background: var(--bg-primary, #12100c); }
+  .area :global(svg) { color: var(--accent-amber, #c9956b); }
+
+  /* Maps folder: a folder row with an inline "+" (map builder). */
+  .maps-folder { display: flex; align-items: center; padding: 0; }
+  .maps-folder:hover { background: var(--bg-primary, #12100c); }
+  .area-btn { flex: 1; padding: 5px 10px; color: var(--text-secondary, #b6a888); font-weight: 600; }
+  .area-btn :global(svg) { color: var(--accent-amber, #c9956b); }
+  .area-add { width: auto; flex: none; padding: 4px 9px; color: var(--text-muted, #8c8378); }
+  .area-add:hover { color: var(--accent-amber, #c9956b); }
+  .map-leaf { padding: 4px 10px 4px 30px; color: var(--text-muted, #9a9186); font-size: 12px; }
+  .map-leaf:hover { background: var(--bg-primary, #12100c); color: var(--text-primary, #ece0c8); }
+  .map-leaf.active { background: color-mix(in srgb, var(--accent-amber, #c9956b) 16%, transparent); color: var(--accent-amber, #c9956b); }
+  .map-leaf :global(svg) { color: var(--accent-green, #8fb877); flex: none; }
+  .map-leaf.active :global(svg) { color: var(--accent-amber, #c9956b); }
+  .none.sub { padding-left: 30px; font-size: 11px; }
+  .area-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: capitalize; }
+  .area-count { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; color: var(--text-muted, #8c8378); }
+
+  .obj { padding: 4px 10px 4px 16px; color: var(--text-primary, #ece0c8); }
+  .obj:hover { background: var(--bg-primary, #12100c); }
+  .obj.sel { background: color-mix(in srgb, var(--accent-amber, #c9956b) 14%, transparent); }
+  .obj.sel .obj-name { color: var(--accent-amber, #c9956b); }
+  .obj-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .obj-count { font-family: var(--font-mono, ui-monospace, monospace); font-size: 9px; color: var(--accent-green, #8fb877); background: rgba(143,184,119,0.14); border-radius: 7px; padding: 0 5px; }
+  .kb { font-family: var(--font-mono, ui-monospace, monospace); font-size: 8px; font-weight: 700; text-transform: uppercase; padding: 1px 3px; border-radius: 3px; flex: none; }
+  .k-room { background: rgba(86,182,194,0.15); color: var(--accent-teal, #56b6c2); }
+  .k-npc { background: rgba(201,149,107,0.15); color: var(--accent-amber, #c9956b); }
+  .k-item { background: rgba(97,175,239,0.15); color: var(--accent-blue, #61afef); }
+  .k-player { background: rgba(198,120,221,0.15); color: var(--accent-purple, #c678dd); }
+  .k-code { background: rgba(143,184,119,0.15); color: var(--accent-green, #8fb877); }
+  .k-exit { background: rgba(255,255,255,0.08); color: var(--text-muted, #9a9186); }
+
+  .hook { padding: 3px 10px 3px 40px; color: var(--text-muted, #9a9186); font-family: var(--font-mono, ui-monospace, monospace); font-size: 11.5px; }
+  .hook:hover { background: var(--bg-primary, #12100c); color: var(--text-primary, #ece0c8); }
+  .hook :global(svg) { color: var(--accent-blue, #6ea3d0); flex: none; }
+  .hook.active { background: color-mix(in srgb, var(--accent-amber, #c9956b) 16%, transparent); color: var(--accent-amber, #c9956b); }
+  .hook.active :global(svg) { color: var(--accent-amber, #c9956b); }
+  .hook-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .none { color: var(--text-muted, #8c8378); font-style: italic; padding: 12px; }
+</style>

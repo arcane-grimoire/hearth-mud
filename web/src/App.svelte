@@ -21,6 +21,7 @@
   import WaypointsIcon from '@lucide/svelte/icons/waypoints';
   import CodeIcon from '@lucide/svelte/icons/code';
   import ShieldIcon from '@lucide/svelte/icons/shield-alert';
+  import LayersIcon from '@lucide/svelte/icons/layers';
 
   let output;
   let status = $state('connecting');
@@ -158,13 +159,25 @@
   });
   function openWorldCheck() { navigate('/builder/problems'); toolsOpen = false; }
 
+  // Unified builder workspace (/builder/workspace) — the IDE prototype: one
+  // shell with a shared selection driving table/map + properties/hooks/dialogue.
+  // Lazy-loaded like the other builder routes.
+  let onWorkspaceRoute = $derived(matches('/builder/workspace'));
+  let BuilderWorkspace = $state(null);
+  $effect(() => {
+    if (onWorkspaceRoute && !BuilderWorkspace) {
+      import('./components/BuilderWorkspace.svelte').then((m) => { BuilderWorkspace = m.default; });
+    }
+  });
+  function openWorkspace() { navigate('/builder/workspace'); toolsOpen = false; }
+
   // Playtest console — a live game terminal riding on top of the builder
   // routes, wired to the real command loop (handleCommand). `feed` mirrors the
   // game output. `jumpRef` teleports the test character to the room in focus.
   let feed = $state([]);
   let consoleOpen = $state(false);
   let PlaytestConsole = $state(null);
-  let onAnyBuilder = $derived(onBuilderRoute || onCodeRoute || onProblemsRoute);
+  let onAnyBuilder = $derived(onBuilderRoute || onCodeRoute || onProblemsRoute || onWorkspaceRoute);
   let jumpRef = $derived(route.query.focus || route.query.ref || '');
   $effect(() => {
     if (consoleOpen && !PlaytestConsole) {
@@ -228,6 +241,9 @@
           {#if toolsOpen}
             <button class="tools-backdrop" aria-label="Close menu" onclick={() => toolsOpen = false}></button>
             <div class="tools-dropdown" role="menu">
+              <button class="tools-item unified" role="menuitem" onclick={openWorkspace}>
+                <LayersIcon size={14} /> Builder <span class="tools-badge">unified</span>
+              </button>
               <button class="tools-item" role="menuitem" onclick={toggleAdmin}>
                 <DatabaseIcon size={14} /> World admin
               </button>
@@ -314,6 +330,10 @@
   <WorldCheck onexit={() => navigate('/')} />
 {/if}
 
+{#if onWorkspaceRoute && BuilderWorkspace}
+  <BuilderWorkspace onexit={() => navigate('/')} />
+{/if}
+
 {#if onAnyBuilder && !consoleOpen}
   <button class="pt-toggle" onclick={() => (consoleOpen = true)} title="Open playtest console">
     <TerminalIcon size={15} /> Playtest
@@ -385,6 +405,8 @@
     font-size: var(--font-size-md); text-align: left; cursor: pointer;
   }
   .tools-item:hover { background: var(--bg-surface-hover); }
+  .tools-item.unified { color: var(--accent-amber, #c9956b); font-weight: 600; }
+  .tools-badge { margin-left: auto; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; background: color-mix(in srgb, var(--accent-amber, #c9956b) 18%, transparent); color: var(--accent-amber, #c9956b); border-radius: 8px; padding: 1px 6px; }
 
   /* embedded map builder fills the main area; the app supplies the back button */
   /* a panel (map builder, admin, or entity editor) that can go full screen */

@@ -5,7 +5,10 @@
   // otherwise hide inside a room's Contents). Search all objects by name / key
   // / kind / ref, or type a raw ref (#351) to open it — which also works for
   // exits, since they're excluded from list_objects but examine handles them.
-  let { onpick = () => {}, onclose = () => {} } = $props();
+  // `extras` are non-object entries (e.g. maps) the host wants findable here —
+  // each { id, label, kind } is matched by the same query and picked through
+  // onpickextra. Empty by default, so other callers are unaffected.
+  let { onpick = () => {}, onclose = () => {}, extras = [], onpickextra = () => {} } = $props();
 
   let objects = $state([]);
   let loading = $state(true);
@@ -37,6 +40,13 @@
       .slice(0, 80);
   });
 
+  const extraResults = $derived.by(() => {
+    const needle = q.trim().toLowerCase();
+    return (extras || [])
+      .filter((x) => !needle || `${x.label} ${x.kind || ''}`.toLowerCase().includes(needle))
+      .slice(0, 20);
+  });
+
   function pick(ref) { onpick(ref); }
   function onKey(e) {
     if (e.key === 'Escape') { onclose(); return; }
@@ -47,6 +57,7 @@
       const explicitRef = asRef && q.trim().startsWith('#');
       if (explicitRef) pick(asRef);
       else if (results.length) pick(results[0].ref_id);
+      else if (extraResults.length) onpickextra(extraResults[0].id);
       else if (asRef) pick(asRef);
     }
   }
@@ -66,6 +77,12 @@
         <span class="of-ref">↵</span>
       </button>
     {/if}
+    {#each extraResults as x (x.id)}
+      <button class="of-item" onclick={() => onpickextra(x.id)}>
+        <span class="of-kind kind-map">{x.kind || 'map'}</span>
+        <span class="of-title">{x.label}</span>
+      </button>
+    {/each}
     {#if loading}
       <div class="of-empty">Loading…</div>
     {:else}
@@ -113,6 +130,7 @@
   .kind-room { color: var(--accent-amber, #c9956b); }
   .kind-npc { color: var(--accent-green, #8fb877); }
   .kind-item { color: var(--accent-blue, #6ea3d0); }
+  .kind-map { color: var(--accent-green, #8fb877); }
   .of-any { color: var(--bg-primary, #12100c); background: var(--accent-amber, #c9956b); border-color: var(--accent-amber, #c9956b); }
   .of-title { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .of-loc { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--text-muted, #8c8378); }

@@ -1135,7 +1135,11 @@ async function enterServerMode(d){
   $("#btnSaveServer").classList.remove("hidden"); $("#btnSaveDoc").classList.remove("hidden");
   $("#mapPicker").classList.remove("hidden");
   if(d.terrain){ try{ importPalette(parseTOML(d.terrain)); }catch(e){} }   // shared palette + schema
-  const first = d.maps.includes(state.name)?state.name:d.maps[0];
+  // Deep link: the unified builder opens a specific map via ?map=<name>, so
+  // each map is its own tab. Falls back to the remembered map, then the first.
+  const urlMap = new URLSearchParams(location.search).get("map");
+  const first = (urlMap && d.maps.includes(urlMap)) ? urlMap
+    : (d.maps.includes(state.name) ? state.name : d.maps[0]);
   if(first) await loadMapFromServer(first,true); else { refreshMapList(d.maps); renderAll(); }
   toast("Connected to the game — editing live");
 }
