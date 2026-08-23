@@ -305,14 +305,16 @@
     </form>
 
     <div class="rem-sec">Attributes</div>
-    {#each attrs as a}
-      <div class="rem-attr">
-        <span class="rem-akey" class:internal={a.key.startsWith('_')}>{a.key}</span>
-        <input class="rem-in rem-aval" bind:value={a.value} oninput={() => (a.dirty = true)} onblur={() => a.dirty && saveAttr(a)} />
-      </div>
-    {:else}
-      <div class="rem-dim">No attributes.</div>
-    {/each}
+    <div class="rem-attrs">
+      {#each attrs as a}
+        <div class="rem-attr">
+          <span class="rem-akey" class:internal={a.key.startsWith('_')}>{a.key}</span>
+          <input class="rem-in rem-aval" bind:value={a.value} oninput={() => (a.dirty = true)} onblur={() => a.dirty && saveAttr(a)} />
+        </div>
+      {:else}
+        <div class="rem-dim">No attributes.</div>
+      {/each}
+    </div>
     <form class="rem-add" onsubmit={(e) => { e.preventDefault(); addAttr(); }}>
       <TextInput bind:value={newAttrKey} placeholder="attribute key" size="sm" />
       <Button size="sm" onclick={addAttr}><PlusIcon size={13} /> Attr</Button>
@@ -350,7 +352,7 @@
 </div>
 
 <style>
-  .rem-body { display: flex; flex-direction: column; max-height: min(72vh, 720px); overflow-y: auto; padding-right: 2px; }
+  .rem-body { display: flex; flex-direction: column; max-height: min(80vh, 780px); overflow-y: auto; padding-right: 8px; }
   .rem-msg { padding: 24px; text-align: center; color: var(--text-muted, #9a9186); }
   .rem-err { color: var(--accent-red, #d07a5a); }
   .rem-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
@@ -362,9 +364,11 @@
   .rem-in { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; color: var(--text-primary, #ece0c8); background: var(--bg-primary, #12100c); border: 1px solid var(--border-default, #332c22); border-radius: 7px; padding: 7px 9px; }
   .rem-in:focus { outline: none; border-color: var(--accent-amber, #c9956b); }
   .rem-title { font-weight: 600; }
-  .rem-desc { min-height: 72px; line-height: 1.5; resize: vertical; }
+  .rem-desc { min-height: 96px; line-height: 1.5; resize: vertical; }
 
-  .rem-sec { font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-muted, #9a9186); margin: 18px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--border-muted, #2a2419); }
+  .rem-sec { font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-muted, #9a9186); margin: 22px 0 9px; padding-bottom: 5px; border-bottom: 1px solid var(--border-muted, #2a2419); }
+  .rem-attrs { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 16px; margin-bottom: 4px; }
+  @media (max-width: 560px) { .rem-attrs { grid-template-columns: 1fr; } }
   .rem-dim { font-size: 12px; color: var(--text-muted, #8c8378); font-style: italic; }
 
   .rem-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
@@ -392,7 +396,7 @@
   .rem-prog-top { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
   .rem-hook { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; color: var(--accent-amber, #c9956b); }
   .rem-spacer { flex: 1; }
-  .rem-src { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11.5px; min-height: 60px; line-height: 1.45; resize: vertical; }
+  .rem-src { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11.5px; min-height: 88px; line-height: 1.45; resize: vertical; }
 
   .rem-del { background: none; border: none; color: var(--text-muted, #9a9186); cursor: pointer; padding: 3px; border-radius: 5px; line-height: 0; }
   .rem-del:hover { color: var(--accent-red, #d07a5a); background: color-mix(in srgb, var(--accent-red, #d07a5a) 14%, transparent); }
