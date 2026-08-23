@@ -127,11 +127,25 @@ web/                   Svelte 5 + Vite web client
       Output.svelte    Scrolling text output with auto-scroll, clickable [cmd] elements
       InputBar.svelte  Command input with history (up/down, prev/next buttons)
       Sidebar.svelte   Structured panels: Who's Here, What's Here, Exits (clickable chips)
-      Editor.svelte    In-browser object editor: title, description, program CRUD via REST API
       Settings.svelte  Settings drawer: theme toggle, font size, API tokens, account, admin actions
+      BuilderWorkspace.svelte  Unified builder IDE (route /builder/workspace): explorer
+                       tree + tabbed editor. One shared selection (lib/selection.svelte.js)
+                       drives everything; objects/hooks/maps all open as tabs.
+      builder/         Builder IDE panels — BuilderTree (explorer), ObjectTable,
+                       PropertiesPanel, HooksPanel, DialoguePanel, CodeOverlay
+      builder/map/     Native Svelte map builder (replaced the Mapwright iframe) —
+                       MapBuilder, MapGrid, TerrainPalette, RoomInspector, AttrEditor,
+                       Terrain/Schema/ImportExport modals; TOML via lib/mapwright-toml.js
+      dialogue/        Ink dialogue authoring — InkEditor, InkCodeEditor, PlaytestPane
+      code/            CodeMirror wrapper (CodeEditor) + scripting HelpPanel
+      room-builder/    Svelte Flow room graph/table, RoomEditorModal, ObjectFinder (⌘K)
+      Editor.svelte, Admin.svelte, RoomBuilder.svelte, CodeWorkspace.svelte,
+      WorldCheck.svelte  Older standalone builder surfaces, superseded by the unified
+                       workspace but still reachable from the legacy tools menu
 docs/
   adr/                 6 architectural decision records (ADR 0001–0006)
-  plans/               Pending work (dbref-migration.md)
+  plans/               Pending/in-progress design docs (dbref migration, attribute schemas, client map integration)
+  audits/              Point-in-time code/design audits
   commands.md          Command reference
   getting-started.md   Getting started guide
   softcode-guide.md    Softcode programming guide
@@ -160,8 +174,11 @@ docs/
 - **Structured data channel** — `ClientMessage` enum (Text, Prompt, Room, Inventory, Game) sent as JSON to web clients
 - **Auto room data** — engine sends structured Room messages (exits, contents) on look/movement, powers sidebar panels
 - **emit_data()** — softcode can push structured JSON to web clients: `emit_data(player_ref, "channel", data_table)`
-- **REST API** — POST /api with 17 actions (list, create, examine, set, delete, etc.)
+- **REST API** — POST /api with ~40 actions (list/examine, create room/object/exit, set title/desc/attr/tags, program CRUD + history, world_check, ink compile/save/load, maps + terrain, eval, import/export)
 - **Web client** — Svelte 5 + Vite, multi-panel layout: scrolling output, structured sidebar, command input with history
+- **Unified builder IDE** — one web workspace (`/builder/workspace`) replacing the scatter of tools: a VS Code-style explorer tree (objects → hooks as files, plus a Maps folder) and a tabbed editor where objects (Properties/Hooks/Dialogue), hooks (CodeMirror), and Table/Map overviews all open as tabs; shared selection, New-object creator, ⌘K find, ⌘B sidebar toggle
+- **Native map builder** — Svelte grid painter, terrain palette, per-tile room inspector, and terrain/schema/import-export modals, sharing map TOML parse/serialize (`lib/mapwright-toml.js`); a real tab in the builder (the old standalone Mapwright `src/net/mapwright.html` + `GET /builder` route were removed)
+- **Web dialogue editor** — full Ink authoring surface in the builder IDE (Raw mode + plain-textarea fallback), wired to the `ink_*` REST actions
 - **Game web override** — `game_web_dir` config lets games provide their own web client, framework falls back to default
 - **Ink dialog** — bladeink-powered narrative scripting, compile-on-demand with source hash caching, 7 Luau API functions (`ink_start`, `ink_continue`, `ink_choose`, `ink_get_var`, `ink_set_var`, `ink_end`, `ink_goto`), `@dialogue` builder command with multi-line editor, state persistence via attrs
 - **Player persistence** — players marked offline on disconnect, restored on reconnect
@@ -184,21 +201,25 @@ load_world_files = true    # boot-time world loading; see below before turning o
 
 **`game_dir` is always required, even with `load_world_files = false`.**
 That flag governs *world content* only — `<area>/*.toml` and the program
-`.luau` files they reference. Everything else loads from disk on every boot
-and is never persisted to the database:
+`.luau` files they reference. Code and narrative assets below still load from
+disk on every boot and are never persisted to the database:
 
 | Path | What |
 | ---- | ---- |
 | `<game_dir>/lib/*.luau` | modules resolved by `require()` |
 | `<game_dir>/**/*.ink` | ink narrative scripts |
 | `<game_dir>/themes/*.toml` | themes |
-| `<game_dir>/maps/*.toml` | map templates |
-| `<game_dir>/terrain.toml` | terrain palette |
+
+Maps and terrain used to load this way too, but are now **DB-owned**: the
+`file_sources` table holds `terrain.toml` and each `maps/<name>.toml`, seeded
+from those files on `@import` and thereafter edited from the map builder (the DB
+is the source of truth once imported).
 
 A container built without the game directory boots — spawn resolves from the
-database — but libs, dialogue, themes, maps, and terrain are all missing, so
-anything touching them breaks at runtime rather than at startup. "The database
-is the source of truth" means world content, not code and spatial data.
+database, and maps/terrain come from `file_sources` — but libs, ink dialogue,
+and themes are all missing, so anything touching them breaks at runtime rather
+than at startup. "The database is the source of truth" means world content,
+not code and file-loaded assets.
 
 **`game_dir` is image content and read-only at runtime. Anything a user can
 edit belongs in the database.** Not merely because a container filesystem is
@@ -209,9 +230,10 @@ The failure is silent in the worst way — writes succeed, the edit looks saved,
 and it disappears at the next deploy rather than at the next restart, so it
 survives every test that only bounces the process.
 
-This is the general form of the rule the program-authoring plan works out for
-Programs, and it applies to any future editor — maps, themes, ink. If a feature
-lets someone change something from inside the game, its store is the database.
+This is the general form of the rule Program authoring worked out for Programs
+and the map builder applied to maps + terrain; it applies to any future editor —
+themes, ink. If a feature lets someone change something from inside the game,
+its store is the database.
 
 ## Design decisions
 
