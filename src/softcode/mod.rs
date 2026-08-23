@@ -4202,7 +4202,7 @@ mod tests {
         for i in 0..OWNER_OBJECT_QUOTA {
             let r = world.next_dbref();
             world.add_object(
-                GameObject::new(&r, &format!("thing{}", i), Kind::Item)
+                GameObject::new(&r, format!("thing{}", i), Kind::Item)
                     .with_owner("#builder-a"),
             );
         }
@@ -4237,7 +4237,7 @@ mod tests {
 
         for i in 0..OWNER_OBJECT_QUOTA {
             let r = world.next_dbref();
-            world.add_object(GameObject::new(&r, &format!("thing{}", i), Kind::Item));
+            world.add_object(GameObject::new(&r, format!("thing{}", i), Kind::Item));
         }
 
         let batch = batch_as(
@@ -4298,7 +4298,7 @@ mod tests {
         for i in 0..OWNER_OBJECT_QUOTA {
             let r = world.next_dbref();
             world.add_object(
-                GameObject::new(&r, &format!("thing{}", i), Kind::Item)
+                GameObject::new(&r, format!("thing{}", i), Kind::Item)
                     .with_owner("#builder-a"),
             );
         }
@@ -4500,7 +4500,10 @@ mod tests {
         let obj = w.get("#5").unwrap();
         let seen = obj.attrs["_seen"].as_u64().unwrap();
         assert!(seen >= 8, "object pairs() yielded only {seen} fields");
-        assert!(obj.attrs["_attrs_seen"].is_null() || obj.attrs["_attrs_seen"].as_u64().unwrap() >= 0);
+        assert!(
+            obj.attrs.get("_attrs_seen").map(|v| v.as_u64().unwrap_or(0)).unwrap_or(0) >= 1,
+            "attrs iteration should see at least the two attrs written above"
+        );
     }
 
     #[test]
