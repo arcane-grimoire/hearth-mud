@@ -2017,33 +2017,41 @@ mod tests {
     // (No `use super::*` — this test only needs include_str! + std, and an
     // unused glob dirties the build.)
 
-    /// The web editor's Help panel renders `hearth-api.js` as the scripting
-    /// reference. This test keeps that static list honest against what
-    /// `install()` actually registers: the *set* of names must match exactly,
-    /// in both directions — additions, removals, and renames all fail here
-    /// (a count alone would let a swap through silently). Signature/doc text
-    /// is out of scope; that needs the future introspection endpoint.
+    /// The softcode API's *name set* lives in three hand-maintained mirrors:
+    /// the engine's registrations, the web editor's Help reference
+    /// (`hearth-api.js`), and the engine-owned LSP types (`types/hearth.d.luau`,
+    /// which downstream games vendor). This test keeps all three in exact
+    /// agreement — additions, removals, and renames all fail here (a count
+    /// alone would let a swap through silently). Signature/doc text is out of
+    /// scope; that needs the future introspection endpoint.
     ///
-    /// Known fragility: this is a textual scan for literal
-    /// `env.set("name",` calls. If a function is ever registered via a
+    /// "Registered" spans every install site: `env.set("name", …)` here (the
+    /// per-script sandbox env) plus `lua.globals().set("name", …)` in
+    /// noise.rs and grid.rs (true globals). All three files are scanned only
+    /// up to their `#[cfg(test)]` so test code can't register phantom names.
+    ///
+    /// Known fragility: this is a textual scan for literal quoted names after
+    /// `env.set(` / `globals().set(`. If a function is ever registered via a
     /// helper, a namespace table, or a non-literal name, the scan will miss
-    /// it silently — revisit if `install()` grows indirection.
+    /// it silently — revisit if the install path grows indirection.
     #[test]
     fn help_panel_api_reference_matches_installed_functions() {
+        use std::collections::BTreeSet;
         let api_rs = include_str!("api.rs");
-        let js =
-            include_str!("../../web/src/components/code/hearth-api.js");
+        let noise_rs = include_str!("../noise.rs");
+        let grid_rs = include_str!("../grid.rs");
+        let js = include_str!("../../web/src/components/code/hearth-api.js");
+        let dts = include_str!("../../types/hearth.d.luau");
 
-        // Registered names: every `env.set("name", ...)` in this file, inline
-        // or multiline. (Test-only assert_* installs live in softcode/mod.rs,
-        // not here.) Scan stops at the tests module so this test's own source
-        // can't match.
-        let installed_src = api_rs.split("#[cfg(test)]").next().unwrap();
-        let registered: std::collections::BTreeSet<&str> = {
-            let mut names = std::collections::BTreeSet::new();
-            let mut rest = installed_src;
-            while let Some(pos) = rest.find("env.set(") {
-                rest = &rest[pos + "env.set(".len()..];
+        // The first quoted string after each `marker`, allowing whitespace or
+        // newlines between the marker and the opening quote (registrations are
+        // often multiline). Scan stops at `#[cfg(test)]`.
+        fn quoted_after<'a>(src: &'a str, marker: &str) -> BTreeSet<&'a str> {
+            let src = src.split("#[cfg(test)]").next().unwrap();
+            let mut names = BTreeSet::new();
+            let mut rest = src;
+            while let Some(pos) = rest.find(marker) {
+                rest = &rest[pos + marker.len()..];
                 let trimmed = rest.trim_start();
                 if let Some(after_quote) = trimmed.strip_prefix('"')
                     && let Some(end) = after_quote.find('"')
@@ -2052,24 +2060,42 @@ mod tests {
                 }
             }
             names
-        };
+        }
+
+        // Registered: env functions here, plus the noise/grid globals. The
+        // globals scan keys off `globals()` then the following `.set("name"`,
+        // so unrelated `.set(` calls (e.g. grid.rs result-table builders) that
+        // aren't preceded by `globals()` are ignored.
+        let mut registered = quoted_after(api_rs, "env.set(");
+        for src in [noise_rs, grid_rs] {
+            let body = src.split("#[cfg(test)]").next().unwrap();
+            let mut rest = body;
+            while let Some(pos) = rest.find("globals()") {
+                rest = &rest[pos + "globals()".len()..];
+                if let Some(after_set) = rest.trim_start().strip_prefix(".set(")
+                    && let Some(after_quote) = after_set.trim_start().strip_prefix('"')
+                    && let Some(end) = after_quote.find('"')
+                {
+                    registered.insert(&after_quote[..end]);
+                }
+            }
+        }
         assert!(
-            registered.len() > 50,
-            "env.set scan found only {} registrations — the parser is broken",
+            registered.len() > 80,
+            "install-site scan found only {} registrations — the parser is broken",
             registered.len()
         );
 
-        // Referenced names: every `['name', ...]` row in the API_FUNCTIONS
-        // block of hearth-api.js (API_GLOBALS/OBJECT_MEMBERS are locals and
+        // Referenced (hearth-api.js): every `['name', ...]` row in the
+        // API_FUNCTIONS block (API_GLOBALS/OBJECT_MEMBERS are locals and
         // members, not installed functions).
-        let referenced: std::collections::BTreeSet<&str> = {
+        let referenced: BTreeSet<&str> = {
             let section = js
                 .split("export const API_FUNCTIONS")
                 .nth(1)
                 .expect("API_FUNCTIONS missing from hearth-api.js");
-            let section =
-                section.split("export const").next().unwrap();
-            let mut names = std::collections::BTreeSet::new();
+            let section = section.split("export const").next().unwrap();
+            let mut names = BTreeSet::new();
             let mut rest = section;
             while let Some(pos) = rest.find("['") {
                 rest = &rest[pos + 2..];
@@ -2083,31 +2109,48 @@ mod tests {
             names
         };
 
-        let missing_in_js: Vec<_> =
-            registered.difference(&referenced).collect();
-        let stale_in_js: Vec<_> =
-            referenced.difference(&registered).collect();
-        assert!(
-            missing_in_js.is_empty() && stale_in_js.is_empty(),
-            "hearth-api.js drifted from the engine:\n  not in the reference (add it): {:?}\n  no longer an engine function (remove it): {:?}",
-            missing_in_js,
-            stale_in_js
-        );
+        // Declared (hearth.d.luau): both `declare function name(` functions
+        // and bare `declare name:` value globals (e.g. get_tick).
+        let declared: BTreeSet<&str> = {
+            let mut names = BTreeSet::new();
+            let mut rest = dts;
+            while let Some(pos) = rest.find("declare ") {
+                rest = &rest[pos + "declare ".len()..];
+                let after = rest.strip_prefix("function ").unwrap_or(rest);
+                let end = after
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(after.len());
+                if end > 0 {
+                    names.insert(&after[..end]);
+                }
+            }
+            names
+        };
+
+        let report = |label: &str, mirror: &BTreeSet<&str>| {
+            let missing: Vec<_> = registered.difference(mirror).collect();
+            let stale: Vec<_> = mirror.difference(&registered).collect();
+            assert!(
+                missing.is_empty() && stale.is_empty(),
+                "{label} drifted from the engine:\n  not in the mirror (add it): {missing:?}\n  no longer an engine name (remove it): {stale:?}",
+            );
+        };
+        report("hearth-api.js", &referenced);
+        report("types/hearth.d.luau", &declared);
     }
 
     /// The `Object` shape lives in three hand-maintained places: the engine
     /// snapshot (`object_to_table` here), the editor's `OBJECT_MEMBERS` (drives
-    /// `x.` completion and the Help panel), and the game's `hearth.d.luau`
-    /// (`type Object`, for luau-lsp). This keeps them from drifting apart the
-    /// way `get_val` did: the first two are checked hard (both in this repo);
-    /// the third is checked when the reference game is present beside us, and
-    /// skipped otherwise since it's a separate repo and can't be a hard
-    /// compile-time include.
+    /// `x.` completion and the Help panel), and the engine-owned
+    /// `types/hearth.d.luau` (`type Object`, for luau-lsp; downstream games
+    /// vendor it). All three are checked hard and in-repo, so the shape can't
+    /// drift the way `get_val` did.
     #[test]
     fn object_member_reference_matches_engine_snapshot() {
         use std::collections::BTreeSet;
         let api_rs = include_str!("api.rs");
         let js = include_str!("../../web/src/components/code/hearth-api.js");
+        let dts = include_str!("../../types/hearth.d.luau");
 
         // Fields the engine sets on each object table: `t.set("field", …)` in
         // object_to_table's plain (list-result) branch. The hook-facing proxy
@@ -2196,13 +2239,13 @@ mod tests {
             stale
         );
 
-        // Best-effort: the reference game's LSP types, when checked out beside
-        // this repo, must describe the same fields. Skipped where the game
-        // isn't present (CI, a bare checkout).
-        if let Ok(dts) =
-            std::fs::read_to_string("../the-last-stag-mud/types/hearth.d.luau")
-            && let Some(after) = dts.split("type Object = {").nth(1)
+        // The engine-owned LSP types (`type Object`) must describe the same
+        // field set. Hard include_str! now that the file lives in this repo.
         {
+            let after = dts
+                .split("type Object = {")
+                .nth(1)
+                .expect("`type Object` missing from types/hearth.d.luau");
             // Terminate at the closing brace on its own line, not the inline
             // `{ [string]: any }` braces on the attrs/tags fields.
             let block = after.split("\n}").next().unwrap_or("");
