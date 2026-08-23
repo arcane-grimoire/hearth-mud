@@ -21,6 +21,7 @@
   import CodeOverlay from './builder/CodeOverlay.svelte';
   import RoomGraph from './room-builder/RoomGraph.svelte';
   import ObjectFinder from './room-builder/ObjectFinder.svelte';
+  import MapBuilder from './builder/map/MapBuilder.svelte';
 
   // The unified builder workspace: one shell, one selection, a tabbed editor.
   //   explorer tree │ tabbed editor (objects · hooks · overviews)
@@ -47,42 +48,6 @@
 
   let finderOpen = $state(false);
   let sidebarOpen = $state(true);
-
-  // Mapwright runs its own theme with its own variable names. It's a same-origin
-  // iframe, so on load we read kit-ui's LIVE token values off the host root and
-  // map them onto Mapwright's variables — an exact match to the active theme
-  // (and its fonts), not a hardcoded approximation. No backend rebuild needed.
-  function themeMapFrame(ev) {
-    try {
-      const root = ev.target?.contentDocument?.documentElement;
-      if (!root) return;
-      const cs = getComputedStyle(document.documentElement);
-      const v = (name) => cs.getPropertyValue(name).trim();
-      const amber = v('--accent-amber');
-      const soft = (c, pct) => (c ? `color-mix(in srgb, ${c} ${pct}%, transparent)` : '');
-      const MAP = {
-        '--ground': v('--bg-primary'),
-        '--surface': v('--bg-surface'),
-        '--surface-2': v('--bg-surface-hover') || v('--bg-inset'),
-        '--raise': v('--bg-surface-hover') || v('--bg-surface'),
-        '--ink': v('--text-primary'),
-        '--muted': v('--text-muted'),
-        '--faint': v('--text-muted'),
-        '--line': v('--border-default'),
-        '--line-strong': v('--border-default'),
-        '--accent': amber,
-        '--accent-ink': v('--bg-primary'),
-        '--accent-soft': soft(amber, 14),
-        '--accent-line': soft(amber, 45),
-        '--good': v('--accent-green'),
-        '--warn': amber,
-        '--font-ui': v('--font-sans'),
-        '--font-display': v('--font-sans'),
-        '--font-mono': v('--font-mono'),
-      };
-      for (const [k, val] of Object.entries(MAP)) if (val) root.style.setProperty(k, val);
-    } catch (e) { /* cross-origin or not ready — leave as-is */ }
-  }
 
   // New-object creator (in the sidebar).
   let newOpen = $state(false);
@@ -347,12 +312,10 @@
         {:else if activeTab.type === 'map'}
           <RoomGraph onedit={openObject} />
         {:else if activeTab.type === 'maps'}
-          <!-- Mapwright tile/terrain builder — folded in as a tab. Same-origin
-               iframe (the engine serves it at /builder), so it shares the
-               session token. Deep-linked to a named map via ?map=. -->
+          <!-- Native map builder (Svelte port of Mapwright) — themed with kit-ui,
+               deep-linked to a specific map by name. -->
           {#key activeTab.id}
-            <iframe class="maps-frame" title={activeTab.name || 'Map builder'} onload={themeMapFrame}
-              src={`/builder?embed=1${activeTab.name ? '&map=' + encodeURIComponent(activeTab.name) : ''}`}></iframe>
+            <MapBuilder name={activeTab.name || null} />
           {/key}
         {:else}
           <!-- object tab: the detail view, now in the center -->
@@ -457,7 +420,6 @@
   .tc-x:hover { background: color-mix(in srgb, var(--accent-red, #c96a5a) 20%, transparent); color: var(--accent-red, #e06c75); }
 
   .view { flex: 1; min-height: 0; overflow: hidden; }
-  .maps-frame { width: 100%; height: 100%; border: 0; background: var(--bg-primary, #12100c); display: block; }
 
   .obj-tab { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .obj-head { padding: 12px 16px 10px; border-bottom: 1px solid var(--border-default, #2a2419); }
