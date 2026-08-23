@@ -70,8 +70,8 @@
 </div>
 
 {#if editingRef}
-  <Modal title={`Edit room · ${editingRef}`} maxWidth="min(580px, calc(100vw - 32px))" onclose={closeEditor}>
-    <RoomEditorModal ref={editingRef} onclose={closeEditor} onchanged={() => (dataVersion += 1)} />
+  <Modal title={`Edit · ${editingRef}`} maxWidth="min(580px, calc(100vw - 32px))" onclose={closeEditor}>
+    <RoomEditorModal ref={editingRef} onclose={closeEditor} onchanged={() => (dataVersion += 1)} onedit={openEditor} />
   </Modal>
 {/if}
 

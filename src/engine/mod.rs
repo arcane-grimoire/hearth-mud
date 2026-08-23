@@ -85,6 +85,9 @@ pub enum ApiRequest {
     SetAttribute { ref_id: String, key: String, value: serde_json::Value },
     SetDescription { ref_id: String, description: String },
     SetTitle { ref_id: String, title: String },
+    /// Move an object into a new location (e.g. an NPC/item into a room) — the
+    /// builder's place/relocate action. Builder-gated.
+    SetLocation { ref_id: String, location: String },
     AddTag { ref_id: String, tag: String },
     RemoveTag { ref_id: String, tag: String },
     DeleteObject { ref_id: String },
@@ -1066,6 +1069,18 @@ impl Engine {
                 match self.world.get_mut(&ref_id) {
                     Some(obj) => {
                         obj.title = Some(title);
+                        ApiResponse::ok()
+                    }
+                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
+            ApiRequest::SetLocation { ref_id, location } => {
+                if self.world.get(&location).is_none() {
+                    return ApiResponse::error(format!("Location '{}' not found", location));
+                }
+                match self.world.get_mut(&ref_id) {
+                    Some(obj) => {
+                        obj.location_ref = Some(location);
                         ApiResponse::ok()
                     }
                     None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
@@ -7295,6 +7310,47 @@ mod tests {
         // Requires Builder (not public).
         let resp = engine.handle_api_request(ApiRequest::WorldCheck, None);
         assert_eq!(resp.error.as_deref(), Some("Authentication required"));
+    }
+
+    #[test]
+    fn set_location_moves_object_into_room_and_rejects_missing_target() {
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
+        let room = mk_room(&mut engine, &token, "town", "hall");
+        let item = engine
+            .handle_api_request(
+                ApiRequest::CreateObject {
+                    area: "town".into(),
+                    key: "gem".into(),
+                    kind: "item".into(),
+                    title: Some("a gem".into()),
+                    description: None,
+                    location: None,
+                },
+                Some(token.clone()),
+            )
+            .data
+            .unwrap()["ref_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let moved = engine.handle_api_request(
+            ApiRequest::SetLocation { ref_id: item.clone(), location: room.clone() },
+            Some(token.clone()),
+        );
+        assert!(moved.ok, "{:?}", moved.error);
+
+        let contents = engine
+            .handle_api_request(ApiRequest::ListObjects { location: Some(room) }, Some(token.clone()))
+            .data
+            .unwrap();
+        assert!(contents.as_array().unwrap().iter().any(|o| o["ref_id"] == item));
+
+        let bad = engine.handle_api_request(
+            ApiRequest::SetLocation { ref_id: item, location: "#999999".into() },
+            Some(token),
+        );
+        assert!(bad.error.as_deref().unwrap().contains("not found"));
     }
 
     /// `Eval` over the REST API is arbitrary code with the full write API —
