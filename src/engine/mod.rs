@@ -1168,10 +1168,19 @@ impl Engine {
                 }
             }
             ApiRequest::SetLocation { ref_id, location } => {
+                // An object inside itself is a containment cycle — reject it.
+                if location == ref_id {
+                    return ApiResponse::error("Cannot locate an object inside itself");
+                }
                 if self.world.get(&location).is_none() {
                     return ApiResponse::error(format!("Location '{}' not found", location));
                 }
                 match self.world.get_mut(&ref_id) {
+                    // Relocating a live player by ref is a teleport — not a
+                    // builder-tier edit. Admins have the teleport command for it.
+                    Some(obj) if obj.kind == Kind::Player => {
+                        ApiResponse::error("Refusing to relocate a player via set_location")
+                    }
                     Some(obj) => {
                         obj.location_ref = Some(location);
                         ApiResponse::ok()
@@ -1180,6 +1189,18 @@ impl Engine {
                 }
             }
             ApiRequest::UpdateExit { ref_id, direction, target } => {
+                // A blank direction leaves the exit un-typeable — reject it, and
+                // trim so "  up  " doesn't become the stored key.
+                let direction = match direction {
+                    Some(d) => {
+                        let trimmed = d.trim();
+                        if trimmed.is_empty() {
+                            return ApiResponse::error("Exit direction cannot be blank");
+                        }
+                        Some(trimmed.to_string())
+                    }
+                    None => None,
+                };
                 if let Some(t) = &target
                     && self.world.get(t).is_none()
                 {
@@ -1202,7 +1223,13 @@ impl Engine {
             ApiRequest::SetAliases { ref_id, aliases } => {
                 match self.world.get_mut(&ref_id) {
                     Some(obj) => {
-                        obj.aliases = aliases.into_iter().filter(|a| !a.trim().is_empty()).collect();
+                        // Trim each entry (not just filter blank ones): a padded
+                        // "  climb  " would otherwise never match player input.
+                        obj.aliases = aliases
+                            .into_iter()
+                            .map(|a| a.trim().to_string())
+                            .filter(|a| !a.is_empty())
+                            .collect();
                         ApiResponse::ok()
                     }
                     None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
@@ -7582,10 +7609,26 @@ mod tests {
         assert!(contents.as_array().unwrap().iter().any(|o| o["ref_id"] == item));
 
         let bad = engine.handle_api_request(
-            ApiRequest::SetLocation { ref_id: item, location: "#999999".into() },
-            Some(token),
+            ApiRequest::SetLocation { ref_id: item.clone(), location: "#999999".into() },
+            Some(token.clone()),
         );
         assert!(bad.error.as_deref().unwrap().contains("not found"));
+
+        // An object can't be its own location (containment cycle).
+        let cycle = engine.handle_api_request(
+            ApiRequest::SetLocation { ref_id: item.clone(), location: item.clone() },
+            Some(token.clone()),
+        );
+        assert!(cycle.error.as_deref().unwrap().contains("inside itself"));
+
+        // A player can't be relocated by ref through the builder.
+        let player = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&player, "hero", Kind::Player).with_location(&item));
+        let ptele = engine.handle_api_request(
+            ApiRequest::SetLocation { ref_id: player, location: item },
+            Some(token),
+        );
+        assert!(ptele.error.as_deref().unwrap().contains("player"));
     }
 
     #[test]
@@ -7631,9 +7674,26 @@ mod tests {
         );
         assert!(notexit.error.as_deref().unwrap().contains("not an exit"));
 
-        // aliases
+        // A blank (or whitespace-only) direction is rejected, and the key isn't
+        // touched — the exit stays typeable as "up".
+        let blank = engine.handle_api_request(
+            ApiRequest::UpdateExit { ref_id: exit.clone(), direction: Some("   ".into()), target: None },
+            Some(token.clone()),
+        );
+        assert!(blank.error.as_deref().unwrap().contains("blank"));
+        // A padded direction is trimmed before it's stored.
+        let padded = engine.handle_api_request(
+            ApiRequest::UpdateExit { ref_id: exit.clone(), direction: Some("  down  ".into()), target: None },
+            Some(token.clone()),
+        );
+        assert!(padded.ok, "{:?}", padded.error);
+        let ex2 = engine.handle_api_request(ApiRequest::Examine { ref_id: exit.clone() }, Some(token.clone())).data.unwrap();
+        assert_eq!(ex2["key"].as_str(), Some("down"));
+
+        // aliases: blank entries dropped, and padded entries trimmed so a
+        // "  climb  " matches player input rather than being stored verbatim.
         let al = engine.handle_api_request(
-            ApiRequest::SetAliases { ref_id: exit.clone(), aliases: vec!["u".into(), "climb".into(), " ".into()] },
+            ApiRequest::SetAliases { ref_id: exit.clone(), aliases: vec!["u".into(), "  climb  ".into(), " ".into()] },
             Some(token.clone()),
         );
         assert!(al.ok, "{:?}", al.error);
