@@ -5,11 +5,21 @@
   import { route, setQuery } from '../../lib/router.svelte.js';
   import { sampleWorld, sampleAreas } from './sample.js';
 
-  // The table view: the same scoped slice as the graph, as a sortable,
-  // searchable list. Row → open the modal editor; the trailing button jumps to
-  // that room focused in the graph. Small data (a slice is capped at 400 rows),
-  // so sort/filter is a plain derived — no data-grid library needed.
+  // The table view: a flat, sortable, searchable list of every object — not
+  // just rooms. NPCs, items and players otherwise hide inside a room's
+  // Contents; here a Kind filter surfaces them alongside rooms. Row → open the
+  // modal editor; the trailing button (rooms only) jumps to that room focused
+  // in the graph. Fed by `list_objects_full` (capped, so sort/filter is a
+  // plain derived — no data-grid library needed).
   let { onopen = () => {}, onedit = () => {}, reloadSignal = 0 } = $props();
+
+  const KINDS = [
+    { value: 'all', label: 'All objects' },
+    { value: 'room', label: 'Rooms' },
+    { value: 'npc', label: 'NPCs' },
+    { value: 'item', label: 'Items' },
+    { value: 'player', label: 'Players' },
+  ];
 
   let rows = $state([]);
   let areas = $state([]);
@@ -17,10 +27,13 @@
   let loading = $state(true);
   let truncated = $state(false);
   let q = $state('');
-  let sortKey = $state('key');
+  let sortKey = $state('title');
   let sortAsc = $state(true);
 
   const scopeArea = $derived(route.query.area || '');
+  const scopeKind = $derived(
+    KINDS.some((k) => k.value === route.query.kind) ? route.query.kind : 'all',
+  );
 
   async function load() {
     loading = true;
@@ -28,33 +41,47 @@
 
     const params = {};
     if (scopeArea) params.area = scopeArea;
-    let slice = null;
-    try { const res = await api('list_world_slice', params); if (res?.ok) { live = true; slice = res.data; } } catch (e) { /* offline */ }
-    if (!slice) { live = false; if (!areas.length) areas = sampleAreas; slice = sampleWorld; }
+    if (scopeKind !== 'all') params.kind = scopeKind;
+    let data = null;
+    try { const res = await api('list_objects_full', params); if (res?.ok) { live = true; data = res.data; } } catch (e) { /* offline */ }
 
-    const norm = (o) => ({ ...o, ref: o.ref ?? o.ref_id });
-    const roomsL = (slice.rooms || []).map(norm);
-    const exitsL = (slice.exits || []).map(norm);
-    const outCount = {};
-    for (const e of exitsL) outCount[e.from] = (outCount[e.from] || 0) + 1;
-    rows = roomsL.map((r) => ({ ...r, exits: outCount[r.ref] || 0, tags: r.tags || [] }));
-    truncated = !!slice.truncated;
+    if (data) {
+      rows = (data.objects || []).map((o) => ({
+        ref: o.ref_id,
+        key: o.key,
+        kind: o.kind,
+        title: o.title,
+        area: o.area || '',
+        location: o.location_ref || '',
+        tags: o.tags || [],
+      }));
+      truncated = !!data.truncated;
+    } else {
+      // Offline: fall back to the bundled sample, which only carries rooms.
+      live = false;
+      if (!areas.length) areas = sampleAreas;
+      rows = (sampleWorld.rooms || [])
+        .filter((r) => scopeKind === 'all' || scopeKind === 'room')
+        .filter((r) => !scopeArea || (r.area || '') === scopeArea)
+        .map((r) => ({ ref: r.ref ?? r.ref_id, key: r.key, kind: 'room', title: r.title, area: r.area || '', location: '', tags: r.tags || [] }));
+      truncated = false;
+    }
     loading = false;
   }
 
   let lastScope = null;
   $effect(() => {
-    const k = `${scopeArea}|${reloadSignal}`;
+    const k = `${scopeArea}|${scopeKind}|${reloadSignal}`;
     if (k !== lastScope) { lastScope = k; load(); }
   });
 
   const filtered = $derived.by(() => {
     const needle = q.trim().toLowerCase();
     const base = needle
-      ? rows.filter((r) => `${r.key} ${r.title} ${(r.tags || []).join(' ')}`.toLowerCase().includes(needle))
+      ? rows.filter((r) => `${r.key} ${r.title || ''} ${r.kind} ${r.ref} ${(r.tags || []).join(' ')}`.toLowerCase().includes(needle))
       : rows;
     const dir = sortAsc ? 1 : -1;
-    const val = (r) => (sortKey === 'exits' ? r.exits : String(r[sortKey] || '').toLowerCase());
+    const val = (r) => String((sortKey === 'title' ? (r.title || r.key) : r[sortKey]) || '').toLowerCase();
     return [...base].sort((a, b) => {
       const av = val(a);
       const bv = val(b);
@@ -68,61 +95,72 @@
   }
   const sortDir = (k) => (sortKey === k ? (sortAsc ? 'asc' : 'desc') : null);
   function onAreaChange(e) { setQuery({ area: e.target.value || null, focus: null }); }
+  function onKindChange(e) { setQuery({ kind: e.target.value === 'all' ? null : e.target.value }); }
 </script>
 
 <div class="rt">
   <div class="rt-bar">
     <label class="rt-field">
+      <span>Kind</span>
+      <select value={scopeKind} onchange={onKindChange}>
+        {#each KINDS as k}<option value={k.value}>{k.label}</option>{/each}
+      </select>
+    </label>
+    <label class="rt-field">
       <span>Area</span>
       <select value={scopeArea} onchange={onAreaChange}>
-        <option value="">All rooms</option>
+        <option value="">All areas</option>
         {#each areas as a}
           <option value={a.area}>{a.area || '(unfiled)'} · {a.count}</option>
         {/each}
       </select>
     </label>
-    <div class="rt-search"><SearchInput bind:value={q} placeholder="Filter by name, key, or tag…" /></div>
+    <div class="rt-search"><SearchInput bind:value={q} placeholder="Filter by name, key, kind, ref, or tag…" /></div>
     <span class="rt-spacer"></span>
-    {#if truncated}<span class="rt-warn">capped slice — narrow the filter</span>{/if}
-    <span class="rt-count">{filtered.length} room{filtered.length === 1 ? '' : 's'}</span>
+    {#if truncated}<span class="rt-warn">capped — narrow the filter</span>{/if}
+    <span class="rt-count">{filtered.length} object{filtered.length === 1 ? '' : 's'}</span>
     <span class="rt-pill" class:live>{live ? 'live game' : 'sample world'}</span>
   </div>
 
   <div class="rt-scroll">
-    <Table ariaLabel="Rooms">
+    <Table ariaLabel="Objects">
       {#snippet header()}
-        <TableHeaderCell label="Key" sortable sortDirection={sortDir('key')} onsort={() => sortBy('key')} />
+        <TableHeaderCell label="Kind" sortable sortDirection={sortDir('kind')} onsort={() => sortBy('kind')} />
         <TableHeaderCell label="Title" sortable sortDirection={sortDir('title')} onsort={() => sortBy('title')} />
+        <TableHeaderCell label="Key" sortable sortDirection={sortDir('key')} onsort={() => sortBy('key')} />
         <TableHeaderCell label="Area" sortable sortDirection={sortDir('area')} onsort={() => sortBy('area')} />
+        <TableHeaderCell label="Location" sortable sortDirection={sortDir('location')} onsort={() => sortBy('location')} />
         <TableHeaderCell label="Tags" />
-        <TableHeaderCell label="Exits" numeric sortable sortDirection={sortDir('exits')} onsort={() => sortBy('exits')} />
         <TableHeaderCell label="Ref" numeric />
         <TableHeaderCell label="" />
       {/snippet}
 
       {#each filtered as r (r.ref)}
-        <tr class="rt-row" onclick={() => onedit(r.ref)} title="Edit room">
-          <td class="rt-key">{r.key}</td>
+        <tr class="rt-row" onclick={() => onedit(r.ref)} title="Edit {r.kind}">
+          <td><span class="rt-kind kind-{r.kind}">{r.kind}</span></td>
           <td class="rt-title">{r.title || r.key}</td>
+          <td class="rt-key">{r.key}</td>
           <td>{#if r.area}<span class="rt-area">{r.area}</span>{:else}<span class="rt-unfiled">unfiled</span>{/if}</td>
+          <td>{#if r.location}<span class="rt-loc">{r.location}</span>{:else}<span class="rt-dim">—</span>{/if}</td>
           <td>
             {#if r.tags.length}
               <div class="rt-tags">{#each r.tags as t}<Chip size="sm">{t}</Chip>{/each}</div>
             {:else}<span class="rt-dim">—</span>{/if}
           </td>
-          <td class="rt-num">{r.exits}</td>
           <td class="rt-num rt-ref">{r.ref}</td>
           <td class="rt-actions">
-            <button class="rt-jump" title="Open in graph" onclick={(e) => { e.stopPropagation(); onopen(r.ref); }}>
-              <WaypointsIcon size={14} />
-            </button>
+            {#if r.kind === 'room'}
+              <button class="rt-jump" title="Open in graph" onclick={(e) => { e.stopPropagation(); onopen(r.ref); }}>
+                <WaypointsIcon size={14} />
+              </button>
+            {/if}
           </td>
         </tr>
       {/each}
     </Table>
 
     {#if !loading && filtered.length === 0}
-      <div class="rt-empty">No rooms match “{q}”.</div>
+      <div class="rt-empty">No objects match{q ? ` “${q}”` : ' this filter'}.</div>
     {/if}
   </div>
 </div>
@@ -141,7 +179,7 @@
     background: var(--bg-primary, #12100c); border: 1px solid var(--border-default, #332c22);
     border-radius: var(--radius-md, 7px); padding: 5px 8px;
   }
-  .rt-search { width: 280px; max-width: 40vw; }
+  .rt-search { width: 260px; max-width: 34vw; }
   .rt-spacer { flex: 1; }
   .rt-warn { font-size: 11.5px; color: var(--accent-red, #d07a5a); }
   .rt-count { font-size: 12px; color: var(--text-muted, #9a9186); font-variant-numeric: tabular-nums; }
@@ -155,10 +193,20 @@
   .rt-scroll { flex: 1; min-height: 0; overflow: auto; }
   .rt-row { cursor: pointer; }
   .rt-row:hover :global(td) { background: color-mix(in srgb, var(--accent-amber, #c9956b) 12%, transparent); }
+  .rt-kind {
+    font-family: var(--font-mono, ui-monospace, monospace); font-size: 9px; text-transform: uppercase;
+    letter-spacing: .04em; padding: 2px 6px; border-radius: 4px;
+    background: var(--bg-primary, #12100c); border: 1px solid var(--border-muted, #2a2419); color: var(--text-muted, #9a9186);
+  }
+  .kind-room { color: var(--accent-amber, #c9956b); border-color: color-mix(in srgb, var(--accent-amber, #c9956b) 34%, transparent); }
+  .kind-npc { color: var(--accent-green, #8fb877); border-color: color-mix(in srgb, var(--accent-green, #8fb877) 34%, transparent); }
+  .kind-item { color: var(--accent-blue, #6ea3d0); border-color: color-mix(in srgb, var(--accent-blue, #6ea3d0) 34%, transparent); }
+  .kind-player { color: #d3a2d8; border-color: color-mix(in srgb, #d3a2d8 34%, transparent); }
   .rt-key { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; color: var(--text-muted, #b6a888); white-space: nowrap; }
   .rt-title { font-weight: 600; color: var(--text-primary, #ece0c8); }
   .rt-area { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--bg-surface, #17140f); border: 1px solid var(--border-muted, #2a2419); color: var(--text-secondary, #b6a888); }
   .rt-unfiled { font-size: 11px; color: var(--text-muted, #8c8378); font-style: italic; }
+  .rt-loc { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--text-muted, #b6a888); }
   .rt-tags { display: flex; flex-wrap: wrap; gap: 4px; }
   .rt-num { text-align: right; font-variant-numeric: tabular-nums; }
   .rt-ref { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--accent-amber, #c9956b); }
