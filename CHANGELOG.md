@@ -7,6 +7,10 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.1.0-rc.5 — 2026-08-23
+
 ### Added
 
 - **Property-style object access** (issue #19) — hook-facing objects (`this`,
@@ -24,6 +28,14 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   latest `SetAttr`/`UnsetAttr` per `(target, key)`, replacing the reverse scan.
   This matters because every property read routes through it; it also speeds up
   existing `get_attr`/`has_attr` in write-heavy scripts.
+- **Softcode benchmark suite** (#21) — a criterion suite (`benches/softcode.rs`)
+  covering VM construction, cold compile, per-hook dispatch overhead,
+  budget-interrupt cost, and read/write/mixed hook workloads, plus a library
+  target so benches (and external tooling) can link the crate directly.
+
+### Fixed
+
+- clippy `-D warnings` clean across lib + all targets.
 
 ## 0.1.0-rc.4 — 2026-08-23
 
