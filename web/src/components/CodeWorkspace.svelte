@@ -45,19 +45,16 @@
     loading = false;
   }
 
-  // Add a hook to any object by ref (an object with no programs isn't in the
-  // explorer yet) — create it with a stub, refresh, and open it.
+  // Open a hook on any object by ref (an object with no programs isn't in the
+  // explorer yet). Non-destructive: openHook loads existing code or seeds a
+  // starter template, marking it dirty — nothing is written until Save.
   async function addHookToRef() {
     const r = newRef.trim();
     const h = newHook.trim();
     if (!r || !h) return;
-    const res = await api('set_program', { ref_id: r, hook: h, source: hookTemplate(h) });
-    if (!res?.ok) { showFlash?.({ message: res?.error || 'Failed to add hook', tone: 'critical' }); return; }
     newRef = '';
     newHook = '';
-    await loadExplorer();
-    const entry = entries.find((e) => e.ref_id === r) || { ref_id: r, key: r, title: r };
-    openHook(entry, h);
+    await openDeepLink(r, h);
   }
 
   onMountLike();
@@ -65,7 +62,9 @@
 
   // Validate a picked/typed hook name against the engine's vocabulary before
   // it reaches set_program. Returning false keeps the Typeahead open with the
-  // error row so the user can correct a typo without a round-trip.
+  // error row so the user can correct a typo without a round-trip. On a valid
+  // pick, if a ref is already filled in, open the hook straight away (seeding
+  // its starter) so the example appears the instant you choose it.
   function pickHook(v) {
     if (!isValidHookName(v, hooksData)) {
       hookErr = `“${v}” isn't a valid hook — use a known hook or an on_/cmd_/lib_ name`;
@@ -73,6 +72,7 @@
     }
     hookErr = '';
     newHook = v;
+    if (newRef.trim()) addHookToRef();
   }
 
   // Open the hook named in the URL once the explorer has loaded — even if the
@@ -218,7 +218,7 @@
             onselect={pickHook}
           />
         </div>
-        <button type="submit" title="Create hook and open it"><PlusIcon size={13} /></button>
+        <button type="submit" title="Open hook (scaffolds a starter if it's new)"><PlusIcon size={13} /></button>
       </form>
       {#if hookErr}<div class="cw-nh-err">{hookErr}</div>{/if}
       <div class="cw-tree">

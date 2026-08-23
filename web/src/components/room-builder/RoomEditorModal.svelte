@@ -196,7 +196,9 @@
 
   // Validate a picked/typed hook against the engine's vocabulary; returning
   // false keeps the Typeahead open with the error row so a typo is caught
-  // before the set_program round-trip.
+  // before the set_program round-trip. A valid pick adds the hook straight
+  // away (seeded with its starter), so the example appears the instant you
+  // choose it — no second click.
   function pickHook(v) {
     if (!isValidHookName(v, hooksData)) {
       hookErr = `“${v}” isn't a valid hook — use a known hook or an on_/cmd_/lib_ name`;
@@ -204,11 +206,14 @@
     }
     hookErr = '';
     newHook = v;
+    addHook();
   }
   async function addHook() {
     const h = newHook.trim();
     if (!h) return;
     if (!isValidHookName(h, hooksData)) { hookErr = `“${h}” isn't a valid hook name`; return; }
+    // Don't clobber a hook that already exists — just clear the box.
+    if (programs.some((p) => p.hook === h)) { newHook = ''; return; }
     const src = hookTemplate(h);
     const r = await api('set_program', { ref_id: ref, hook: h, source: src });
     if (r?.ok) { programs = [...programs, { hook: h, source: src, dirty: false, saving: false }]; newHook = ''; onchanged(); }
