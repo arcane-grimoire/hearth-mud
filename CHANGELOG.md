@@ -9,6 +9,33 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Nothing yet.
 
+## 0.1.0-rc.6 — 2026-08-23
+
+### Added
+
+- **Unified builder IDE** (web client) — a single builder workspace replacing
+  the scatter of loosely-linked tools. One shared selection drives everything:
+  a VS Code-style explorer tree (objects grouped by area → their hooks as
+  files, plus a Maps folder) on the left, and a tabbed editor in the center
+  where objects, hooks, and overviews all open as tabs. An object tab carries
+  Properties, Hooks, and Dialogue; a hook tab is the full CodeMirror editor
+  (lint, autocomplete, ⌘S, Run). Includes a New-object creator, ⌘K find (across
+  objects *and* maps), a hideable sidebar (⌘B), and Table/Map overviews.
+- **Native Svelte map builder** — the standalone Mapwright app is ported to
+  native Svelte components (grid painter, terrain palette, per-tile room
+  inspector, terrain/schema/import-export modals) sharing the map TOML
+  parse/serialize logic. It's a real tab in the workspace: kit-ui-themed
+  (fonts and colors), no iframe, with per-map deep-linking by name.
+- **Dialogue editor** — a full Ink authoring surface in the builder IDE, with a
+  Raw mode and a plain-textarea fallback, wired to the `ink_*` API actions that
+  previously had no web UI.
+
+### Removed
+
+- **Standalone Mapwright** (`src/net/mapwright.html` and its `GET /builder`
+  route) — superseded by the native map builder. Client routes under
+  `/builder/*` continue to resolve via the SPA fallback.
+
 ## 0.1.0-rc.5 — 2026-08-23
 
 ### Added
