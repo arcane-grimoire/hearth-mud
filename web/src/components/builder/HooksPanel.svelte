@@ -62,6 +62,14 @@
   .hp { display: flex; flex-direction: column; gap: 10px; padding: 14px; }
   .add { display: flex; gap: 6px; }
   .add :global(.kit-typeahead) { flex: 1; }
+
+  /* The hook picker's default row layout lets the description (meta) hold its
+     width and crush the hook NAME to an ellipsis. Flip it: the name keeps its
+     full width, the description shrinks/ellipsizes instead. Also give the panel
+     room and brighten the description so definitions are readable. */
+  .hp :global(.kit-typeahead__panel) { min-width: 360px; }
+  .hp :global(.kit-typeahead__option-label) { flex: none; }
+  .hp :global(.kit-typeahead__option-meta) { flex: 1 1 auto; min-width: 0; margin-left: 12px; color: var(--text-secondary); }
   .err { color: var(--accent-red, #d07a5a); font-size: 11px; margin-top: -4px; }
   .list { display: flex; flex-direction: column; gap: 2px; }
   .hook {
