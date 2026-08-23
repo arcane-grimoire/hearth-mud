@@ -31,3 +31,10 @@ bladeink-compiler = "2.0.0"
 blake3 = "1"
 similar = "2"
 ureq = { version = "2", features = ["json"] }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "softcode"
+harness = false

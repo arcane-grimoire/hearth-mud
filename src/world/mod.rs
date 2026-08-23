@@ -23,6 +23,12 @@ pub struct World {
     pub(crate) dirty: HashMap<String, bool>,
 }
 
+impl Default for World {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl World {
     pub fn new() -> Self {
         Self {

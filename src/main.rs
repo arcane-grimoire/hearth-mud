@@ -1,33 +1,11 @@
-#![allow(dead_code)]
-#![allow(clippy::too_many_arguments)]
-#![allow(clippy::type_complexity)]
-
-mod accounts;
-mod ansi;
-mod cli;
-mod config;
-mod db;
-mod dungeon;
-mod grid;
-mod import_export;
-mod loader;
-mod engine;
-mod locks;
-mod map_template;
-mod markup;
-mod net;
-mod noise;
-mod softcode;
-mod theme;
-mod world;
-
 use std::path::Path;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use config::Config;
-use db::Database;
+use hearth_mud::config::Config;
+use hearth_mud::db::Database;
+use hearth_mud::{cli, engine, net};
 
 /// How long to wait for the engine's final checkpoint before giving up.
 ///

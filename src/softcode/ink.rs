@@ -57,6 +57,12 @@ pub struct InkRuntime {
     ink_dir: Option<PathBuf>,
 }
 
+impl Default for InkRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InkRuntime {
     pub fn new() -> Self {
         Self {
