@@ -126,7 +126,11 @@
     } catch (e) { existing = null; }
     // A program that defines no function is just a placeholder (e.g. the old
     // "-- on_enter hook" stub) — treat it as empty and seed a real example.
-    const hasCode = existing?.source && /\bfunction\b/.test(existing.source);
+    // Strip Lua comments first so a comment mentioning "function" doesn't count.
+    const codeOnly = (existing?.source || '')
+      .replace(/--\[\[[\s\S]*?\]\]/g, '')
+      .replace(/--[^\n]*/g, '');
+    const hasCode = /\bfunction\b/.test(codeOnly);
     if (hasCode) {
       source = existing.source;
       dirty = false;

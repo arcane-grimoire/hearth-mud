@@ -42,7 +42,10 @@
     if (e.key === 'Escape') { onclose(); return; }
     if (e.key === 'Enter') {
       e.preventDefault();
-      if (asRef && !results.length) pick(asRef);
+      // An explicit "#…" is a direct-open intent — honour it even when the
+      // query also fuzzy-matches some objects (that's the top "Open #ref" row).
+      const explicitRef = asRef && q.trim().startsWith('#');
+      if (explicitRef) pick(asRef);
       else if (results.length) pick(results[0].ref_id);
       else if (asRef) pick(asRef);
     }
