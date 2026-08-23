@@ -1607,3 +1607,81 @@ fn ink_output_to_table(lua: &Lua, output: &ink::InkOutput) -> mlua::Result<Value
 
     Ok(Value::Table(t))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The web editor's Help panel renders `hearth-api.js` as the scripting
+    /// reference. This test keeps that static list honest against what
+    /// `install()` actually registers: the *set* of names must match exactly,
+    /// in both directions — additions, removals, and renames all fail here
+    /// (a count alone would let a swap through silently). Signature/doc text
+    /// is out of scope; that needs the future introspection endpoint.
+    #[test]
+    fn help_panel_api_reference_matches_installed_functions() {
+        let api_rs = include_str!("api.rs");
+        let js =
+            include_str!("../../web/src/components/code/hearth-api.js");
+
+        // Registered names: every `env.set("name", ...)` in this file, inline
+        // or multiline. (Test-only assert_* installs live in softcode/mod.rs,
+        // not here.) Scan stops at the tests module so this test's own source
+        // can't match.
+        let installed_src = api_rs.split("#[cfg(test)]").next().unwrap();
+        let registered: std::collections::BTreeSet<&str> = {
+            let mut names = std::collections::BTreeSet::new();
+            let mut rest = installed_src;
+            while let Some(pos) = rest.find("env.set(") {
+                rest = &rest[pos + "env.set(".len()..];
+                let trimmed = rest.trim_start();
+                if let Some(after_quote) = trimmed.strip_prefix('"')
+                    && let Some(end) = after_quote.find('"')
+                {
+                    names.insert(&after_quote[..end]);
+                }
+            }
+            names
+        };
+        assert!(
+            registered.len() > 50,
+            "env.set scan found only {} registrations — the parser is broken",
+            registered.len()
+        );
+
+        // Referenced names: every `['name', ...]` row in the API_FUNCTIONS
+        // block of hearth-api.js (API_GLOBALS/OBJECT_MEMBERS are locals and
+        // members, not installed functions).
+        let referenced: std::collections::BTreeSet<&str> = {
+            let section = js
+                .split("export const API_FUNCTIONS")
+                .nth(1)
+                .expect("API_FUNCTIONS missing from hearth-api.js");
+            let section =
+                section.split("export const").next().unwrap();
+            let mut names = std::collections::BTreeSet::new();
+            let mut rest = section;
+            while let Some(pos) = rest.find("['") {
+                rest = &rest[pos + 2..];
+                if let Some(end) = rest.find('\'') {
+                    names.insert(&rest[..end]);
+                    rest = &rest[end..];
+                } else {
+                    break;
+                }
+            }
+            names
+        };
+
+        let missing_in_js: Vec<_> =
+            registered.difference(&referenced).collect();
+        let stale_in_js: Vec<_> =
+            referenced.difference(&registered).collect();
+        assert!(
+            missing_in_js.is_empty() && stale_in_js.is_empty(),
+            "hearth-api.js drifted from the engine:\n  not in the reference (add it): {:?}\n  no longer an engine function (remove it): {:?}",
+            missing_in_js,
+            stale_in_js
+        );
+    }
+}

@@ -1,18 +1,47 @@
 <script>
   import XIcon from '@lucide/svelte/icons/x';
   import SearchIcon from '@lucide/svelte/icons/search';
+  import CopyIcon from '@lucide/svelte/icons/copy';
+  import CheckIcon from '@lucide/svelte/icons/check';
   import { loadHooks } from '../../lib/hooks.js';
   import { API_FUNCTIONS, API_GLOBALS, OBJECT_MEMBERS } from './hearth-api.js';
+  import { hookTemplate } from '../../lib/hook-templates.js';
 
   // Scripting quick-reference docked to the right of the code editor
   // (/builder/code). Two sections: Hooks (the engine's live vocabulary via
   // `list_hooks`) and API (static function reference from hearth-api.js).
   // Rows expand inline for the signature + doc. Pure read-only data — nothing
   // here writes to the world.
-  let { onclose = () => {} } = $props();
+  let { sel = null, onclose = () => {} } = $props();
 
   let q = $state('');
   let expanded = $state(null); // expanded row id ("api:emit", "hook:on_enter"…)
+
+  // Context: the hook currently open in the editor gets a pinned card (doc +
+  // signature + copy-template) at the top of the panel, and its row in the
+  // Hooks list is highlighted and scrolled into view.
+  let copied = $state(false);
+  let copyTimer;
+  const currentDoc = $derived(
+    hooksData?.known?.find((h) => h.name === sel?.hook)?.describes || null,
+  );
+  async function copyTemplate() {
+    if (!sel) return;
+    try {
+      await navigator.clipboard.writeText(hookTemplate(sel.hook));
+      copied = true;
+      clearTimeout(copyTimer);
+      copyTimer = setTimeout(() => (copied = false), 1500);
+    } catch (e) { /* clipboard unavailable */ }
+  }
+  $effect(() => {
+    const h = sel?.hook;
+    if (!h) return;
+    // Scroll after the highlight renders.
+    requestAnimationFrame(() => {
+      document.getElementById(`hp-hook-${h}`)?.scrollIntoView({ block: 'nearest' });
+    });
+  });
 
   // Engine-backed hook vocabulary (cached module-wide in lib/hooks.js).
   let hooksData = $state(null);
@@ -59,12 +88,25 @@
   </header>
 
   <div class="hp-body">
+    {#if sel}
+      <div class="hp-cur">
+        <div class="hp-h">Current · {sel.key || sel.ref}</div>
+        <span class="hp-name hp-cur-name">{sel.hook}</span>
+        {#if currentDoc}<p class="hp-cur-doc">{currentDoc}</p>{/if}
+        <code class="hp-sig">function {sel.hook}(this, actor, room, args)</code>
+        <button class="hp-copy" onclick={copyTemplate} title="Copy the starter example for this hook">
+          {#if copied}<CheckIcon size={12} /> Copied{:else}<CopyIcon size={12} /> Copy starter{/if}
+        </button>
+      </div>
+    {/if}
+
     {#if hookGroups.length}
       {#each hookGroups as g}
         <div class="hp-h">{g.label}</div>
         {#each g.items as h (h.name)}
           {@const id = `hook:${h.name}`}
-          <button class="hp-row" class:open={expanded === id} aria-expanded={expanded === id}
+          <button id={`hp-hook-${h.name}`} class="hp-row" class:cur={sel && sel.hook === h.name}
+            class:open={expanded === id} aria-expanded={expanded === id}
             onclick={() => toggle(id)}>
             <span class="hp-name">{h.name}</span>
             <span class="hp-doc">{h.describes}</span>
@@ -129,4 +171,17 @@
   .hp-detail code { display: block; font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--accent-green, #8fb877); white-space: pre-wrap; word-break: break-word; }
   .hp-detail p { margin: 5px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--text-secondary, #b6a888); }
   .hp-dim { color: var(--text-muted, #8c8378); font-size: 12px; font-style: italic; padding: 12px; }
+
+  /* Current-hook card (context wiring) */
+  .hp-cur { margin: 6px 8px 2px; padding: 9px 10px; background: var(--bg-primary, #12100c); border: 1px solid color-mix(in srgb, var(--accent-amber, #c9956b) 35%, transparent); border-radius: 9px; }
+  .hp-cur .hp-h { padding: 0 0 4px; color: var(--text-muted, #8c8378); }
+  .hp-cur-name { font-size: 13px; color: var(--accent-amber, #c9956b); }
+  .hp-cur-doc { margin: 3px 0 6px; font-size: 11.5px; line-height: 1.4; color: var(--text-secondary, #b6a888); }
+  .hp-sig { display: block; font-family: var(--font-mono, ui-monospace, monospace); font-size: 10.5px; color: var(--accent-green, #8fb877); white-space: pre-wrap; word-break: break-word; margin-bottom: 7px; }
+  .hp-copy { display: inline-flex; align-items: center; gap: 5px; font: inherit; font-size: 11px; color: var(--accent-amber, #c9956b); background: none; border: 1px solid color-mix(in srgb, var(--accent-amber, #c9956b) 40%, transparent); border-radius: 6px; padding: 3px 9px; cursor: pointer; }
+  .hp-copy:hover { background: color-mix(in srgb, var(--accent-amber, #c9956b) 12%, transparent); }
+
+  /* The row matching the hook open in the editor */
+  .hp-row.cur { box-shadow: inset 3px 0 0 var(--accent-amber, #c9956b); background: color-mix(in srgb, var(--accent-amber, #c9956b) 8%, transparent); }
+  .hp-row.cur .hp-name { color: var(--accent-amber, #c9956b); }
 </style>

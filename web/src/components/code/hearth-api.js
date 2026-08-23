@@ -5,6 +5,10 @@
 // replace this static list.
 
 // Callable API functions: [name, signature, doc]
+// Kept honest by src/softcode/api.rs's help_panel_api_reference_matches test:
+// adding/renaming/removing an engine function without updating this list
+// fails `cargo test`. (Read-side scratch values use get_attr; there is no
+// engine `get_val`.)
 export const API_FUNCTIONS = [
   ['emit', 'emit(target, text)', 'Send text to a player (or everyone in a room ref).'],
   ['emit_room', 'emit_room(room, text)', 'Send text to everyone in a room.'],
@@ -56,7 +60,6 @@ export const API_FUNCTIONS = [
   ['set_description', 'set_description(ref, description)', 'Set an object’s description.'],
   ['set_program', 'set_program(ref, hook, source)', 'Attach/replace a hook program.'],
   ['set_val', 'set_val(ref, key, value)', 'Set a scratch value.'],
-  ['get_val', 'get_val(ref, key)', 'Read a scratch value.'],
   ['after', 'after(seconds, hook)', 'Schedule a hook to fire later; returns a timer.'],
   ['cancel_after', 'cancel_after(timer)', 'Cancel a scheduled timer.'],
   ['get_timers', 'get_timers(ref)', 'Pending timers on an object.'],

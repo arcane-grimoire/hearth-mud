@@ -288,7 +288,7 @@
     </section>
 
     {#if helpOpen}
-      <div id="cw-help-panel" class="cw-help-col"><HelpPanel onclose={() => (helpOpen = false)} /></div>
+      <div id="cw-help-panel" class="cw-help-col"><HelpPanel {sel} onclose={() => (helpOpen = false)} /></div>
     {:else}
       <!-- Slim rail so the panel stays discoverable when closed -->
       <button id="cw-help-rail" class="cw-rail" aria-expanded="false"
@@ -325,6 +325,15 @@
   .cw-help-col { min-height: 0; min-width: 0; }
   .cw-rail { position: absolute; right: 0; top: 50%; transform: translateY(-50%); z-index: 210; display: flex; flex-direction: column; align-items: center; justify-content: center; width: 26px; height: 56px; background: var(--bg-surface, #17140f); border: 1px solid var(--border-default, #2a2419); border-right: none; border-radius: 8px 0 0 8px; color: var(--text-muted, #9a9186); cursor: pointer; box-shadow: -6px 0 18px -12px rgba(0,0,0,.6); }
   .cw-rail:hover { color: var(--accent-amber, #c9956b); width: 30px; }
+  /* Narrow builder windows: overlay instead of docking so the editor keeps
+     its width (ObjectFinder-style). Docking resumes at ≥1440px. */
+  @media (max-width: 1439.98px) {
+    .cw-main.help-open { grid-template-columns: 244px 1fr; }
+    .cw-main.help-open .cw-help-col {
+      position: absolute; top: 0; right: 0; bottom: 0; width: 320px;
+      z-index: 220; box-shadow: -12px 0 34px -18px rgba(0,0,0,.7);
+    }
+  }
 
   .cw-explorer { border-right: 1px solid var(--border-default, #2a2419); background: var(--bg-surface, #17140f); display: flex; flex-direction: column; min-height: 0; }
   .cw-search { display: flex; align-items: center; gap: 7px; padding: 9px 11px; border-bottom: 1px solid var(--border-muted, #2a2419); color: var(--text-muted, #9a9186); }
