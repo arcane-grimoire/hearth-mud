@@ -131,6 +131,13 @@ pub enum ApiRequest {
         area: Option<String>,
         limit: Option<u32>,
     },
+    /// The engine's hook vocabulary, for the builder's hook autocomplete: the
+    /// fixed `KNOWN_HOOKS` the engine fires on its own (each with a one-line
+    /// description) plus the open-ended prefixes (`on_`, `cmd_`, `lib_`) that
+    /// `is_valid_hook_name` also accepts. Pure static schema — no world data —
+    /// so it rides in the public `is_read` set, and the client never has to
+    /// hard-code (and drift from) the list.
+    ListHooks,
     /// Version history for one `(ref_id, hook)` — the REST counterpart of
     /// `@program/history`. Requires auth like any other write-tier action
     /// (see `is_read` below): it serves full historical Program source,
@@ -883,7 +890,10 @@ impl Engine {
         // stored a real token, so requiring one here doesn't break it.
         let is_read = matches!(
             &req,
-            ApiRequest::ListRooms | ApiRequest::ListObjects { .. } | ApiRequest::ListExits { .. }
+            ApiRequest::ListRooms
+                | ApiRequest::ListObjects { .. }
+                | ApiRequest::ListExits { .. }
+                | ApiRequest::ListHooks
         );
 
         // Populated for authenticated writes — the account performing this
@@ -1018,6 +1028,22 @@ impl Engine {
                 ApiResponse::success(serde_json::json!({
                     "objects": rows,
                     "truncated": truncated,
+                }))
+            }
+            ApiRequest::ListHooks => {
+                let known: Vec<serde_json::Value> = hooks::KNOWN_HOOKS
+                    .iter()
+                    .map(|h| serde_json::json!({
+                        "name": h,
+                        "describes": hooks::describe_hook(h),
+                    }))
+                    .collect();
+                // Mirrors `is_valid_hook_name`'s open-ended arms: a name that
+                // starts with one of these (and is longer than the prefix) is
+                // accepted even when it isn't in `known`.
+                ApiResponse::success(serde_json::json!({
+                    "known": known,
+                    "open_prefixes": ["on_", "cmd_", "lib_"],
                 }))
             }
             ApiRequest::CreateRoom { area, key, title, description } => {
@@ -7359,6 +7385,32 @@ mod tests {
         assert_eq!(hills[0]["key"].as_str(), Some("cave"));
         // The loose npc/item report an empty area (they're located, not filed).
         assert_eq!(npcs[0]["area"].as_str(), Some(""));
+    }
+
+    #[test]
+    fn list_hooks_is_public_and_matches_the_engine_vocabulary() {
+        // Public (no token): it's static schema, not world data.
+        let (mut engine, _t, _) = engine_with_api_token(&[Scope::Builder]);
+        let resp = engine.handle_api_request(ApiRequest::ListHooks, None);
+        assert!(resp.ok, "list_hooks must be a public read");
+        let data = resp.data.unwrap();
+
+        let known = data["known"].as_array().unwrap();
+        assert_eq!(known.len(), hooks::KNOWN_HOOKS.len());
+        // Every KNOWN_HOOKS entry is present with a non-empty description.
+        for h in hooks::KNOWN_HOOKS {
+            let row = known.iter().find(|r| r["name"] == *h).unwrap();
+            assert!(!row["describes"].as_str().unwrap().is_empty());
+        }
+        let prefixes: Vec<&str> =
+            data["open_prefixes"].as_array().unwrap().iter().map(|p| p.as_str().unwrap()).collect();
+        assert_eq!(prefixes, ["on_", "cmd_", "lib_"]);
+        // The advertised vocabulary agrees with the real validator: a listed
+        // hook and each open prefix pass; a bare word and a bogus can_ fail.
+        assert!(hooks::is_valid_hook_name(known[0]["name"].as_str().unwrap()));
+        assert!(prefixes.iter().all(|p| hooks::is_valid_hook_name(&format!("{p}x"))));
+        assert!(!hooks::is_valid_hook_name("frobnicate"));
+        assert!(!hooks::is_valid_hook_name("can_frobnicate"));
     }
 
     #[test]
