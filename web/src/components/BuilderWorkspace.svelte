@@ -10,6 +10,7 @@
   import PanelLeftIcon from '@lucide/svelte/icons/panel-left';
   import FileCodeIcon from '@lucide/svelte/icons/file-code';
   import BoxIcon from '@lucide/svelte/icons/box';
+  import MessagesSquareIcon from '@lucide/svelte/icons/messages-square';
   import { showFlash } from '@kenn-io/kit-ui';
   import { api } from '../lib/api.js';
   import { selection, selectRef, clearSelection } from '../lib/selection.svelte.js';
@@ -17,8 +18,8 @@
   import BuilderTree from './builder/BuilderTree.svelte';
   import PropertiesPanel from './builder/PropertiesPanel.svelte';
   import HooksPanel from './builder/HooksPanel.svelte';
-  import DialoguePanel from './builder/DialoguePanel.svelte';
   import CodeOverlay from './builder/CodeOverlay.svelte';
+  import InkEditor from './dialogue/InkEditor.svelte';
   import RoomGraph from './room-builder/RoomGraph.svelte';
   import ObjectFinder from './room-builder/ObjectFinder.svelte';
   import MapBuilder from './builder/map/MapBuilder.svelte';
@@ -145,6 +146,7 @@
   // ── Tabs ──────────────────────────────────────────────────────────────
   function tabIdOf(t) {
     if (t.type === 'code') return `code:${t.ref}:${t.hook}`;
+    if (t.type === 'ink') return `ink:${t.ref}`;
     if (t.type === 'object') return `obj:${t.ref}`;
     if (t.type === 'maps') return `maps:${t.name || ''}`; // one tab per named map
     return t.type; // table | map are singletons
@@ -172,6 +174,7 @@
   }
   const openObject = (ref) => openTab({ type: 'object', ref });
   const openHookTab = (ref, hook) => openTab({ type: 'code', ref, hook });
+  const openInkTab = (ref) => openTab({ type: 'ink', ref });
 
   function nameOf(ref) {
     const o = objects.find((x) => x.ref_id === ref);
@@ -182,6 +185,7 @@
     if (t.type === 'map') return 'Map';
     if (t.type === 'maps') return t.name || 'Map builder';
     if (t.type === 'code') return t.hook;
+    if (t.type === 'ink') return `${nameOf(t.ref)} · dialogue`;
     return nameOf(t.ref);
   }
 
@@ -279,10 +283,10 @@
             <div class="tabx" class:active={t.id === activeId} role="tab" tabindex="0"
               onclick={() => activate(t.id)} onkeydown={(e) => e.key === 'Enter' && activate(t.id)}>
               <span class="ti">
-                {#if t.type === 'code'}<FileCodeIcon size={12} />{:else if t.type === 'object'}<BoxIcon size={12} />{:else if t.type === 'table'}<TableIcon size={12} />{:else if t.type === 'maps'}<Grid3x3Icon size={12} />{:else}<MapIcon size={12} />{/if}
+                {#if t.type === 'code'}<FileCodeIcon size={12} />{:else if t.type === 'ink'}<MessagesSquareIcon size={12} />{:else if t.type === 'object'}<BoxIcon size={12} />{:else if t.type === 'table'}<TableIcon size={12} />{:else if t.type === 'maps'}<Grid3x3Icon size={12} />{:else}<MapIcon size={12} />{/if}
               </span>
               <span class="tl">{tabLabel(t)}</span>
-              {#if t.type === 'code' || t.type === 'object'}<span class="tref">{t.ref}</span>{/if}
+              {#if t.type === 'code' || t.type === 'object' || t.type === 'ink'}<span class="tref">{t.ref}</span>{/if}
               <button class="tc-x" title="Close" onclick={(e) => closeTab(t.id, e)}><XIcon size={12} /></button>
             </div>
           {/each}
@@ -304,6 +308,14 @@
               hook={activeTab.hook}
               objName={nameOf(activeTab.ref)}
               onclose={() => closeTab(activeTab.id)}
+              onsaved={refresh}
+            />
+          {/key}
+        {:else if activeTab.type === 'ink'}
+          {#key activeTab.id}
+            <InkEditor
+              refId={activeTab.ref}
+              objName={nameOf(activeTab.ref)}
               onsaved={refresh}
             />
           {/key}
@@ -338,7 +350,17 @@
                 {:else if subtab === 'hooks'}
                   <HooksPanel {obj} activeHook={null} onopen={(h) => openHookTab(obj.ref_id, h)} />
                 {:else}
-                  <DialoguePanel refId={obj.ref_id} />
+                  <div class="dlg-launch">
+                    <MessagesSquareIcon size={26} />
+                    <p class="dl-lead">Ink dialogue</p>
+                    <p class="dl-hint">
+                      {obj.attrs?._ink_source ? 'This NPC has a dialogue script.' : 'No dialogue yet.'}
+                      Edit it with syntax highlighting and a live playtest in its own tab.
+                    </p>
+                    <button class="dl-open" onclick={() => openInkTab(obj.ref_id)}>
+                      {obj.attrs?._ink_source ? 'Open dialogue editor' : 'Write dialogue'}
+                    </button>
+                  </div>
                 {/if}
               </div>
             </div>
@@ -434,6 +456,13 @@
   .subbody { flex: 1; min-height: 0; overflow-y: auto; }
 
   .none { color: var(--text-muted, #8c8378); font-style: italic; padding: 16px; font-size: 12.5px; }
+
+  .dlg-launch { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 40px 24px; text-align: center; color: var(--text-muted, #8c8378); }
+  .dlg-launch :global(svg) { color: color-mix(in srgb, var(--accent-amber, #c9956b) 60%, transparent); }
+  .dl-lead { margin: 4px 0 0; font-size: 14px; font-weight: 600; color: var(--text-secondary, #b6a888); }
+  .dl-hint { margin: 0; max-width: 380px; font-size: 12.5px; line-height: 1.5; }
+  .dl-open { margin-top: 8px; background: color-mix(in srgb, var(--accent-amber, #c9956b) 16%, transparent); border: 1px solid color-mix(in srgb, var(--accent-amber, #c9956b) 45%, transparent); color: var(--accent-amber, #c9956b); border-radius: 8px; padding: 7px 16px; cursor: pointer; font: inherit; font-size: 12.5px; font-weight: 600; }
+  .dl-open:hover { background: color-mix(in srgb, var(--accent-amber, #c9956b) 26%, transparent); }
 
   .welcome { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 24px; text-align: center; color: var(--text-muted, #8c8378); }
   .welcome :global(svg) { color: color-mix(in srgb, var(--accent-amber, #c9956b) 55%, transparent); margin-bottom: 4px; }

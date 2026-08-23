@@ -194,6 +194,19 @@ pub enum ApiRequest {
     InkCompile { source: String },
     InkSave { ref_id: String, source: String },
     InkLoad { ref_id: String },
+    /// Playtest a dialogue in the builder without touching a real player's
+    /// conversation. Runs against a per-builder preview key so two builders
+    /// (or a builder and their own live game session) never share ink state.
+    /// `source` lets the editor play the unsaved buffer; when omitted it falls
+    /// back to the object's saved `_ink_source`.
+    InkPlayStart {
+        ref_id: String,
+        #[serde(default)]
+        source: Option<String>,
+    },
+    InkPlayContinue { ref_id: String },
+    InkPlayChoose { ref_id: String, index: usize },
+    InkPlayEnd { ref_id: String },
     /// List the DB-owned map names plus the shared `terrain.toml` source —
     /// what the map builder loads to populate its picker and palette.
     /// Builder-gated (below), NOT in the unauthenticated `is_read` set.
@@ -277,6 +290,23 @@ pub(crate) fn format_epoch_secs(secs: i64) -> String {
     let sec = secs_of_day % 60;
     let (y, m, d) = civil_from_days(days);
     format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", y, m, d, hour, min, sec)
+}
+
+/// Serialize an `InkOutput` for the REST playtest actions. Mirrors the shape
+/// `ink_output_to_table` builds for the Luau runtime, so a web playtest pane
+/// and an in-game conversation render from the same fields.
+fn ink_output_json(out: &crate::softcode::ink::InkOutput) -> serde_json::Value {
+    serde_json::json!({
+        "text": out.text,
+        "can_continue": out.can_continue,
+        "ended": out.ended,
+        "tags": out.tags,
+        "choices": out
+            .choices
+            .iter()
+            .map(|c| serde_json::json!({ "index": c.index, "text": c.text, "tags": c.tags }))
+            .collect::<Vec<_>>(),
+    })
 }
 
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
@@ -1888,7 +1918,72 @@ impl Engine {
                     None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
                 }
             }
+            ApiRequest::InkPlayStart { ref_id, source } => {
+                let src = match source {
+                    Some(s) => s,
+                    None => match self
+                        .world
+                        .get(&ref_id)
+                        .and_then(|o| o.attrs.get("_ink_source"))
+                        .and_then(|v| v.as_str())
+                    {
+                        Some(s) => s.to_string(),
+                        None => return ApiResponse::error("No dialogue to play"),
+                    },
+                };
+                let key = Self::ink_preview_key(acting_account.as_deref());
+                match self
+                    .softcode
+                    .ink_runtime()
+                    .borrow_mut()
+                    .start_conversation(&key, &ref_id, &src, None)
+                {
+                    Ok(out) => ApiResponse::success(ink_output_json(&out)),
+                    Err(e) => ApiResponse::error(e),
+                }
+            }
+            ApiRequest::InkPlayContinue { ref_id } => {
+                let key = Self::ink_preview_key(acting_account.as_deref());
+                match self
+                    .softcode
+                    .ink_runtime()
+                    .borrow_mut()
+                    .continue_story(&key, &ref_id)
+                {
+                    Ok(out) => ApiResponse::success(ink_output_json(&out)),
+                    Err(e) => ApiResponse::error(e),
+                }
+            }
+            ApiRequest::InkPlayChoose { ref_id, index } => {
+                let key = Self::ink_preview_key(acting_account.as_deref());
+                match self
+                    .softcode
+                    .ink_runtime()
+                    .borrow_mut()
+                    .choose(&key, &ref_id, index)
+                {
+                    Ok(out) => ApiResponse::success(ink_output_json(&out)),
+                    Err(e) => ApiResponse::error(e),
+                }
+            }
+            ApiRequest::InkPlayEnd { ref_id } => {
+                let key = Self::ink_preview_key(acting_account.as_deref());
+                // Preview state is disposable — never persisted back to the NPC.
+                let _ = self
+                    .softcode
+                    .ink_runtime()
+                    .borrow_mut()
+                    .end_conversation(&key, &ref_id, false);
+                ApiResponse::ok()
+            }
         }
+    }
+
+    /// Conversation key for builder playtests. Namespaced per acting account so
+    /// a preview can never collide with a real player's live conversation with
+    /// the same NPC (whose key is the player's own ref).
+    fn ink_preview_key(account: Option<&str>) -> String {
+        format!("@ink-preview:{}", account.unwrap_or("anon"))
     }
 
     fn handle_connect(&mut self, session_id: String, tx: mpsc::UnboundedSender<ClientMessage>) {
@@ -6267,6 +6362,84 @@ mod tests {
         assert_eq!(data["title"], "A Cave");
         assert_eq!(data["description"], "Dark and damp.");
         assert_eq!(data["kind"], "room");
+
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn api_ink_playtest_roundtrip() {
+        let (tx, handle) = test_engine().await;
+
+        // A minimal branching conversation authored on an NPC.
+        let resp = api_call(&tx, ApiRequest::CreateObject {
+            area: "test".into(),
+            key: "sage".into(),
+            kind: "npc".into(),
+            title: Some("the Sage".into()),
+            description: None,
+            location: Some("#1".into()),
+        }).await;
+        let npc = resp.data.unwrap()["ref_id"].as_str().unwrap().to_string();
+
+        let source = "-> start\n\n=== start ===\nWell met.\n+ [Ask a question] -> answer\n+ [Leave] -> END\n\n=== answer ===\nThe path lies east. # hint:east\n-> END";
+        let resp = api_call(&tx, ApiRequest::InkSave { ref_id: npc.clone(), source: source.into() }).await;
+        assert!(resp.ok);
+        assert_eq!(resp.data.unwrap()["valid"], true);
+
+        // Start against the saved source (no explicit source passed).
+        let resp = api_call(&tx, ApiRequest::InkPlayStart { ref_id: npc.clone(), source: None }).await;
+        assert!(resp.ok, "start failed: {:?}", resp.error);
+        let out = resp.data.unwrap();
+        assert!(out["text"].as_str().unwrap().contains("Well met"));
+        assert_eq!(out["choices"].as_array().unwrap().len(), 2);
+        assert_eq!(out["ended"], false);
+
+        // Choosing the first option advances to the answer and ends, and the
+        // line's tag rides along.
+        let resp = api_call(&tx, ApiRequest::InkPlayChoose { ref_id: npc.clone(), index: 0 }).await;
+        assert!(resp.ok, "choose failed: {:?}", resp.error);
+        let out = resp.data.unwrap();
+        assert!(out["text"].as_str().unwrap().contains("path lies east"));
+        assert_eq!(out["tags"][0], "hint:east");
+        assert_eq!(out["ended"], true);
+
+        // Ending is idempotent and clears the preview slot.
+        let resp = api_call(&tx, ApiRequest::InkPlayEnd { ref_id: npc.clone() }).await;
+        assert!(resp.ok);
+
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn api_ink_playtest_runs_unsaved_buffer() {
+        let (tx, handle) = test_engine().await;
+
+        let resp = api_call(&tx, ApiRequest::CreateObject {
+            area: "test".into(),
+            key: "mute".into(),
+            kind: "npc".into(),
+            title: Some("a stranger".into()),
+            description: None,
+            location: Some("#1".into()),
+        }).await;
+        let npc = resp.data.unwrap()["ref_id"].as_str().unwrap().to_string();
+
+        // No _ink_source saved — but passing the buffer lets you playtest a
+        // draft before committing it.
+        let draft = "A draft line.\n-> END";
+        let resp = api_call(&tx, ApiRequest::InkPlayStart {
+            ref_id: npc.clone(),
+            source: Some(draft.into()),
+        }).await;
+        assert!(resp.ok, "start failed: {:?}", resp.error);
+        assert!(resp.data.unwrap()["text"].as_str().unwrap().contains("A draft line"));
+
+        // With nothing saved and no buffer, there is nothing to play.
+        let _ = api_call(&tx, ApiRequest::InkPlayEnd { ref_id: npc.clone() }).await;
+        let resp = api_call(&tx, ApiRequest::InkPlayStart { ref_id: npc.clone(), source: None }).await;
+        assert!(!resp.ok);
 
         drop(tx);
         let _ = handle.await;
