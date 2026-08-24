@@ -63,7 +63,7 @@
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   thead th {
     position: sticky; top: 0; z-index: 1;
-    text-align: left; font-size: 10px; font-weight: 600;
+    text-align: left; font-size: var(--fs-label); font-weight: 600;
     text-transform: uppercase; letter-spacing: 0.06em;
     color: var(--text-muted, #8c8378);
     background: var(--bg-surface, #17140f);
@@ -83,7 +83,7 @@
   .c-ref, .c-area { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--text-muted, #9a9186); white-space: nowrap; }
   .c-kind, .c-hooks { white-space: nowrap; }
   .kb {
-    font-family: var(--font-mono, ui-monospace, monospace); font-size: 9px; font-weight: 600;
+    font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-badge); font-weight: 600;
     text-transform: uppercase; letter-spacing: 0.04em; padding: 1px 5px; border-radius: 3px;
   }
   .k-room { background: rgba(86,182,194,0.15); color: var(--accent-teal, #56b6c2); }
@@ -94,7 +94,7 @@
   .k-exit { background: rgba(255,255,255,0.08); color: var(--text-muted, #9a9186); }
   .pill {
     display: inline-block; min-width: 16px; text-align: center;
-    font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px;
+    font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-meta);
     padding: 0 5px; border-radius: 8px;
     background: rgba(143,184,119,0.16); color: var(--accent-green, #8fb877);
   }

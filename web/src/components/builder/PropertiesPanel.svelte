@@ -258,8 +258,8 @@
      rather than one undivided scroll. */
   section { display: flex; flex-direction: column; gap: 8px; background: var(--bg-surface, #17140f); border: 1px solid var(--border-muted, #211d16); border-radius: 10px; padding: 12px 14px; }
   section.danger { background: none; border: none; border-radius: 0; padding: 6px 14px 0; }
-  h3 { margin: 0 0 2px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted, #8c8378); }
-  .fl { display: flex; flex-direction: column; gap: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted, #8c8378); }
+  h3 { margin: 0 0 2px; font-size: var(--fs-label); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted, #8c8378); }
+  .fl { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-label); text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted, #8c8378); }
   .fi, .ft, .mi {
     background: var(--bg-inset, #12100c); color: var(--text-primary, #ece0c8);
     border: 1px solid var(--border-default, #332c22); border-radius: 6px; padding: 6px 8px;
@@ -270,18 +270,18 @@
   .row { display: flex; gap: 6px; align-items: center; }
   .kw { width: 110px; flex: none; }
   .tags { display: flex; flex-wrap: wrap; gap: 4px; }
-  .tag { display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; padding: 2px 6px; border-radius: 3px; background: var(--bg-inset, #12100c); color: var(--text-secondary, #b6a888); }
+  .tag { display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-meta); padding: 2px 6px; border-radius: 3px; background: var(--bg-inset, #12100c); color: var(--text-secondary, #b6a888); }
   .tag button { background: none; border: none; color: var(--text-muted, #8c8378); cursor: pointer; font-size: 13px; line-height: 1; padding: 0; }
   .tag button:hover { color: var(--accent-red, #e06c75); }
   .none { color: var(--text-muted, #8c8378); font-style: italic; font-size: 11px; }
   .pad { padding: 10px !important; text-align: center; }
   .attrs { width: 100%; border-collapse: collapse; }
-  .attrs td { padding: 4px 6px; border-bottom: 1px solid var(--border-muted, #211d16); vertical-align: top; font-family: var(--font-mono, ui-monospace, monospace); font-size: 10.5px; }
+  .attrs td { padding: 4px 6px; border-bottom: 1px solid var(--border-muted, #211d16); vertical-align: top; font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-meta); }
   .ak { color: var(--accent-teal, #56b6c2); white-space: nowrap; width: 1%; }
   .av { color: var(--text-primary, #ece0c8); word-break: break-word; white-space: pre-wrap; }
-  .av textarea { width: 100%; background: var(--bg-inset, #12100c); color: var(--text-primary, #ece0c8); border: 1px solid var(--accent-amber, #c9956b); border-radius: 3px; padding: 3px 5px; font-family: inherit; font-size: 10.5px; outline: none; resize: vertical; min-height: 24px; }
+  .av textarea { width: 100%; background: var(--bg-inset, #12100c); color: var(--text-primary, #ece0c8); border: 1px solid var(--accent-amber, #c9956b); border-radius: 3px; padding: 3px 5px; font-family: inherit; font-size: var(--fs-meta); outline: none; resize: vertical; min-height: 24px; }
   .aa { white-space: nowrap; width: 1%; }
-  .aa button { background: none; border: none; color: var(--text-muted, #8c8378); cursor: pointer; font-size: 10.5px; padding: 2px 4px; }
+  .aa button { background: none; border: none; color: var(--text-muted, #8c8378); cursor: pointer; font-size: var(--fs-meta); padding: 2px 4px; }
   .aa button:hover { color: var(--text-primary, #ece0c8); }
   .aa button.del:hover { color: var(--accent-red, #e06c75); }
   .danger { flex-direction: row; align-items: center; gap: 8px; }

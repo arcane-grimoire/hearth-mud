@@ -186,12 +186,12 @@
      sharing .pp's gap. Each section is carded to match. */
   .sp { display: contents; }
   section { display: flex; flex-direction: column; gap: 8px; background: var(--bg-surface, #17140f); border: 1px solid var(--border-muted, #211d16); border-radius: 10px; padding: 12px 14px; }
-  h3 { margin: 0 0 2px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted, #8c8378); }
-  .cnt { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; opacity: 0.8; }
+  h3 { margin: 0 0 2px; font-size: var(--fs-label); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted, #8c8378); }
+  .cnt { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-meta); opacity: 0.8; }
   .rows { display: flex; flex-direction: column; gap: 5px; }
   .row-item { display: flex; align-items: center; gap: 9px; padding: 6px 8px; background: var(--bg-inset, #12100c); border: 1px solid var(--border-muted, #211d16); border-radius: 7px; }
-  .dir { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; text-transform: uppercase; color: var(--bg-primary, #12100c); background: var(--edge, #9c8863); border-radius: 4px; padding: 1px 6px; }
-  .kind { font-family: var(--font-mono, ui-monospace, monospace); font-size: 9px; text-transform: uppercase; color: var(--bg-primary, #12100c); background: var(--edge, #9c8863); border-radius: 4px; padding: 1px 6px; }
+  .dir { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-badge); text-transform: uppercase; color: var(--bg-primary, #12100c); background: var(--edge, #9c8863); border-radius: 4px; padding: 1px 6px; }
+  .kind { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-badge); text-transform: uppercase; color: var(--bg-primary, #12100c); background: var(--edge, #9c8863); border-radius: 4px; padding: 1px 6px; }
   .link { flex: 1; text-align: left; background: none; border: none; cursor: pointer; font: inherit; font-size: 12.5px; color: var(--text-primary, #ece0c8); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .link:hover { color: var(--accent-amber, #c9956b); text-decoration: underline; }
   .del { background: none; border: none; color: var(--text-muted, #9a9186); cursor: pointer; padding: 3px; border-radius: 5px; line-height: 0; }
@@ -204,7 +204,7 @@
   .confirm-go:hover { filter: brightness(1.08); }
   .confirm-no { flex: none; background: none; border: 1px solid var(--border-default, #332c22); color: var(--text-secondary, #b6a888); cursor: pointer; font: inherit; font-size: 11.5px; padding: 3px 9px; border-radius: 6px; }
   .confirm-no:hover { border-color: var(--text-secondary, #b6a888); color: var(--text-primary, #ece0c8); }
-  .here { flex: none; font-size: 10.5px; color: var(--text-muted, #8c8378); background: var(--bg-surface, #17140f); border: 1px solid var(--border-muted, #211d16); border-radius: 999px; padding: 1px 8px; }
+  .here { flex: none; font-size: var(--fs-meta); color: var(--text-muted, #8c8378); background: var(--bg-surface, #17140f); border: 1px solid var(--border-muted, #211d16); border-radius: 999px; padding: 1px 8px; }
   .add { display: flex; gap: 6px; align-items: center; }
   .mi { flex: 1; min-width: 0; background: var(--bg-inset, #12100c); color: var(--text-primary, #ece0c8); border: 1px solid var(--border-default, #332c22); border-radius: 6px; padding: 6px 8px; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; outline: none; }
   .mi:focus { border-color: var(--accent-amber, #c9956b); }
