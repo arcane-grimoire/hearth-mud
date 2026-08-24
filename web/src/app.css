@@ -40,6 +40,26 @@ body {
   height: 100%;
 }
 
+/* Keyboard focus ring for the builder IDE. Components zero the default outline
+   on inputs for looks; this puts a visible focus indicator back for keyboard
+   users (WCAG 2.4.7) while :focus-visible keeps it off mouse clicks. Scoped to
+   .ws so it doesn't fight kit-ui components' own focus styling elsewhere. */
+.ws :is(a, button, input, textarea, select, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent-amber, #c9956b);
+  outline-offset: 2px;
+}
+
+/* Respect reduced-motion: the builder's motion is decorative (hover/entrance
+   transitions), so collapse durations to near-zero. State still changes — it
+   just changes instantly rather than animating. */
+@media (prefers-reduced-motion: reduce) {
+  .ws *, .ws *::before, .ws *::after {
+    transition-duration: 0.001ms !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
 /* BBCode markup classes (server-rendered) */
 .system { color: var(--text-muted); font-style: italic; }
 .echo { color: var(--text-muted); }

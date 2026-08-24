@@ -58,9 +58,26 @@
   function kindClass(k) {
     return ({ room: 'k-room', npc: 'k-npc', item: 'k-item', player: 'k-player', code: 'k-code', exit: 'k-exit' })[k] || '';
   }
+
+  // Arrow-key navigation across the explorer. Rows are real <button>s (so Tab +
+  // Enter already work); this adds Up/Down/Home/End to move focus between the
+  // visible rows without reaching for the mouse or tabbing through each one.
+  function treeKeydown(e) {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
+    const items = [...e.currentTarget.querySelectorAll('button')].filter((b) => b.offsetParent !== null);
+    if (!items.length) return;
+    e.preventDefault();
+    const idx = items.indexOf(document.activeElement);
+    let next;
+    if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = items.length - 1;
+    else if (e.key === 'ArrowDown') next = idx < 0 ? 0 : Math.min(idx + 1, items.length - 1);
+    else next = idx <= 0 ? 0 : idx - 1;
+    items[next]?.focus();
+  }
 </script>
 
-<div class="tree">
+<div class="tree" role="group" aria-label="Objects and maps" onkeydown={treeKeydown}>
   <!-- Maps folder — the tile/terrain maps live alongside object areas. -->
   <div class="area maps-folder">
     <button class="area-btn" onclick={() => (mapsOpen = !mapsOpen)}>

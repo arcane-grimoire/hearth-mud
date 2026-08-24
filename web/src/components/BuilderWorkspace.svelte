@@ -32,6 +32,7 @@
   let { onexit = () => {} } = $props();
 
   let objects = $state([]);
+  let truncated = $state(false); // list_objects_full hit its cap — some objects are hidden
   let loading = $state(true);
   let kindFilter = $state('all');
   let search = $state('');
@@ -126,6 +127,7 @@
     ]);
     const progById = new Map((progRes?.ok ? progRes.data : []).map((e) => [e.ref_id, e]));
     const list = objRes?.ok ? (objRes.data?.objects || []) : [];
+    truncated = objRes?.ok ? !!objRes.data?.truncated : false;
     objects = list.map((o) => {
       const p = progById.get(o.ref_id);
       return { ...o, hooks: p?.hooks || [] }; // area already on o, from _file_key
@@ -182,6 +184,24 @@
     activeId = id;
     const t = tabs.find((x) => x.id === id);
     if (t?.ref) selectRef(t.ref); else clearSelection();
+  }
+  // Roving-tabindex keyboard model for the editor tab strip (WAI-ARIA tabs):
+  // Enter/Space activates, arrows move between tabs and carry focus.
+  function tabKeydown(e, id) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(id); return; }
+    const idx = tabs.findIndex((t) => t.id === id);
+    if (idx < 0) return;
+    let next = -1;
+    if (e.key === 'ArrowRight') next = (idx + 1) % tabs.length;
+    else if (e.key === 'ArrowLeft') next = (idx - 1 + tabs.length) % tabs.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = tabs.length - 1;
+    else return;
+    e.preventDefault();
+    const nt = tabs[next];
+    if (!nt) return;
+    activate(nt.id);
+    document.querySelector(`.tabx[data-tabid="${nt.id}"]`)?.focus();
   }
   function closeTab(id, e) {
     e?.stopPropagation();
@@ -306,6 +326,9 @@
             onopenmap={(m) => openTab({ type: 'maps', name: m })}
             onnewmap={() => openTab({ type: 'maps' })}
           />
+          {#if truncated}
+            <div class="ex-trunc" role="status">Showing the first {objects.length} objects — filter to find the rest.</div>
+          {/if}
         {/if}
       </div>
     </nav>
@@ -316,8 +339,12 @@
       {#if tabs.length}
         <div class="tabbar" role="tablist">
           {#each tabs as t (t.id)}
-            <div class="tabx" class:active={t.id === activeId} role="tab" tabindex="0"
-              onclick={() => activate(t.id)} onkeydown={(e) => e.key === 'Enter' && activate(t.id)}>
+            <div class="tabx" class:active={t.id === activeId} role="tab"
+              data-tabid={t.id}
+              aria-selected={t.id === activeId}
+              aria-controls="ws-panel"
+              tabindex={t.id === activeId ? 0 : -1}
+              onclick={() => activate(t.id)} onkeydown={(e) => tabKeydown(e, t.id)}>
               <span class="ti">
                 {#if t.type === 'code'}<FileCodeIcon size={12} />{:else if t.type === 'ink'}<MessagesSquareIcon size={12} />{:else if t.type === 'object'}<BoxIcon size={12} />{:else if t.type === 'table'}<TableIcon size={12} />{:else if t.type === 'maps'}<Grid3x3Icon size={12} />{:else}<MapIcon size={12} />{/if}
               </span>
@@ -329,7 +356,7 @@
         </div>
       {/if}
 
-      <div class="view">
+      <div class="view" id="ws-panel" role={activeTab ? 'tabpanel' : undefined} aria-label={activeTab ? tabLabel(activeTab) : undefined}>
         {#if !activeTab}
           <div class="welcome">
             <LayersIcon size={30} />
@@ -477,7 +504,8 @@
   .cc { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-meta); opacity: 0.8; }
   .ex-search { display: flex; align-items: center; gap: 7px; padding: 7px 11px; border-bottom: 1px solid var(--border-muted, #211d16); color: var(--text-muted, #8c8378); }
   .ex-search input { flex: 1; background: none; border: none; color: var(--text-primary, #ece0c8); font: inherit; font-size: 12px; outline: none; }
-  .ex-tree { flex: 1; min-height: 0; }
+  .ex-tree { flex: 1; min-height: 0; overflow-y: auto; }
+  .ex-trunc { margin: 6px 10px; padding: 6px 8px; font-size: var(--fs-meta); line-height: 1.4; color: var(--accent-amber, #c9956b); background: color-mix(in srgb, var(--accent-amber, #c9956b) 10%, transparent); border: 1px solid color-mix(in srgb, var(--accent-amber, #c9956b) 35%, transparent); border-radius: 6px; }
 
   .center { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 
