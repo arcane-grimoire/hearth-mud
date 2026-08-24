@@ -24,6 +24,12 @@
   let newObjKind = $state('item');
   let newObjKey = $state('');
 
+  // Which row (by ref_id) is armed for delete. Destructive actions here remove
+  // real, persistent world content and there is no server-side undo, so every
+  // delete is a two-step confirm rather than a single click.
+  let confirmExit = $state(null);
+  let confirmContent = $state(null);
+
   const AREA_OF = (a) => {
     const fk = a?._file_key;
     return typeof fk === 'string' && fk.includes('/') ? fk.split('/')[0] : '';
@@ -44,6 +50,8 @@
     ]);
     exits = ex?.ok ? ex.data : [];
     contents = co?.ok ? co.data : [];
+    confirmExit = null;
+    confirmContent = null;
     loading = false;
   }
   function reload() { if (obj?.ref_id) load(obj.ref_id); }
@@ -74,7 +82,7 @@
   }
   async function deleteExit(e) {
     const r = await api('delete_object', { ref_id: e.ref_id });
-    if (r?.ok) { exits = exits.filter((x) => x.ref_id !== e.ref_id); onchanged(); }
+    if (r?.ok) { exits = exits.filter((x) => x.ref_id !== e.ref_id); confirmExit = null; onchanged(); }
     else showFlash(r?.error || 'Failed', { tone: 'danger' });
   }
 
@@ -94,7 +102,7 @@
   }
   async function removeContent(o) {
     const r = await api('delete_object', { ref_id: o.ref_id });
-    if (r?.ok) { contents = contents.filter((x) => x.ref_id !== o.ref_id); onchanged(); }
+    if (r?.ok) { contents = contents.filter((x) => x.ref_id !== o.ref_id); confirmContent = null; onchanged(); }
     else showFlash(r?.error || 'Failed', { tone: 'danger' });
   }
 </script>
@@ -107,10 +115,16 @@
     {:else}
       <div class="rows">
         {#each exits as e (e.ref_id)}
-          <div class="row-item">
+          <div class="row-item" class:armed={confirmExit === e.ref_id}>
             <span class="dir">{e.direction}</span>
             <button class="link" onclick={() => onedit(e.ref_id)} title="Edit this exit">→ {roomName(e.target_ref)}</button>
-            <Tooltip text="Delete exit"><button class="del" aria-label="Delete exit" onclick={() => deleteExit(e)}><TrashIcon size={13} /></button></Tooltip>
+            {#if confirmExit === e.ref_id}
+              <span class="confirm-q">Delete this exit?</span>
+              <button class="confirm-go" onclick={() => deleteExit(e)}>Delete</button>
+              <button class="confirm-no" onclick={() => (confirmExit = null)}>Cancel</button>
+            {:else}
+              <Tooltip text="Delete exit"><button class="del" aria-label="Delete exit" onclick={() => { confirmContent = null; confirmExit = e.ref_id; }}><TrashIcon size={13} /></button></Tooltip>
+            {/if}
           </div>
         {:else}
           <div class="none">No exits yet.</div>
@@ -135,10 +149,20 @@
     {:else}
       <div class="rows">
         {#each contents as o (o.ref_id)}
-          <div class="row-item">
+          <div class="row-item" class:armed={confirmContent === o.ref_id}>
             <span class="kind">{o.kind}</span>
             <button class="link" onclick={() => onedit(o.ref_id)} title="Edit this object">{o.title || o.key}</button>
-            <Tooltip text="Remove from room (deletes it)"><button class="del" aria-label="Remove object" onclick={() => removeContent(o)}><TrashIcon size={13} /></button></Tooltip>
+            {#if o.kind === 'player'}
+              <!-- A player in the room is live runtime state, not buildable
+                   content. Never offer to delete them from here. -->
+              <span class="here" title="A connected player — edit or delete players elsewhere">here now</span>
+            {:else if confirmContent === o.ref_id}
+              <span class="confirm-q">Delete {o.kind} permanently?</span>
+              <button class="confirm-go" onclick={() => removeContent(o)}>Delete</button>
+              <button class="confirm-no" onclick={() => (confirmContent = null)}>Cancel</button>
+            {:else}
+              <Tooltip text="Delete this {o.kind} permanently"><button class="del" aria-label="Delete {o.kind}" onclick={() => { confirmExit = null; confirmContent = o.ref_id; }}><TrashIcon size={13} /></button></Tooltip>
+            {/if}
           </div>
         {:else}
           <div class="none">Empty. Add an NPC or item below.</div>
@@ -172,6 +196,15 @@
   .link:hover { color: var(--accent-amber, #c9956b); text-decoration: underline; }
   .del { background: none; border: none; color: var(--text-muted, #9a9186); cursor: pointer; padding: 3px; border-radius: 5px; line-height: 0; }
   .del:hover { color: var(--accent-red, #d07a5a); background: color-mix(in srgb, var(--accent-red, #d07a5a) 14%, transparent); }
+  /* Armed (confirm) state: the row shifts to a danger tint so it's unmistakable
+     which item is about to be deleted. */
+  .row-item.armed { border-color: color-mix(in srgb, var(--accent-red, #d07a5a) 55%, transparent); background: color-mix(in srgb, var(--accent-red, #d07a5a) 10%, var(--bg-inset, #12100c)); }
+  .confirm-q { font-size: 11.5px; color: var(--accent-red, #d07a5a); white-space: nowrap; }
+  .confirm-go { flex: none; background: var(--accent-red, #d07a5a); border: none; color: #fff; cursor: pointer; font: inherit; font-size: 11.5px; font-weight: 600; padding: 3px 9px; border-radius: 6px; }
+  .confirm-go:hover { filter: brightness(1.08); }
+  .confirm-no { flex: none; background: none; border: 1px solid var(--border-default, #332c22); color: var(--text-secondary, #b6a888); cursor: pointer; font: inherit; font-size: 11.5px; padding: 3px 9px; border-radius: 6px; }
+  .confirm-no:hover { border-color: var(--text-secondary, #b6a888); color: var(--text-primary, #ece0c8); }
+  .here { flex: none; font-size: 10.5px; color: var(--text-muted, #8c8378); background: var(--bg-surface, #17140f); border: 1px solid var(--border-muted, #211d16); border-radius: 999px; padding: 1px 8px; }
   .add { display: flex; gap: 6px; align-items: center; }
   .mi { flex: 1; min-width: 0; background: var(--bg-inset, #12100c); color: var(--text-primary, #ece0c8); border: 1px solid var(--border-default, #332c22); border-radius: 6px; padding: 6px 8px; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; outline: none; }
   .mi:focus { border-color: var(--accent-amber, #c9956b); }
