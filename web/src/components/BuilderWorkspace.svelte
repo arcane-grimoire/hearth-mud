@@ -14,6 +14,7 @@
   import { showFlash, Tooltip } from '@kenn-io/kit-ui';
   import { api } from '../lib/api.js';
   import { selection, selectRef, clearSelection } from '../lib/selection.svelte.js';
+  import { route, setQuery } from '../lib/router.svelte.js';
   import ObjectTable from './builder/ObjectTable.svelte';
   import BuilderTree from './builder/BuilderTree.svelte';
   import PropertiesPanel from './builder/PropertiesPanel.svelte';
@@ -57,9 +58,31 @@
   const rooms = $derived(objects.filter((o) => o.kind === 'room'));
 
   // Open editor tabs. Each: { id, type:'object'|'code'|'table'|'map', ref?, hook? }
+  //
+  // The active tab is reflected in the URL (?tab=<id>) so the browser's
+  // back/forward buttons move between tabs. The URL is the source of truth for
+  // *which* tab is focused; the open-tab set itself stays in memory (a reload
+  // lands on /builder/workspace with an empty set, so a stale ?tab just shows
+  // the empty state until you reopen something). Switching tabs pushes a
+  // history entry; opening/closing tabs replace it, so back/forward walks the
+  // tabs you actually looked at rather than every incidental open.
   let tabs = $state([]);
-  let activeId = $state(null);
+  const activeId = $derived(route.query.tab || null);
   const activeTab = $derived(tabs.find((t) => t.id === activeId) || null);
+
+  // Set the focused tab via the URL. push=true adds a history entry (a genuine
+  // navigation between tabs); push=false replaces it (opening/closing, where a
+  // back-stop into the transient state would be noise).
+  function setActive(id, { push = true } = {}) {
+    setQuery({ tab: id || null }, { replace: !push });
+  }
+  // Keep the shared selection in step with whatever tab the URL points at —
+  // this fires for forward navigation AND for back/forward, which is what makes
+  // the browser buttons drive the workspace.
+  $effect(() => {
+    const t = tabs.find((x) => x.id === activeId);
+    if (t?.ref) selectRef(t.ref); else if (!t) clearSelection();
+  });
 
   let maps = $state([]); // named tile/terrain maps (Mapwright), each opens as a tab
 
@@ -177,13 +200,10 @@
   function openTab(t) {
     const id = tabIdOf(t);
     if (!tabs.some((x) => x.id === id)) tabs = [...tabs, { ...t, id }];
-    activeId = id;
-    if (t.ref) selectRef(t.ref);
+    if (id !== activeId) setActive(id);
   }
   function activate(id) {
-    activeId = id;
-    const t = tabs.find((x) => x.id === id);
-    if (t?.ref) selectRef(t.ref); else clearSelection();
+    if (id !== activeId) setActive(id);
   }
   // Roving-tabindex keyboard model for the editor tab strip (WAI-ARIA tabs):
   // Enter/Space activates, arrows move between tabs and carry focus.
@@ -209,8 +229,9 @@
     tabs = tabs.filter((x) => x.id !== id);
     if (activeId === id) {
       const next = tabs[i] || tabs[i - 1] || null;
-      activeId = next?.id || null;
-      if (next?.ref) selectRef(next.ref); else clearSelection();
+      // Replace, not push: closing shouldn't leave a history entry pointing at
+      // the now-gone tab. The selection effect follows the new active id.
+      setActive(next?.id || null, { push: false });
     }
   }
   const openObject = (ref) => openTab({ type: 'object', ref });
