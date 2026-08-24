@@ -27,6 +27,54 @@
   // remembered across visits. A slim rail keeps it discoverable when closed.
   let helpOpen = $state((typeof localStorage !== 'undefined' && localStorage.getItem('co-help')) === '1');
   $effect(() => { try { localStorage.setItem('co-help', helpOpen ? '1' : '0'); } catch {} });
+
+  // Draggable width for the docked panel, remembered across visits. Bounded so
+  // it can't swallow the editor (dynamic max leaves the editor a minimum) nor
+  // collapse to a sliver.
+  const MIN_HELP_W = 240, MAX_HELP_W = 760;
+  const readW = () => {
+    const n = typeof localStorage !== 'undefined' ? parseInt(localStorage.getItem('co-help-w') || '', 10) : NaN;
+    return Number.isFinite(n) ? n : 320;
+  };
+  let helpWidth = $state(Math.max(MIN_HELP_W, Math.min(readW(), MAX_HELP_W)));
+  let midEl;            // the editor+panel row, for measuring during a drag
+  let resizing = $state(false);
+
+  function clampW(w) {
+    const rect = midEl?.getBoundingClientRect();
+    const max = rect ? Math.min(MAX_HELP_W, rect.width - 280) : MAX_HELP_W; // keep the editor usable
+    return Math.max(MIN_HELP_W, Math.min(w, Math.max(MIN_HELP_W, max)));
+  }
+  function onResizeMove(e) {
+    if (!midEl) return;
+    const rect = midEl.getBoundingClientRect();
+    helpWidth = clampW(rect.right - e.clientX);
+  }
+  function endResize() {
+    resizing = false;
+    window.removeEventListener('pointermove', onResizeMove);
+    window.removeEventListener('pointerup', endResize);
+    try { localStorage.setItem('co-help-w', String(helpWidth)); } catch {}
+  }
+  function startResize(e) {
+    e.preventDefault();
+    resizing = true;
+    window.addEventListener('pointermove', onResizeMove);
+    window.addEventListener('pointerup', endResize);
+  }
+  // Keyboard resize for the separator (WAI-ARIA): arrows nudge, Home/End jump.
+  function resizeKey(e) {
+    const step = e.shiftKey ? 48 : 16;
+    let w = helpWidth;
+    if (e.key === 'ArrowLeft') w += step;       // grows the panel (it's on the right)
+    else if (e.key === 'ArrowRight') w -= step;
+    else if (e.key === 'Home') w = MAX_HELP_W;
+    else if (e.key === 'End') w = MIN_HELP_W;
+    else return;
+    e.preventDefault();
+    helpWidth = clampW(w);
+    try { localStorage.setItem('co-help-w', String(helpWidth)); } catch {}
+  }
   // What the panel highlights: the object + hook currently in the editor.
   const sel = $derived(refId && hook ? { hook, ref: refId, key: objName } : null);
 
@@ -105,7 +153,7 @@
     <Tooltip text="Close editor" align="end"><button class="x" aria-label="Close editor" onclick={onclose}><XIcon size={16} /></button></Tooltip>
   </header>
 
-  <div class="mid">
+  <div class="mid" class:resizing bind:this={midEl}>
     <div class="edit">
       {#if loading}
         <div class="none">Loading…</div>
@@ -117,7 +165,12 @@
     </div>
 
     {#if helpOpen}
-      <div id="co-help-panel" class="help-col"><HelpPanel {sel} {lookup} open={helpOpen} onclose={() => (helpOpen = false)} /></div>
+      <!-- Drag (or arrow-key) to resize the docked panel. -->
+      <div class="resizer" role="separator" aria-orientation="vertical" tabindex="0"
+        aria-label="Resize scripting reference" aria-valuenow={Math.round(helpWidth)}
+        aria-valuemin={MIN_HELP_W} aria-valuemax={MAX_HELP_W}
+        onpointerdown={startResize} onkeydown={resizeKey}></div>
+      <div id="co-help-panel" class="help-col" style="width: {helpWidth}px"><HelpPanel {sel} {lookup} open={helpOpen} onclose={() => (helpOpen = false)} /></div>
     {:else}
       <!-- Slim rail so the panel stays discoverable when closed. -->
       <button class="rail" aria-expanded="false" aria-controls="co-help-panel"
@@ -153,8 +206,20 @@
 
   /* Editor + docked reference sit side by side; output stacks below both. */
   .mid { flex: 1; min-height: 0; display: flex; position: relative; }
+  /* While dragging, suppress text selection and force the resize cursor. */
+  .mid.resizing { cursor: col-resize; user-select: none; }
   .edit { flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
-  .help-col { width: 320px; flex: none; min-height: 0; min-width: 0; }
+  /* display:flex so HelpPanel fills the column's height and scrolls inside
+     itself instead of growing the page. Width is set inline (resizable). */
+  .help-col { flex: none; min-height: 0; min-width: 0; display: flex; }
+  /* The resizer is the divider now — drop the panel's own left border. */
+  .help-col :global(.hp) { flex: 1; min-height: 0; border-left: none; }
+  /* Drag handle between editor and panel. A hair-thin line that thickens and
+     tints on hover/drag — no chunky gutter. */
+  .resizer { flex: none; width: 5px; margin: 0 -2px; z-index: 4; cursor: col-resize; background: transparent; border: none; padding: 0; position: relative; }
+  .resizer::before { content: ''; position: absolute; inset: 0 2px; background: var(--border-default, #2a2419); transition: background 0.12s; }
+  .resizer:hover::before, .resizer:focus-visible::before, .mid.resizing .resizer::before { background: var(--accent-amber, #c9956b); }
+  .resizer:focus-visible { outline: none; }
   .rail { position: absolute; right: 0; top: 50%; transform: translateY(-50%); z-index: 5; display: flex; flex-direction: column; align-items: center; gap: 6px; width: 26px; padding: 12px 0; background: var(--bg-surface, #17140f); border: 1px solid var(--border-default, #2a2419); border-right: none; border-radius: 8px 0 0 8px; color: var(--text-muted, #9a9186); cursor: pointer; box-shadow: -6px 0 18px -12px rgba(0,0,0,.6); }
   .rail:hover { color: var(--accent-amber, #c9956b); width: 30px; }
   .rail-label { writing-mode: vertical-rl; text-orientation: mixed; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }

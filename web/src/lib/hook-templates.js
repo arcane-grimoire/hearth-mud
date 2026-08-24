@@ -120,7 +120,7 @@ end
 `,
   can_use: `-- Gate whether \`actor\` may use this object. Return false to veto.
 function can_use(this, actor, room)
-  local uses = get_attr(this, "uses") or 0
+  local uses: number = get_attr(this, "uses") or 0
   if uses >= 3 then
     emit(actor, "It's spent — nothing happens.")
     return false
@@ -130,7 +130,7 @@ end
 `,
   on_use: `-- Runs when \`actor\` uses this object.
 function on_use(this, actor, room)
-  local uses = (get_attr(this, "uses") or 0) + 1
+  local uses: number = (get_attr(this, "uses") or 0) + 1
   set_attr(this, "uses", uses)
   emit(actor, "You activate " .. (this.title or this.key) .. ". (used " .. uses .. "x)")
 end
@@ -146,13 +146,13 @@ end
   on_move: `-- Runs on \`actor\` (this == actor) each time they move between rooms.
 function on_move(this, actor, room)
   -- e.g. tick down a torch, count steps, drop a trail…
-  local steps = (get_attr(this, "steps") or 0) + 1
+  local steps: number = (get_attr(this, "steps") or 0) + 1
   set_attr(this, "steps", steps)
 end
 `,
   on_destroy: `-- Runs just before this object is destroyed. Clean up anything it owns.
 function on_destroy(this, actor, room)
-  local pet = get_attr(this, "pet_ref")
+  local pet: string? = get_attr(this, "pet_ref")
   if pet then destroy(pet) end
 end
 `,
@@ -185,7 +185,7 @@ end
 `,
   on_damage: `-- Runs when this object takes damage. \`args\` may carry amount/source.
 function on_damage(this, actor, room, args)
-  local hp = (get_attr(this, "hp") or 10) - 1
+  local hp: number = (get_attr(this, "hp") or 10) - 1
   set_attr(this, "hp", hp)
   if hp <= 0 then trigger(this, "on_death") end
 end
@@ -199,7 +199,7 @@ end
   on_tick: `-- Runs on the world tick for this object. \`actor\` is usually nil, so guard.
 -- Reschedule with after() if you want it to keep ticking.
 function on_tick(this, actor, room)
-  local players = get_players_in_room(this)
+  local players: { Object } = get_players_in_room(this)
   if #players == 0 then return end
   emit_room(this, "The braziers flicker and hiss.", {})
 end

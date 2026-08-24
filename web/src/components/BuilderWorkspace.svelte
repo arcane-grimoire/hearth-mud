@@ -60,15 +60,30 @@
   // Open editor tabs. Each: { id, type:'object'|'code'|'table'|'map', ref?, hook? }
   //
   // The active tab is reflected in the URL (?tab=<id>) so the browser's
-  // back/forward buttons move between tabs. The URL is the source of truth for
-  // *which* tab is focused; the open-tab set itself stays in memory (a reload
-  // lands on /builder/workspace with an empty set, so a stale ?tab just shows
-  // the empty state until you reopen something). Switching tabs pushes a
-  // history entry; opening/closing tabs replace it, so back/forward walks the
-  // tabs you actually looked at rather than every incidental open.
+  // back/forward buttons move between tabs and a link deep-links straight to a
+  // tab. The URL is the source of truth for *which* tab is focused; the open
+  // set stays in memory, but the active tab is reconstructed from its id on
+  // load (see the reopen effect below), so /builder/workspace?tab=code:#14:on_enter
+  // opens that hook editor cold. Switching tabs pushes a history entry;
+  // opening/closing/reopening replace it, so back/forward walks the tabs you
+  // actually looked at rather than every incidental open.
   let tabs = $state([]);
   const activeId = $derived(route.query.tab || null);
   const activeTab = $derived(tabs.find((t) => t.id === activeId) || null);
+
+  // Decode a tab id (as tabIdOf produces) back into a tab descriptor, so a
+  // deep link / reload can rebuild the tab it names. Refs (e.g. "#14") never
+  // contain ':', so splitting on ':' is unambiguous; a hook could in theory,
+  // so it rejoins the tail.
+  function tabFromId(id) {
+    if (id === 'table' || id === 'map') return { type: id };
+    const [type, ...rest] = (id || '').split(':');
+    if (type === 'code' && rest[0] && rest[1]) return { type: 'code', ref: rest[0], hook: rest.slice(1).join(':') };
+    if (type === 'ink' && rest[0]) return { type: 'ink', ref: rest[0] };
+    if (type === 'obj' && rest[0]) return { type: 'object', ref: rest[0] };
+    if (type === 'maps' && rest.length) return { type: 'maps', name: rest.join(':') };
+    return null;
+  }
 
   // Set the focused tab via the URL. push=true adds a history entry (a genuine
   // navigation between tabs); push=false replaces it (opening/closing, where a
@@ -76,6 +91,16 @@
   function setActive(id, { push = true } = {}) {
     setQuery({ tab: id || null }, { replace: !push });
   }
+  // Reopen the URL's tab if it isn't in the set yet — covers a deep link or a
+  // reload, where `tabs` starts empty but ?tab names one. Adds the descriptor
+  // without touching the URL (no history churn); a bad/unknown id is ignored.
+  $effect(() => {
+    const id = activeId;
+    if (id && !tabs.some((t) => t.id === id)) {
+      const t = tabFromId(id);
+      if (t) tabs = [...tabs, { ...t, id }];
+    }
+  });
   // Keep the shared selection in step with whatever tab the URL points at —
   // this fires for forward navigation AND for back/forward, which is what makes
   // the browser buttons drive the workspace.

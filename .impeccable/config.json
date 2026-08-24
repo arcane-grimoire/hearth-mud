@@ -7,9 +7,9 @@
         "rule": "side-tab",
         "value": "*",
         "files": [
-          "src/components/code/HelpPanel.svelte"
+          "web/src/components/code/HelpPanel.svelte"
         ],
-        "createdAt": "2026-08-24T14:06:05.774Z",
+        "createdAt": "2026-08-24T14:01:41.450Z",
         "reason": "active-list-item indicator (current-hook row), not a card accent; restored verbatim from commit e584682^"
       }
     ]

@@ -18,7 +18,7 @@
 // engine `get_val`.)
 export const API_FUNCTIONS = [
   ['emit', 'emit(target, text)', 'Send text to a player (or everyone in a room ref).'],
-  ['emit_room', 'emit_room(room, text)', 'Send text to everyone in a room.'],
+  ['emit_room', 'emit_room(room, text, exclude?)', 'Send text to everyone in a room; `exclude` is a table of refs to skip (e.g. {actor.ref_id}).'],
   ['emit_nearby', 'emit_nearby(ref, x, y, radius, text, exclude?)', 'Send text to players within a Euclidean radius of (x, y).'],
   ['emit_radius', 'emit_radius(ref, radius, messages, exclude?)', 'Send distance-attenuated messages out through the room graph.'],
   ['emit_data', 'emit_data(target, channel, data)', 'Push a structured game-data message to a client.'],
@@ -42,7 +42,7 @@ export const API_FUNCTIONS = [
   ['find_in_room', 'find_in_room(room, needle)', 'Match an object by name in a room.'],
   ['match_name', 'match_name(name, input)', 'True if `input` prefix-matches the name (or any word in it).'],
   ['get_exits', 'get_exits(room)', 'List a room’s exits.'],
-  ['create_exit', 'create_exit(source, dir, target)', 'Create an exit between rooms.'],
+  ['create_exit', 'create_exit(opts)', 'Create an exit from a { source, direction, target } table; returns its ref.'],
   ['get_contents', 'get_contents(ref)', 'Objects located inside a ref.'],
   ['get_room_contents', 'get_room_contents(room)', 'Objects in a room.'],
   ['get_inventory', 'get_inventory(ref)', 'An actor’s carried items.'],
@@ -113,23 +113,125 @@ export const API_FUNCTIONS = [
   ['grid_from_value', 'grid_from_value(value)', 'Rebuild a Grid2D from a grid:to_value() table.'],
 ];
 
-// Implicit locals available in a hook body.
+// Implicit locals available in a hook body, in the order hooks receive them:
+// (this, actor, room, args). A 4th 'object' element marks the ones that are
+// GameObject values — the Help panel expands those to the object members
+// below, so searching "actor"/"room" surfaces its properties.
 export const API_GLOBALS = [
-  ['actor', 'actor', 'The object that triggered this hook (often the player).'],
-  ['this', 'this', 'The object the hook is attached to.'],
-  ['ctx', 'ctx', 'Hook context (args and metadata for this firing).'],
+  ['this', 'this', 'The object the hook is attached to.', 'object'],
+  ['actor', 'actor', 'The object that triggered this hook (often the player). May be nil for system ticks.', 'object'],
+  ['room', 'room', 'The room context for this hook — often the same as `this` for room hooks.', 'object'],
+  ['ctx', 'ctx', 'Hook context: the args and metadata for this firing (a table, not an object).'],
 ];
 
 // Members available on an object value (after `this.` / `actor.`).
 export const OBJECT_MEMBERS = [
-  ['ref_id', 'The object’s dbref.'],
-  ['key', 'Its authoring key.'],
-  ['kind', 'Its kind ("room", "npc", "item"…).'],
-  ['title', 'Display title.'],
-  ['display_name', 'Resolved display name.'],
-  ['description', 'Look description.'],
-  ['location_ref', 'Where it is located.'],
-  ['owner_ref', 'Owner ref.'],
-  ['attrs', 'Table of attributes.'],
-  ['tags', 'Table of tags.'],
+  ['ref_id', 'The object’s dbref (e.g. "#12"). Use it where an API wants a ref.'],
+  ['key', 'Its authoring key (the "area/key" name it was created under).'],
+  ['kind', 'Its kind ("room", "npc", "item", "exit", "player").'],
+  ['title', 'Display title. Assigning it (this.title = …) calls set_title.'],
+  ['display_name', 'Resolved display name — the title if set, else the key.'],
+  ['description', 'Look description. Assigning it calls set_description.'],
+  ['location_ref', 'The ref this object is located in (room or container).'],
+  ['owner_ref', 'The account/ref that owns this object.'],
+  ['attrs', 'Table of attributes. Reads are pending-aware; prefer get_attr/pick.'],
+  ['tags', 'Table of tags ("category:key"). Prefer has_tag/get_tags to read.'],
 ];
+
+// ─────────────────────────────────────────────────────────────────────────
+// Presentation metadata for the Help panel. NONE of the below is read by the
+// engine sync-guard tests — those parse only the API_FUNCTIONS and
+// OBJECT_MEMBERS arrays above (and stop at the first `];` / next `export
+// const`). So categories and examples are free to grow without touching the
+// engine. Adding/removing an actual engine function still has to happen in
+// API_FUNCTIONS, which the tests enforce.
+
+// Ordered function groups, so the ~90-function reference reads as navigable
+// sections instead of one flat list. Every function name should appear in
+// exactly one group; any that isn't falls into a trailing "Other" bucket in
+// the panel so nothing silently disappears.
+export const API_CATEGORIES = [
+  { id: 'output', label: 'Output & messaging',
+    names: ['emit', 'emit_room', 'emit_nearby', 'emit_radius', 'emit_data'] },
+  { id: 'objects', label: 'Objects',
+    names: ['spawn', 'destroy', 'move_object', 'get_object', 'resolve_key', 'exists',
+            'set_title', 'set_description', 'get_location', 'get_owner', 'set_owner', 'kind_of'] },
+  { id: 'attrs', label: 'Attributes',
+    names: ['get_attr', 'set_attr', 'has_attr', 'unset_attr', 'find_by_attr',
+            'transfer_attr', 'set_val', 'pick'] },
+  { id: 'tags', label: 'Tags',
+    names: ['get_tags', 'has_tag', 'set_tag', 'unset_tag', 'find_by_tag'] },
+  { id: 'rooms', label: 'Rooms, exits & containment',
+    names: ['get_exits', 'create_exit', 'get_contents', 'get_room_contents', 'get_inventory'] },
+  { id: 'queries', label: 'Queries & lookup',
+    names: ['find_in_room', 'match_name', 'get_players_in_room', 'get_nearby',
+            'get_rooms_in_radius', 'get_all_by_kind', 'all_objects'] },
+  { id: 'predicates', label: 'Kind & predicates',
+    names: ['is_player', 'is_npc', 'is_room', 'is_exit', 'is_item', 'is_container',
+            'is_carrying', 'same_room'] },
+  { id: 'scheduling', label: 'Programs & scheduling',
+    names: ['set_program', 'after', 'cancel_after', 'get_timers', 'trigger', 'get_tick', 'prompt'] },
+  { id: 'maps', label: 'Maps & dungeons',
+    names: ['apply_template', 'instantiate_map', 'get_map_template', 'generate_dungeon', 'destroy_dungeon'] },
+  { id: 'ink', label: 'Ink dialogue',
+    names: ['ink_start', 'ink_continue', 'ink_choose', 'ink_goto', 'ink_get_var', 'ink_set_var', 'ink_end'] },
+  { id: 'noise', label: 'Noise',
+    names: ['simplex2d', 'simplex3d', 'perlin2d', 'perlin3d', 'fbm2d'] },
+  { id: 'rng', label: 'Seeded RNG',
+    names: ['hash_seed', 'seed_random', 'seed_float', 'seed_choice'] },
+  { id: 'math', label: 'Coordinate math',
+    names: ['distance', 'manhattan', 'direction_to', 'lerp', 'clamp', 'remap'] },
+  { id: 'grid', label: 'Grid',
+    names: ['grid_new', 'grid_from_value'] },
+  { id: 'utility', label: 'Utility',
+    names: ['log', 'json_encode', 'json_decode'] },
+];
+
+// Worked examples for the functions worth showing in use. Keyed by function
+// name; shown in the panel's expanded row (nothing else reads them). Kept
+// idiomatic — `ipairs` over list results, property syntax where it reads
+// cleaner, ref where an API wants a ref. Locals and loop bindings carry Luau
+// type annotations (a real Luau feature — erased at runtime, checked by
+// luau-lsp); opts tables use a `:: SpawnOpts` / `:: CreateExitOpts` assertion.
+// Only types that exist in the game's hearth.d.luau are used (`Object`,
+// `SpawnOpts`, `CreateExitOpts`, primitives), never an invented one.
+export const API_EXAMPLES = {
+  emit: `emit(actor, "A chill runs down your spine.")`,
+  emit_room: `-- everyone in the room except the actor
+emit_room(room, actor.display_name .. " vanishes in a puff of smoke.", {actor.ref_id})`,
+  emit_data: `-- push structured data to the player's client (web sidebar, etc.)
+emit_data(actor, "quest", { id = "ember", state = "complete" })`,
+  spawn: `-- the opts table can be typed with a :: assertion (SpawnOpts is in hearth.d.luau)
+local torch: string = spawn({ key = "torch", kind = "item" } :: SpawnOpts)
+move_object(torch, this.ref_id)   -- drop it here (spawn returns a ref)`,
+  set_attr: `set_attr(this, "hp", 10)
+this.hp = 10          -- property syntax — identical to the line above`,
+  get_attr: `local hp: number = get_attr(this, "hp") or 0`,
+  set_val: `-- writes attrs.stats.str = 5, creating the nested tables as needed
+set_val(this, "stats", "str", 5)`,
+  pick: `local str: number = pick(this, "stats", "str")   -- reads attrs.stats.str`,
+  find_by_tag: `for _, npc: Object in ipairs(find_by_tag("faction:thieves")) do
+  emit(npc, "The signal is given.")
+end`,
+  find_by_attr: `for _, o: Object in ipairs(find_by_attr("quest", "ember")) do
+  set_attr(o, "quest", "done")
+end`,
+  after: `-- fire on_tick on this object in 5 ticks, with a payload
+after(5, this.ref_id, "on_tick", { phase = "wake" })`,
+  trigger: `-- run another hook after this script finishes; data arrives as args
+trigger(this.ref_id, "on_alarm", { loud = true })`,
+  create_exit: `-- exits are made from an opts table, not positional args
+create_exit({ source = this.ref_id, direction = "north", target = target_room } :: CreateExitOpts)`,
+  get_players_in_room: `for _, p: Object in ipairs(get_players_in_room(room)) do
+  emit(p, "Thunder rolls overhead.")
+end`,
+  is_carrying: `if is_carrying(actor, "key:brass") then
+  emit(actor, "The brass key hums in your pack.")
+end`,
+  ink_start: `ink_start(actor, this)   -- begin THIS npc's dialogue with the actor`,
+  seed_random: `-- deterministic d20: same actor + tick always rolls the same
+local roll: number = seed_random(hash_seed(actor.ref_id, get_tick), 1, 20)`,
+  grid_new: `local g = grid_new(10, 10, 0)   -- a Grid2D userdata
+g:set(3, 4, 1)
+local v: number = g:get(3, 4)`,
+};
