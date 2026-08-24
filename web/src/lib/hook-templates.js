@@ -196,9 +196,9 @@ function on_death(this, actor, room, args)
   -- drop loot, spawn a corpse, award the killer…
 end
 `,
-  on_tick: `-- Runs on the world tick for this object. \`actor\` is usually nil, so guard.
--- Reschedule with after() if you want it to keep ticking.
-function on_tick(this, actor, room)
+  on_tick: `-- Runs on the world tick for this object. \`state\` is a table that
+-- persists between ticks — stash counters and timers in it.
+function on_tick(this, state, room)
   local players: { Object } = get_players_in_room(this)
   if #players == 0 then return end
   emit_room(this, "The braziers flicker and hiss.", {})
@@ -243,7 +243,7 @@ function customName(name) {
 // from the game's hearth.d.luau. `Object` is the field set the engine hands
 // each hook — see object_to_table in src/softcode/api.rs and OBJECT_MEMBERS in
 // hearth-api.js (kept in sync by a cargo test).
-const PARAM_TYPES = { this: 'Object', actor: 'Object', room: 'Object', args: 'any' };
+const PARAM_TYPES = { this: 'Object', actor: 'Object', room: 'Object', args: 'any', state: '{ [string]: any }' };
 
 // Annotate the parameters on a hook's `function <name>(...)` signature line.
 function typeSignature(src) {

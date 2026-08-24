@@ -120,6 +120,20 @@ pub enum ApiRequest {
     /// program that fails to compile. One server-side pass (the engine holds
     /// the whole world) instead of many client round-trips. Builder-gated.
     WorldCheck,
+    /// Run softcode tests for the builder's test panel — the REST counterpart
+    /// of `@test`. With `source`, runs that one ad-hoc test file (the editor /
+    /// REPL "run as test"); with `file`, one discovered `.test.luau` by its
+    /// game-dir-relative path; with neither, discovers and runs them all.
+    /// Every run is on a *clone* of the world, so a test's writes never leak —
+    /// strictly less privileged than the `set_program` a Builder already has,
+    /// hence Builder-gated like `@test`. Returns
+    /// `{files: [{file, tests: [{name, passed, error}], error?}], passed, failed}`.
+    RunTests {
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        file: Option<String>,
+    },
     /// A flat, richer object listing for the builder's table view: every
     /// non-exit object (rooms, npcs, items, players) with its area, location
     /// and tags — the columns the table renders. `ListObjects` deliberately
@@ -179,6 +193,32 @@ pub enum ApiRequest {
     /// this is arbitrary code with the full write API, so a token that can
     /// eval owns the server.
     Eval { source: String },
+    /// Preview a one-shot Luau script against the live world WITHOUT committing
+    /// — the builder REPL's kernel. Runs the script through the same immutable
+    /// `run_eval` path `Eval` uses, then formats the intent batch it produced
+    /// and **discards it** instead of applying. Reads hit real live state
+    /// (real refs, real attrs), but nothing is ever mutated, so — unlike
+    /// `Eval` — it needs only `Scope::Builder`, the same tier as `RunTests`.
+    /// Returns `{returned, writes: [human-readable intent, …], write_count}`.
+    EvalPreview { source: String },
+    /// Preview-FIRE a hook: run `hook` on object `ref_id` as if the event
+    /// happened, with a chosen `actor` and `room`, and report the writes it
+    /// WOULD make (emits included) without committing — the editor's hook
+    /// test button. `source` overrides the saved program so an unsaved buffer
+    /// can be fired; `actor_ref` defaults to the caller's character and
+    /// `room_ref` to the actor's (or `this`'s) location. Discards the batch,
+    /// same safety and Builder gate as `EvalPreview`. Returns
+    /// `{writes: […], write_count, denied}` (`denied` = a `can_*` guard vetoed).
+    PreviewHook {
+        ref_id: String,
+        hook: String,
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        actor_ref: Option<String>,
+        #[serde(default)]
+        room_ref: Option<String>,
+    },
     /// Install a TOML+`.luau` bundle into the DB — the REST counterpart of
     /// `@import` — see docs/plans/program-authoring.md Stage 4. `path` is
     /// resolved on the server's own filesystem (relative to the server
@@ -1768,6 +1808,86 @@ impl Engine {
                 });
                 ApiResponse::success(serde_json::json!({ "problems": problems, "count": problems.len() }))
             }
+            ApiRequest::RunTests { source, file } => {
+                // Mirror `cmd_test`: ad-hoc `source`, a single named file, or
+                // discover them all. Each non-lib file runs against a clone so
+                // its writes never touch the live world (see the variant doc).
+                let test_files: Vec<crate::loader::TestFile> = if let Some(src) = source {
+                    vec![crate::loader::TestFile {
+                        path: std::path::PathBuf::from("<scratch>"),
+                        relative: "<scratch>".to_string(),
+                        source: src,
+                        is_lib: false,
+                    }]
+                } else {
+                    let game_dir = match &self.game_dir {
+                        Some(g) => g.clone(),
+                        None => return ApiResponse::error("No game_dir configured"),
+                    };
+                    let game_path = std::path::Path::new(&game_dir);
+                    match file {
+                        Some(rel) => {
+                            let path = game_path.join(&rel);
+                            match std::fs::read_to_string(&path) {
+                                Ok(source) => {
+                                    let is_lib = path.starts_with(game_path.join("lib"));
+                                    vec![crate::loader::TestFile { path, relative: rel, source, is_lib }]
+                                }
+                                Err(e) => {
+                                    return ApiResponse::error(format!("Cannot read '{}': {}", rel, e));
+                                }
+                            }
+                        }
+                        None => crate::loader::discover_test_files(game_path),
+                    }
+                };
+
+                let mut files: Vec<serde_json::Value> = Vec::new();
+                let mut passed = 0usize;
+                let mut failed = 0usize;
+                for tf in &test_files {
+                    let world = if tf.is_lib { None } else { Some(self.world.clone()) };
+                    match self.softcode.run_tests(
+                        &tf.source,
+                        &tf.relative,
+                        world.as_ref(),
+                        softcode::Budget::default(),
+                    ) {
+                        Ok(fr) => {
+                            let tests: Vec<serde_json::Value> = fr
+                                .tests
+                                .iter()
+                                .map(|tr| {
+                                    if tr.passed {
+                                        passed += 1;
+                                    } else {
+                                        failed += 1;
+                                    }
+                                    serde_json::json!({
+                                        "name": tr.name,
+                                        "passed": tr.passed,
+                                        "error": tr.error,
+                                    })
+                                })
+                                .collect();
+                            files.push(serde_json::json!({
+                                "file": tf.relative, "tests": tests, "error": serde_json::Value::Null,
+                            }));
+                        }
+                        // A file that won't even compile is one failure, not a
+                        // silent gap — surface it as the file's `error`.
+                        Err(e) => {
+                            failed += 1;
+                            files.push(serde_json::json!({
+                                "file": tf.relative, "tests": [], "error": e.to_string(),
+                            }));
+                        }
+                    }
+                }
+                ApiResponse::success(serde_json::json!({
+                    "files": files, "passed": passed, "failed": failed,
+                }))
+            }
             ApiRequest::SaveWorld => {
                 self.do_save();
                 ApiResponse::ok()
@@ -1791,6 +1911,118 @@ impl Engine {
                     ApiResponse::error(output.trim_end().to_string())
                 } else {
                     ApiResponse::success(serde_json::json!({ "output": output }))
+                }
+            }
+            ApiRequest::EvalPreview { source } => {
+                // Same actor resolution as `Eval` — the account's active
+                // character, so `actor`/`room`/`this` read sensibly.
+                let actor_ref = acting_account
+                    .as_deref()
+                    .and_then(|id| self.accounts.get(id))
+                    .and_then(|a| a.active_character.clone())
+                    .unwrap_or_default();
+                let room_ref = self.world.get(&actor_ref).and_then(|a| a.location_ref.clone());
+                // run_eval borrows the world immutably and returns the intent
+                // batch without touching anything — we simply never apply it.
+                let dbref_counter = Rc::new(Cell::new(self.world.next_id));
+                let result = self.softcode.run_eval(
+                    &self.world,
+                    &source,
+                    &actor_ref,
+                    room_ref.as_deref(),
+                    Budget::for_eval(),
+                    dbref_counter,
+                    &self.themes,
+                    &self.map_templates,
+                    &self.scheduled_hooks,
+                    self.tick_count,
+                );
+                match result {
+                    Ok(r) => {
+                        let writes: Vec<String> = r
+                            .batch
+                            .intents
+                            .iter()
+                            .map(|i| describe_intent(i, &self.world))
+                            .collect();
+                        ApiResponse::success(serde_json::json!({
+                            "returned": r.returned,
+                            "writes": writes,
+                            "write_count": r.batch.len(),
+                        }))
+                    }
+                    Err(e) => ApiResponse::error(format!("Eval error: {}", e)),
+                }
+            }
+            ApiRequest::PreviewHook { ref_id, hook, source, actor_ref, room_ref } => {
+                // The source to fire: the unsaved buffer if given, else the
+                // object's saved program for this hook.
+                let src = match source {
+                    Some(s) => s,
+                    None => match self.world.get(&ref_id).and_then(|o| o.programs.get(&hook)) {
+                        Some(p) => p.source.clone(),
+                        None => {
+                            return ApiResponse::error(format!("{} has no '{}' program", ref_id, hook));
+                        }
+                    },
+                };
+                if let Err(e) = self.softcode.check_syntax(&src) {
+                    return ApiResponse::error(format!("Syntax error: {}", e));
+                }
+                // actor → chosen, else the caller's character; room → chosen,
+                // else the actor's location, else `this` when it's a room.
+                let actor = actor_ref.unwrap_or_else(|| {
+                    acting_account
+                        .as_deref()
+                        .and_then(|id| self.accounts.get(id))
+                        .and_then(|a| a.active_character.clone())
+                        .unwrap_or_default()
+                });
+                let room = room_ref
+                    .or_else(|| self.world.get(&actor).and_then(|a| a.location_ref.clone()))
+                    .or_else(|| {
+                        self.world
+                            .get(&ref_id)
+                            .filter(|o| o.kind == Kind::Room)
+                            .map(|_| ref_id.clone())
+                    });
+                let program = hooks::ProgramRecord {
+                    hook: hook.clone(),
+                    source: src,
+                    enabled: true,
+                    state: std::collections::HashMap::new(),
+                    origin: Default::default(),
+                };
+                let dbref_counter = Rc::new(Cell::new(self.world.next_id));
+                let result = self.softcode.run_hook(
+                    &self.world,
+                    &program,
+                    &ref_id,          // this
+                    &actor,           // actor
+                    room.as_deref(),  // room
+                    None,             // args
+                    Budget::for_eval(),
+                    dbref_counter,
+                    &self.themes,
+                    &self.map_templates,
+                    &self.scheduled_hooks,
+                    self.tick_count,
+                );
+                match result {
+                    Ok(r) => {
+                        let writes: Vec<String> = r
+                            .batch
+                            .intents
+                            .iter()
+                            .map(|i| describe_intent(i, &self.world))
+                            .collect();
+                        ApiResponse::success(serde_json::json!({
+                            "writes": writes,
+                            "write_count": r.batch.len(),
+                            "denied": r.denied,
+                        }))
+                    }
+                    Err(e) => ApiResponse::error(format!("Eval error: {}", e)),
                 }
             }
             ApiRequest::Import { path, dry_run } => {
@@ -6292,6 +6524,76 @@ impl Engine {
     }
 }
 
+/// Render one queued [`softcode::Intent`] as a short, human-readable line for
+/// the REPL's preview list — "set gem (#12).hp = 6", "spawn item torch (#42)
+/// in Crossroads (#3)". Refs resolve to a title/key through the live world
+/// where known; unknown refs (e.g. a not-yet-applied spawn) show raw.
+fn describe_intent(intent: &softcode::Intent, world: &World) -> String {
+    use softcode::Intent;
+    let label = |r: &str| match world.get(r) {
+        Some(o) => {
+            let name = o.title.as_deref().filter(|t| !t.is_empty()).unwrap_or(&o.key);
+            format!("{} ({})", name, r)
+        }
+        None => r.to_string(),
+    };
+    // Keep long values/messages from blowing out one line.
+    let clip = |s: &str| {
+        if s.chars().count() > 60 {
+            format!("{}…", s.chars().take(60).collect::<String>())
+        } else {
+            s.to_string()
+        }
+    };
+    match intent {
+        Intent::SetAttr { target, key, value } => {
+            format!("set {}.{} = {}", label(target), key, clip(&value.to_string()))
+        }
+        Intent::UnsetAttr { target, key } => format!("unset {}.{}", label(target), key),
+        Intent::EmitActor { target, message } => {
+            format!("emit to {}: {:?}", label(target), clip(message))
+        }
+        Intent::EmitRoom { room, message, .. } => {
+            format!("emit to room {}: {:?}", label(room), clip(message))
+        }
+        Intent::Move { target, destination } => {
+            format!("move {} → {}", label(target), label(destination))
+        }
+        Intent::SetTag { target, tag } => {
+            format!("tag {} +{}:{}", label(target), tag.category, tag.key)
+        }
+        Intent::UnsetTag { target, tag } => {
+            format!("tag {} -{}:{}", label(target), tag.category, tag.key)
+        }
+        Intent::Spawn { ref_id, key, kind, location, .. } => {
+            format!("spawn {} {} ({}) in {}", kind, key, ref_id, label(location))
+        }
+        Intent::SetTitle { target, .. } => format!("set title of {}", label(target)),
+        Intent::SetDescription { target, .. } => format!("set description of {}", label(target)),
+        Intent::Destroy { target } => format!("destroy {}", label(target)),
+        Intent::CreateExit { source, direction, target, .. } => {
+            format!("exit '{}' from {} → {}", direction, label(source), label(target))
+        }
+        Intent::SetProgram { target, hook, .. } => format!("set program {}/{}", label(target), hook),
+        Intent::Trigger { target, hook, .. } => format!("trigger {}/{}", label(target), hook),
+        Intent::EmitNearby { room, x, y, radius, .. } => {
+            format!("emit near ({}, {}) r{} in {}", x, y, radius, label(room))
+        }
+        Intent::SetLock { target, hook, .. } => format!("lock {}/{}", label(target), hook),
+        Intent::SetOwner { target, owner } => format!("chown {} → {}", label(target), label(owner)),
+        Intent::After { target, hook, ticks, .. } => {
+            format!("schedule {}/{} in {} ticks", label(target), hook, ticks)
+        }
+        Intent::CancelAfter { target, hook } => format!("cancel timer {}/{}", label(target), hook),
+        Intent::EmitData { target, channel, .. } => {
+            format!("emit data '{}' to {}", channel, label(target))
+        }
+        Intent::EmitRadius { room, radius, .. } => format!("emit radius r{} in {}", radius, label(room)),
+        Intent::TransferAttr { from, to, key, amount } => {
+            format!("transfer {} {} from {} → {}", amount, key, label(from), label(to))
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -7334,6 +7636,115 @@ mod tests {
             TokenInfo { account_id: account_id.clone(), label: "test".to_string(), persistent: false, expires_at: None },
         );
         (engine, token, account_id)
+    }
+
+    #[test]
+    fn run_tests_api_reports_pass_and_fail_under_builder_scope() {
+        // The builder's test panel runs an ad-hoc `source` (no game_dir needed)
+        // and only needs Builder scope — it executes on a world clone, so it is
+        // strictly less privileged than the `set_program` a Builder already has.
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
+        let source = "\
+function test_math_ok()
+  assert_eq(1 + 1, 2)
+end
+function test_math_bad()
+  assert_eq(1 + 1, 3)
+end
+";
+        let resp = engine.handle_api_request(
+            ApiRequest::RunTests { source: Some(source.into()), file: None },
+            Some(token),
+        );
+        assert!(resp.ok, "{:?}", resp.error);
+        let data = resp.data.unwrap();
+        assert_eq!(data["passed"], 1);
+        assert_eq!(data["failed"], 1);
+        let files = data["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["tests"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn eval_preview_reports_writes_without_applying() {
+        // The REPL previews: it runs the line, reports the writes it WOULD make,
+        // and leaves the live world untouched — Builder scope, no admin.
+        let (mut engine, token, account_id) = engine_with_api_token(&[Scope::Builder]);
+        // Give the account a character to act as, in a room.
+        let room = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&room, "hall", Kind::Room));
+        let pc = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&pc, "hero", Kind::Player));
+        if let Some(o) = engine.world.get_mut(&pc) { o.location_ref = Some(room.clone()); }
+        if let Some(a) = engine.accounts.get_mut(&account_id) { a.active_character = Some(pc.clone()); }
+
+        let resp = engine.handle_api_request(
+            ApiRequest::EvalPreview {
+                source: format!("set_attr(\"{}\", \"hp\", 5)\nreturn 42", pc),
+            },
+            Some(token),
+        );
+        assert!(resp.ok, "{:?}", resp.error);
+        let data = resp.data.unwrap();
+        assert_eq!(data["returned"], "42");
+        assert_eq!(data["write_count"], 1);
+        assert_eq!(data["writes"].as_array().unwrap().len(), 1);
+        // Crucially: the live world was NOT mutated by the preview.
+        assert!(
+            engine.world.get(&pc).unwrap().attrs.get("hp").is_none(),
+            "preview must not apply its writes to the live world"
+        );
+    }
+
+    #[test]
+    fn preview_hook_fires_and_reports_emits_without_applying() {
+        // Preview-fire an on_enter as a chosen actor: the emits + writes show up
+        // as would-apply intents, and the live world stays untouched.
+        let (mut engine, token, account_id) = engine_with_api_token(&[Scope::Builder]);
+        let room = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&room, "hall", Kind::Room));
+        let pc = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&pc, "hero", Kind::Player));
+        if let Some(o) = engine.world.get_mut(&pc) { o.location_ref = Some(room.clone()); }
+        if let Some(a) = engine.accounts.get_mut(&account_id) { a.active_character = Some(pc.clone()); }
+
+        let source = "\
+function on_enter(this, actor, room)
+  if not is_player(actor) then return end
+  emit(actor, \"Cold air.\")
+  set_attr(this, \"entered\", true)
+end
+";
+        let resp = engine.handle_api_request(
+            ApiRequest::PreviewHook {
+                ref_id: room.clone(),
+                hook: "on_enter".into(),
+                source: Some(source.into()),
+                actor_ref: Some(pc.clone()),
+                room_ref: None,
+            },
+            Some(token),
+        );
+        assert!(resp.ok, "{:?}", resp.error);
+        let data = resp.data.unwrap();
+        assert_eq!(data["write_count"], 2); // the emit + the set_attr
+        assert_eq!(data["denied"], false);
+        assert!(
+            engine.world.get(&room).unwrap().attrs.get("entered").is_none(),
+            "preview-fire must not apply its writes to the live world"
+        );
+    }
+
+    #[test]
+    fn run_tests_api_requires_builder_scope() {
+        // A bare player can't run tests — the whole authoring surface is
+        // Builder-gated (see the auth block at the top of handle_api_request).
+        let (mut engine, token, _) = engine_with_api_token(&[]);
+        let resp = engine.handle_api_request(
+            ApiRequest::RunTests { source: Some("function test_x() end".into()), file: None },
+            Some(token),
+        );
+        assert!(!resp.ok);
     }
 
     // ---- map builder REST surface: the three invariants a future refactor

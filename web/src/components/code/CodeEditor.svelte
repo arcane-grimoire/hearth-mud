@@ -9,9 +9,10 @@
   import { linter, lintGutter } from '@codemirror/lint';
   import { tags as t } from '@lezer/highlight';
   import { api } from '../../lib/api.js';
+  import { loadHooks } from '../../lib/hooks.js';
   import { API_FUNCTIONS, API_GLOBALS, OBJECT_MEMBERS } from './hearth-api.js';
 
-  let { value = $bindable(''), onsave = () => {}, onchange = () => {}, onlookup = null } = $props();
+  let { value = $bindable(''), onsave = () => {}, onchange = () => {}, onlookup = null, hook = '' } = $props();
 
   let host;
   let view;
@@ -56,8 +57,18 @@
     return set;
   }
 
+  // The parameters a hook is called with, so completing a hook name after
+  // `function` lands the right signature. Almost every hook is (this, actor,
+  // room); on_tick gets a persistent `state` table instead of an actor, and
+  // on_create only ever sees `this` — the two people always get wrong.
+  function hookSignature(name) {
+    if (name === 'on_tick') return '(this, state, room)';
+    if (name === 'on_create') return '(this)';
+    return '(this, actor, room)';
+  }
+
   // --- Hearth API autocomplete ---
-  function hearthComplete(context) {
+  async function hearthComplete(context) {
     // Member access: only offer object fields when the receiver is known to be
     // an object (a hook param or an object-bound local), not after any dot —
     // `str.` and nested tables like `actor.attrs.` shouldn't get object fields.
@@ -71,6 +82,26 @@
         };
       }
       return null; // unknown receiver — don't guess object fields
+    }
+    // Defining a hook: after `function `, offer the engine's hook vocabulary,
+    // each expanding to its full signature. Grouped guards/events; the hook
+    // this editor is already editing floats to the top.
+    const fn = context.matchBefore(/function\s+\w*$/);
+    if (fn) {
+      const partial = /function\s+(\w*)$/.exec(fn.text)?.[1] ?? '';
+      const { known } = await loadHooks();
+      if (!known.length) return null;
+      return {
+        from: fn.to - partial.length,
+        options: known.map((h) => ({
+          label: h.name,
+          apply: h.name + hookSignature(h.name),
+          type: 'function',
+          detail: h.describes || '',
+          section: h.name.startsWith('can_') ? 'Guards · can_' : 'Events · on_',
+          boost: h.name === hook ? 99 : 0,
+        })),
+      };
     }
     const word = context.matchBefore(/\w*/);
     if (!word || (word.from === word.to && !context.explicit)) return null;

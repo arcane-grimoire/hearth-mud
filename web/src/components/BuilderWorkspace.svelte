@@ -11,6 +11,9 @@
   import FileCodeIcon from '@lucide/svelte/icons/file-code';
   import BoxIcon from '@lucide/svelte/icons/box';
   import MessagesSquareIcon from '@lucide/svelte/icons/messages-square';
+  import AlertTriangleIcon from '@lucide/svelte/icons/alert-triangle';
+  import FlaskConicalIcon from '@lucide/svelte/icons/flask-conical';
+  import TerminalIcon from '@lucide/svelte/icons/terminal';
   import { showFlash, Tooltip } from '@kenn-io/kit-ui';
   import { api } from '../lib/api.js';
   import { selection, selectRef, clearSelection } from '../lib/selection.svelte.js';
@@ -24,6 +27,9 @@
   import RoomGraph from './room-builder/RoomGraph.svelte';
   import ObjectFinder from './room-builder/ObjectFinder.svelte';
   import MapBuilder from './builder/map/MapBuilder.svelte';
+  import ProblemsPanel from './builder/ProblemsPanel.svelte';
+  import TestPanel from './builder/TestPanel.svelte';
+  import ReplPanel from './builder/ReplPanel.svelte';
 
   // The unified builder workspace: one shell, one selection, a tabbed editor.
   //   explorer tree │ tabbed editor (objects · hooks · overviews)
@@ -76,7 +82,7 @@
   // contain ':', so splitting on ':' is unambiguous; a hook could in theory,
   // so it rejoins the tail.
   function tabFromId(id) {
-    if (id === 'table' || id === 'map') return { type: id };
+    if (['table', 'map', 'problems', 'tests', 'repl'].includes(id)) return { type: id };
     const [type, ...rest] = (id || '').split(':');
     if (type === 'code' && rest[0] && rest[1]) return { type: 'code', ref: rest[0], hook: rest.slice(1).join(':') };
     if (type === 'ink' && rest[0]) return { type: 'ink', ref: rest[0] };
@@ -281,6 +287,9 @@
   function tabLabel(t) {
     if (t.type === 'table') return 'Table';
     if (t.type === 'map') return 'Map';
+    if (t.type === 'problems') return 'Problems';
+    if (t.type === 'tests') return 'Tests';
+    if (t.type === 'repl') return 'REPL';
     if (t.type === 'maps') return t.name || 'Map builder';
     if (t.type === 'code') return t.hook;
     if (t.type === 'ink') return `${nameOf(t.ref)} · dialogue`;
@@ -344,6 +353,9 @@
       <div class="views">
         <button class="view-btn" onclick={() => openTab({ type: 'table' })} title="Object table"><TableIcon size={13} /> Table</button>
         <button class="view-btn" onclick={() => openTab({ type: 'map' })} title="Room map (connectivity)"><MapIcon size={13} /> Map</button>
+        <button class="view-btn" onclick={() => openTab({ type: 'problems' })} title="World health check"><AlertTriangleIcon size={13} /> Problems</button>
+        <button class="view-btn" onclick={() => openTab({ type: 'tests' })} title="Run softcode tests"><FlaskConicalIcon size={13} /> Tests</button>
+        <button class="view-btn" onclick={() => openTab({ type: 'repl' })} title="Luau REPL — evaluate against the live world"><TerminalIcon size={13} /> REPL</button>
       </div>
 
       <div class="chips">
@@ -392,7 +404,7 @@
               tabindex={t.id === activeId ? 0 : -1}
               onclick={() => activate(t.id)} onkeydown={(e) => tabKeydown(e, t.id)}>
               <span class="ti">
-                {#if t.type === 'code'}<FileCodeIcon size={12} />{:else if t.type === 'ink'}<MessagesSquareIcon size={12} />{:else if t.type === 'object'}<BoxIcon size={12} />{:else if t.type === 'table'}<TableIcon size={12} />{:else if t.type === 'maps'}<Grid3x3Icon size={12} />{:else}<MapIcon size={12} />{/if}
+                {#if t.type === 'code'}<FileCodeIcon size={12} />{:else if t.type === 'ink'}<MessagesSquareIcon size={12} />{:else if t.type === 'object'}<BoxIcon size={12} />{:else if t.type === 'table'}<TableIcon size={12} />{:else if t.type === 'maps'}<Grid3x3Icon size={12} />{:else if t.type === 'problems'}<AlertTriangleIcon size={12} />{:else if t.type === 'tests'}<FlaskConicalIcon size={12} />{:else if t.type === 'repl'}<TerminalIcon size={12} />{:else}<MapIcon size={12} />{/if}
               </span>
               <span class="tl">{tabLabel(t)}</span>
               {#if t.type === 'code' || t.type === 'object' || t.type === 'ink'}<span class="tref">{t.ref}</span>{/if}
@@ -445,6 +457,12 @@
           <ObjectTable rows={filtered} selectedRef={selection.ref} onselect={openObject} />
         {:else if activeTab.type === 'map'}
           <RoomGraph onedit={openObject} />
+        {:else if activeTab.type === 'problems'}
+          <ProblemsPanel onopen={openObject} onopenhook={openHookTab} />
+        {:else if activeTab.type === 'tests'}
+          <TestPanel />
+        {:else if activeTab.type === 'repl'}
+          <ReplPanel />
         {:else if activeTab.type === 'maps'}
           <!-- Native map builder (Svelte port of Mapwright) — themed with kit-ui,
                deep-linked to a specific map by name. -->
