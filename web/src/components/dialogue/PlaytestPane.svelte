@@ -140,7 +140,7 @@
   .line.you { align-self: flex-end; max-width: 85%; }
   .line.you .txt { color: var(--accent-blue, #6ea3d0); background: color-mix(in srgb, var(--accent-blue, #6ea3d0) 12%, transparent); border-radius: 10px 10px 2px 10px; padding: 5px 11px; font-size: 12.5px; }
   .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-  .tag { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; color: var(--accent-green, #8fb877); background: color-mix(in srgb, var(--accent-green, #8fb877) 12%, transparent); border-radius: 5px; padding: 0 5px; }
+  .tag { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-meta); color: var(--accent-green, #8fb877); background: color-mix(in srgb, var(--accent-green, #8fb877) 12%, transparent); border-radius: 5px; padding: 0 5px; }
 
   .choices { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
   .choice { text-align: left; background: var(--bg-primary, #12100c); border: 1px solid var(--border-default, #332c22); color: var(--text-secondary, #b6a888); border-radius: 8px; padding: 8px 12px; cursor: pointer; font: inherit; font-size: 12.5px; }

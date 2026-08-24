@@ -12,3 +12,12 @@ web/dist
 Thumbs.db
 *.pem
 *.key
+
+# Impeccable (design skill): local settings + per-clone cache are not shared;
+# the committed critique snapshots and hook config are.
+.impeccable/config.local.json
+.impeccable/hook.cache.json
+
+# Claude Code scratch worktrees (ephemeral; project skills under .claude/skills
+# are still tracked).
+.claude/worktrees/

@@ -58,9 +58,26 @@
   function kindClass(k) {
     return ({ room: 'k-room', npc: 'k-npc', item: 'k-item', player: 'k-player', code: 'k-code', exit: 'k-exit' })[k] || '';
   }
+
+  // Arrow-key navigation across the explorer. Rows are real <button>s (so Tab +
+  // Enter already work); this adds Up/Down/Home/End to move focus between the
+  // visible rows without reaching for the mouse or tabbing through each one.
+  function treeKeydown(e) {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
+    const items = [...e.currentTarget.querySelectorAll('button')].filter((b) => b.offsetParent !== null);
+    if (!items.length) return;
+    e.preventDefault();
+    const idx = items.indexOf(document.activeElement);
+    let next;
+    if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = items.length - 1;
+    else if (e.key === 'ArrowDown') next = idx < 0 ? 0 : Math.min(idx + 1, items.length - 1);
+    else next = idx <= 0 ? 0 : idx - 1;
+    items[next]?.focus();
+  }
 </script>
 
-<div class="tree">
+<div class="tree" role="group" aria-label="Objects and maps" onkeydown={treeKeydown}>
   <!-- Maps folder — the tile/terrain maps live alongside object areas. -->
   <div class="area maps-folder">
     <button class="area-btn" onclick={() => (mapsOpen = !mapsOpen)}>
@@ -146,15 +163,15 @@
   .map-leaf.active :global(svg) { color: var(--accent-amber, #c9956b); }
   .none.sub { padding-left: 30px; font-size: 11px; }
   .area-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: capitalize; }
-  .area-count { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; color: var(--text-muted, #8c8378); }
+  .area-count { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-meta); color: var(--text-muted, #8c8378); }
 
   .obj { padding: 4px 10px 4px 16px; color: var(--text-primary, #ece0c8); }
   .obj:hover { background: var(--bg-primary, #12100c); }
   .obj.sel { background: color-mix(in srgb, var(--accent-amber, #c9956b) 14%, transparent); }
   .obj.sel .obj-name { color: var(--accent-amber, #c9956b); }
   .obj-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .obj-count { font-family: var(--font-mono, ui-monospace, monospace); font-size: 9px; color: var(--accent-green, #8fb877); background: rgba(143,184,119,0.14); border-radius: 7px; padding: 0 5px; }
-  .kb { font-family: var(--font-mono, ui-monospace, monospace); font-size: 8px; font-weight: 700; text-transform: uppercase; padding: 1px 3px; border-radius: 3px; flex: none; }
+  .obj-count { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-meta); color: var(--accent-green, #8fb877); background: rgba(143,184,119,0.14); border-radius: 7px; padding: 0 5px; }
+  .kb { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-badge); font-weight: 700; text-transform: uppercase; padding: 1px 4px; border-radius: 3px; flex: none; }
   .k-room { background: rgba(86,182,194,0.15); color: var(--accent-teal, #56b6c2); }
   .k-npc { background: rgba(201,149,107,0.15); color: var(--accent-amber, #c9956b); }
   .k-item { background: rgba(97,175,239,0.15); color: var(--accent-blue, #61afef); }

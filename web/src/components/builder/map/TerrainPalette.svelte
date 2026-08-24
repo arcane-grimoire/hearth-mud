@@ -76,12 +76,12 @@
 <style>
   .rail { display: flex; flex-direction: column; gap: 20px; padding: 16px 14px; overflow-y: auto; height: 100%; background: var(--bg-surface); border-right: 1px solid var(--border-default); }
   section { display: block; }
-  .label { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-muted); margin: 0 0 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .label { font-family: var(--font-mono); font-size: var(--fs-label); letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-muted); margin: 0 0 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .add { border: 1px solid var(--border-default); background: var(--bg-inset); color: var(--text-muted); width: 22px; height: 22px; border-radius: 5px; display: grid; place-items: center; cursor: pointer; }
   .add:hover { color: var(--accent-amber); border-color: color-mix(in srgb, var(--accent-amber) 40%, transparent); }
 
   .tools { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
-  .tool { border: 1px solid var(--border-default); background: var(--bg-inset); color: var(--text-muted); border-radius: 7px; padding: 8px 4px 6px; display: flex; flex-direction: column; align-items: center; gap: 3px; font-size: 10.5px; font-weight: 500; cursor: pointer; }
+  .tool { border: 1px solid var(--border-default); background: var(--bg-inset); color: var(--text-muted); border-radius: 7px; padding: 8px 4px 6px; display: flex; flex-direction: column; align-items: center; gap: 3px; font-size: var(--fs-meta); font-weight: 500; cursor: pointer; }
   .tool .g { font-size: 16px; line-height: 1; }
   .tool:hover { color: var(--text-primary); }
   .tool.on { background: color-mix(in srgb, var(--accent-amber) 14%, transparent); border-color: color-mix(in srgb, var(--accent-amber) 45%, transparent); color: var(--accent-amber); }
@@ -93,8 +93,8 @@
   .chip { width: 26px; height: 26px; border-radius: 6px; flex: none; border: 1px solid rgba(0,0,0,.18); display: grid; place-items: center; font-family: var(--font-mono); font-weight: 600; font-size: 13px; }
   .meta { min-width: 0; flex: 1; }
   .nm { display: block; font-weight: 600; font-size: 12.5px; line-height: 1.25; text-transform: capitalize; }
-  .sub { display: block; font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); letter-spacing: 0.02em; }
-  .imp { font-size: 9px; font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent-amber); border: 1px solid color-mix(in srgb, var(--accent-amber) 55%, transparent); border-radius: 4px; padding: 1px 4px; flex: none; }
+  .sub { display: block; font-family: var(--font-mono); font-size: var(--fs-meta); color: var(--text-muted); letter-spacing: 0.02em; }
+  .imp { font-size: var(--fs-badge); font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent-amber); border: 1px solid color-mix(in srgb, var(--accent-amber) 55%, transparent); border-radius: 4px; padding: 1px 4px; flex: none; }
 
   .wide { width: 100%; justify-content: center; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border-default); background: var(--bg-inset); color: var(--text-primary); border-radius: 7px; padding: 7px 12px; font-size: 12.5px; font-weight: 500; cursor: pointer; }
   .wide:hover { border-color: var(--text-muted); }

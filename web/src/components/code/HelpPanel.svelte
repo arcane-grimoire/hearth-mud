@@ -166,7 +166,7 @@
   .hp-x:hover { color: var(--text-primary, #ece0c8); background: var(--bg-primary, #12100c); }
 
   .hp-body { flex: 1; overflow-y: auto; padding: 4px 0 20px; }
-  .hp-h { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent-amber, #c9956b); padding: 12px 12px 3px; }
+  .hp-h { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-label); letter-spacing: .08em; text-transform: uppercase; color: var(--accent-amber, #c9956b); padding: 12px 12px 3px; }
   .hp-row { display: block; width: 100%; text-align: left; background: none; border: none; cursor: pointer; padding: 4px 12px; }
   .hp-row:hover { background: var(--bg-primary, #12100c); }
   .hp-row.open { background: color-mix(in srgb, var(--accent-amber, #c9956b) 10%, transparent); }
@@ -183,7 +183,7 @@
   .hp-cur .hp-h { padding: 0 0 4px; color: var(--text-muted, #8c8378); }
   .hp-cur-name { font-size: 13px; color: var(--accent-amber, #c9956b); }
   .hp-cur-doc { margin: 3px 0 6px; font-size: 11.5px; line-height: 1.4; color: var(--text-secondary, #b6a888); }
-  .hp-sig { display: block; font-family: var(--font-mono, ui-monospace, monospace); font-size: 10.5px; color: var(--accent-green, #8fb877); white-space: pre-wrap; word-break: break-word; margin-bottom: 7px; }
+  .hp-sig { display: block; font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-meta); color: var(--accent-green, #8fb877); white-space: pre-wrap; word-break: break-word; margin-bottom: 7px; }
   .hp-copy { display: inline-flex; align-items: center; gap: 5px; font: inherit; font-size: 11px; color: var(--accent-amber, #c9956b); background: none; border: 1px solid color-mix(in srgb, var(--accent-amber, #c9956b) 40%, transparent); border-radius: 6px; padding: 3px 9px; cursor: pointer; }
   .hp-copy:hover { background: color-mix(in srgb, var(--accent-amber, #c9956b) 12%, transparent); }
 

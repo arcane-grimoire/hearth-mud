@@ -2,6 +2,18 @@
   --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono',
     'Consolas', 'Liberation Mono', monospace;
   --font-size-output: 14px;
+
+  /* Builder IDE functional type roles. These are semantic aliases, defined ONCE
+     against kit-ui's own fluid scale (brand.css: --font-size-xs is 11px on
+     desktop, sm 12px, md 13px, scaling up at larger breakpoints / touch), so
+     the builder rides the same scale as every kit-ui component instead of a
+     parallel one. The dense chrome used to hardcode 8-10.5px, below any legible
+     floor; now it references a role name and the kit-ui coupling + the 11px
+     fallback (for the case brand.css is ever absent) live here alone. Roles map
+     to the same size today but are named so they can diverge without a sweep. */
+  --fs-label: var(--font-size-xs, 11px);  /* uppercase section + field labels */
+  --fs-badge: var(--font-size-xs, 11px);  /* dense all-caps badges: kind/dir/type */
+  --fs-meta:  var(--font-size-xs, 11px);  /* counts, refs, chips, dense data */
 }
 
 *,
@@ -26,6 +38,26 @@ body {
 
 #app {
   height: 100%;
+}
+
+/* Keyboard focus ring for the builder IDE. Components zero the default outline
+   on inputs for looks; this puts a visible focus indicator back for keyboard
+   users (WCAG 2.4.7) while :focus-visible keeps it off mouse clicks. Scoped to
+   .ws so it doesn't fight kit-ui components' own focus styling elsewhere. */
+.ws :is(a, button, input, textarea, select, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent-amber, #c9956b);
+  outline-offset: 2px;
+}
+
+/* Respect reduced-motion: the builder's motion is decorative (hover/entrance
+   transitions), so collapse durations to near-zero. State still changes — it
+   just changes instantly rather than animating. */
+@media (prefers-reduced-motion: reduce) {
+  .ws *, .ws *::before, .ws *::after {
+    transition-duration: 0.001ms !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }
 
 /* BBCode markup classes (server-rendered) */

@@ -66,8 +66,8 @@
   .del { position: absolute; top: 6px; right: 6px; border: none; background: none; color: var(--text-muted); font-size: 15px; width: 20px; height: 20px; border-radius: 5px; line-height: 1; cursor: pointer; }
   .del:hover { color: var(--accent-red); background: color-mix(in srgb, var(--accent-red) 14%, transparent); }
   .grid { display: grid; grid-template-columns: 1fr 1.25fr; gap: 6px; align-items: end; }
-  .lbl { font-size: 10px; color: var(--text-muted); font-family: var(--font-mono); letter-spacing: 0.04em; margin-bottom: 3px; }
-  .tybadge { font-family: var(--font-mono); font-size: 8.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent-amber); background: color-mix(in srgb, var(--accent-amber) 14%, transparent); border: 1px solid color-mix(in srgb, var(--accent-amber) 40%, transparent); border-radius: 4px; padding: 0 4px; margin-left: 4px; vertical-align: 1px; }
+  .lbl { font-size: var(--fs-label); color: var(--text-muted); font-family: var(--font-mono); letter-spacing: 0.04em; margin-bottom: 3px; }
+  .tybadge { font-family: var(--font-mono); font-size: var(--fs-badge); text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent-amber); background: color-mix(in srgb, var(--accent-amber) 14%, transparent); border: 1px solid color-mix(in srgb, var(--accent-amber) 40%, transparent); border-radius: 4px; padding: 0 4px; margin-left: 4px; vertical-align: 1px; }
   .in { width: 100%; background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: 6px; padding: 5px 7px; font-size: 12px; color: var(--text-primary); font-family: var(--font-mono); outline: none; }
   .in:focus { border-color: var(--accent-amber); }
 </style>

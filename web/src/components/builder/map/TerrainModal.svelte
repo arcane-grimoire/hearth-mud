@@ -58,7 +58,7 @@
   .check { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-primary); }
   .check input { width: 15px; height: 15px; accent-color: var(--accent-amber); }
   .sub { border-top: 1px solid var(--border-default); padding-top: 13px; }
-  .sub h4 { margin: 0 0 9px; font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-muted); }
+  .sub h4 { margin: 0 0 9px; font-family: var(--font-mono); font-size: var(--fs-label); letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-muted); }
   .dim { text-transform: none; letter-spacing: 0; color: var(--text-muted); font-family: var(--font-sans); }
   .addbtn { margin-top: 8px; border: 1px dashed var(--border-default); background: transparent; color: var(--text-muted); border-radius: 7px; padding: 6px; font-size: 11.5px; font-weight: 500; width: 100%; cursor: pointer; }
   .addbtn:hover { color: var(--accent-amber); border-color: color-mix(in srgb, var(--accent-amber) 40%, transparent); }

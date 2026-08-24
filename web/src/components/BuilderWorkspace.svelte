@@ -32,6 +32,7 @@
   let { onexit = () => {} } = $props();
 
   let objects = $state([]);
+  let truncated = $state(false); // list_objects_full hit its cap — some objects are hidden
   let loading = $state(true);
   let kindFilter = $state('all');
   let search = $state('');
@@ -39,6 +40,21 @@
   let obj = $state(null);          // examined detail for the active tab's object
   let objLoading = $state(false);
   let subtab = $state('props');    // Properties | Hooks | Dialogue within an object tab
+
+  // Which subtabs an object kind exposes. A room's exits + contents live inside
+  // Properties (right under identity), not a separate tab. Only NPCs get
+  // Dialogue. Everything gets Properties + Hooks.
+  const subtabsFor = (kind) => {
+    const t = ['props', 'hooks'];
+    if (kind === 'npc') t.push('dialogue');
+    return t;
+  };
+  const objSubtabs = $derived(subtabsFor(obj?.kind));
+  // Keep the active subtab valid when the selected object changes kind.
+  $effect(() => {
+    if (obj && !objSubtabs.includes(subtab)) subtab = 'props';
+  });
+  const rooms = $derived(objects.filter((o) => o.kind === 'room'));
 
   // Open editor tabs. Each: { id, type:'object'|'code'|'table'|'map', ref?, hook? }
   let tabs = $state([]);
@@ -99,15 +115,22 @@
 
   async function loadObjects() {
     loading = true;
+    // Objects AND their area come from list_objects_full, where area is derived
+    // from each object's _file_key. Programs come separately, only to attach the
+    // hooks list (Code filter + Hooks count). The old path took area from the
+    // programs response — which lists only objects that HAVE a program — so
+    // every program-less room (most rooms) fell into "Unfiled" despite having a
+    // real _file_key area.
     const [objRes, progRes] = await Promise.all([
-      api('list_objects'),
+      api('list_objects_full', { limit: 3000 }),
       api('list_programs_all'),
     ]);
     const progById = new Map((progRes?.ok ? progRes.data : []).map((e) => [e.ref_id, e]));
-    const list = objRes?.ok ? objRes.data : [];
+    const list = objRes?.ok ? (objRes.data?.objects || []) : [];
+    truncated = objRes?.ok ? !!objRes.data?.truncated : false;
     objects = list.map((o) => {
       const p = progById.get(o.ref_id);
-      return { ...o, hooks: p?.hooks || [], area: p?.area || '' };
+      return { ...o, hooks: p?.hooks || [] }; // area already on o, from _file_key
     });
     loading = false;
   }
@@ -162,6 +185,24 @@
     const t = tabs.find((x) => x.id === id);
     if (t?.ref) selectRef(t.ref); else clearSelection();
   }
+  // Roving-tabindex keyboard model for the editor tab strip (WAI-ARIA tabs):
+  // Enter/Space activates, arrows move between tabs and carry focus.
+  function tabKeydown(e, id) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(id); return; }
+    const idx = tabs.findIndex((t) => t.id === id);
+    if (idx < 0) return;
+    let next = -1;
+    if (e.key === 'ArrowRight') next = (idx + 1) % tabs.length;
+    else if (e.key === 'ArrowLeft') next = (idx - 1 + tabs.length) % tabs.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = tabs.length - 1;
+    else return;
+    e.preventDefault();
+    const nt = tabs[next];
+    if (!nt) return;
+    activate(nt.id);
+    document.querySelector(`.tabx[data-tabid="${nt.id}"]`)?.focus();
+  }
   function closeTab(id, e) {
     e?.stopPropagation();
     const i = tabs.findIndex((x) => x.id === id);
@@ -175,6 +216,17 @@
   const openObject = (ref) => openTab({ type: 'object', ref });
   const openHookTab = (ref, hook) => openTab({ type: 'code', ref, hook });
   const openInkTab = (ref) => openTab({ type: 'ink', ref });
+
+  // A structural change (exit/content added or removed, hook removed) — re-examine
+  // the open object AND refresh the explorer tree, since the object set changed.
+  function structureChanged() { refresh(); loadObjects(); }
+
+  // The object was deleted from its Properties tab — drop its tab and refresh.
+  function onObjectDeleted(ref) {
+    const id = tabIdOf({ type: 'object', ref });
+    closeTab(id);
+    loadObjects();
+  }
 
   function nameOf(ref) {
     const o = objects.find((x) => x.ref_id === ref);
@@ -274,6 +326,9 @@
             onopenmap={(m) => openTab({ type: 'maps', name: m })}
             onnewmap={() => openTab({ type: 'maps' })}
           />
+          {#if truncated}
+            <div class="ex-trunc" role="status">Showing the first {objects.length} objects — filter to find the rest.</div>
+          {/if}
         {/if}
       </div>
     </nav>
@@ -284,8 +339,12 @@
       {#if tabs.length}
         <div class="tabbar" role="tablist">
           {#each tabs as t (t.id)}
-            <div class="tabx" class:active={t.id === activeId} role="tab" tabindex="0"
-              onclick={() => activate(t.id)} onkeydown={(e) => e.key === 'Enter' && activate(t.id)}>
+            <div class="tabx" class:active={t.id === activeId} role="tab"
+              data-tabid={t.id}
+              aria-selected={t.id === activeId}
+              aria-controls="ws-panel"
+              tabindex={t.id === activeId ? 0 : -1}
+              onclick={() => activate(t.id)} onkeydown={(e) => tabKeydown(e, t.id)}>
               <span class="ti">
                 {#if t.type === 'code'}<FileCodeIcon size={12} />{:else if t.type === 'ink'}<MessagesSquareIcon size={12} />{:else if t.type === 'object'}<BoxIcon size={12} />{:else if t.type === 'table'}<TableIcon size={12} />{:else if t.type === 'maps'}<Grid3x3Icon size={12} />{:else}<MapIcon size={12} />{/if}
               </span>
@@ -297,13 +356,26 @@
         </div>
       {/if}
 
-      <div class="view">
+      <div class="view" id="ws-panel" role={activeTab ? 'tabpanel' : undefined} aria-label={activeTab ? tabLabel(activeTab) : undefined}>
         {#if !activeTab}
           <div class="welcome">
             <LayersIcon size={30} />
-            <p class="w-lead">Nothing open</p>
-            <p class="w-hint">Pick an object in the explorer to open its detail, or a hook to edit its code — each opens as a tab here.</p>
-            <p class="w-sub">Overviews: <b>Table</b> · <b>Map</b> (top right).</p>
+            <p class="w-lead">Build your world</p>
+            <p class="w-hint">Everything in your MUD — rooms, items, NPCs, exits — is an object you edit here. Open one from the explorer, or start something new.</p>
+            <div class="w-actions">
+              <button class="w-go" onclick={() => { sidebarOpen = true; newOpen = true; }}>
+                <PlusIcon size={15} /> New object
+              </button>
+              <button class="w-alt" onclick={() => openTab({ type: 'table' })}>
+                <TableIcon size={14} /> Browse everything
+              </button>
+              <button class="w-alt" onclick={() => openTab({ type: 'map' })}>
+                <MapIcon size={14} /> Room map
+              </button>
+            </div>
+            <p class="w-legend">
+              New here? An <b>object</b> is a room, item, or NPC · <b>hooks</b> are Luau scripts that react to events · <b>tags</b> and <b>attributes</b> describe an object.
+            </p>
           </div>
         {:else if activeTab.type === 'code'}
           {#key activeTab.id}
@@ -346,13 +418,15 @@
               <div class="subtabs">
                 <button class:on={subtab === 'props'} onclick={() => (subtab = 'props')}>Properties</button>
                 <button class:on={subtab === 'hooks'} onclick={() => (subtab = 'hooks')}>Hooks{#if obj.programs?.length} <span class="sc">{obj.programs.length}</span>{/if}</button>
-                <button class:on={subtab === 'dialogue'} onclick={() => (subtab = 'dialogue')}>Dialogue</button>
+                {#if objSubtabs.includes('dialogue')}
+                  <button class:on={subtab === 'dialogue'} onclick={() => (subtab = 'dialogue')}>Dialogue</button>
+                {/if}
               </div>
               <div class="subbody">
                 {#if subtab === 'props'}
-                  <PropertiesPanel {obj} onchanged={refresh} />
+                  <PropertiesPanel {obj} {rooms} onchanged={structureChanged} ondeleted={onObjectDeleted} onedit={openObject} />
                 {:else if subtab === 'hooks'}
-                  <HooksPanel {obj} activeHook={null} onopen={(h) => openHookTab(obj.ref_id, h)} />
+                  <HooksPanel {obj} activeHook={null} onopen={(h) => openHookTab(obj.ref_id, h)} onchanged={structureChanged} />
                 {:else}
                   <div class="dlg-launch">
                     <MessagesSquareIcon size={26} />
@@ -398,7 +472,7 @@
   .sp { flex: 1; }
   .find { display: inline-flex; align-items: center; gap: 6px; font: inherit; font-size: 12.5px; color: var(--text-secondary, #b6a888); background: var(--bg-primary, #12100c); border: 1px solid var(--border-default, #332c22); border-radius: 8px; padding: 5px 10px; cursor: pointer; }
   .find:hover { border-color: var(--accent-amber, #c9956b); color: var(--text-primary, #ece0c8); }
-  .find kbd { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; color: var(--text-muted, #8c8378); border: 1px solid var(--border-muted, #2a2419); border-radius: 4px; padding: 0 4px; }
+  .find kbd { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-meta); color: var(--text-muted, #8c8378); border: 1px solid var(--border-muted, #2a2419); border-radius: 4px; padding: 0 4px; }
 
   .body { flex: 1; display: grid; grid-template-columns: 250px 1fr; min-height: 0; }
   .body.no-sidebar { grid-template-columns: 1fr; }
@@ -414,7 +488,7 @@
   .nf-kind.on { background: color-mix(in srgb, var(--accent-amber, #c9956b) 16%, transparent); border-color: color-mix(in srgb, var(--accent-amber, #c9956b) 45%, transparent); color: var(--accent-amber, #c9956b); }
   .nf-in { background: var(--bg-surface, #17140f); border: 1px solid var(--border-default, #332c22); border-radius: 6px; color: var(--text-primary, #ece0c8); padding: 5px 8px; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; outline: none; }
   .nf-in:focus { border-color: var(--accent-amber, #c9956b); }
-  .nf-hint { font-size: 10.5px; color: var(--text-muted, #8c8378); }
+  .nf-hint { font-size: var(--fs-meta); color: var(--text-muted, #8c8378); }
   .nf-actions { display: flex; gap: 6px; }
   .nf-go { flex: 1; background: var(--accent-amber, #c9956b); border: none; color: var(--bg-primary, #12100c); font-weight: 600; border-radius: 6px; padding: 5px; cursor: pointer; font: inherit; font-size: 12px; }
   .nf-go:disabled { opacity: 0.5; cursor: default; }
@@ -427,10 +501,11 @@
   .chip { display: inline-flex; align-items: center; gap: 4px; background: var(--bg-primary, #12100c); border: 1px solid var(--border-default, #332c22); border-radius: 12px; cursor: pointer; padding: 2px 8px; color: var(--text-muted, #8c8378); font: inherit; font-size: 11px; }
   .chip:hover { color: var(--text-primary, #ece0c8); }
   .chip.active { background: color-mix(in srgb, var(--accent-amber, #c9956b) 16%, transparent); border-color: color-mix(in srgb, var(--accent-amber, #c9956b) 45%, transparent); color: var(--accent-amber, #c9956b); }
-  .cc { font-family: var(--font-mono, ui-monospace, monospace); font-size: 9px; opacity: 0.8; }
+  .cc { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-meta); opacity: 0.8; }
   .ex-search { display: flex; align-items: center; gap: 7px; padding: 7px 11px; border-bottom: 1px solid var(--border-muted, #211d16); color: var(--text-muted, #8c8378); }
   .ex-search input { flex: 1; background: none; border: none; color: var(--text-primary, #ece0c8); font: inherit; font-size: 12px; outline: none; }
-  .ex-tree { flex: 1; min-height: 0; }
+  .ex-tree { flex: 1; min-height: 0; overflow-y: auto; }
+  .ex-trunc { margin: 6px 10px; padding: 6px 8px; font-size: var(--fs-meta); line-height: 1.4; color: var(--accent-amber, #c9956b); background: color-mix(in srgb, var(--accent-amber, #c9956b) 10%, transparent); border: 1px solid color-mix(in srgb, var(--accent-amber, #c9956b) 35%, transparent); border-radius: 6px; }
 
   .center { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 
@@ -441,7 +516,7 @@
   .tabx .ti { display: inline-flex; color: var(--accent-blue, #6ea3d0); flex: none; }
   .tabx.active .ti { color: var(--accent-amber, #c9956b); }
   .tl { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-mono, ui-monospace, monospace); }
-  .tref { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; color: var(--text-muted, #8c8378); }
+  .tref { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-meta); color: var(--text-muted, #8c8378); }
   .tc-x { display: inline-flex; align-items: center; justify-content: center; background: none; border: none; color: var(--text-muted, #8c8378); cursor: pointer; padding: 1px; border-radius: 4px; line-height: 0; }
   .tc-x:hover { background: color-mix(in srgb, var(--accent-red, #c96a5a) 20%, transparent); color: var(--accent-red, #e06c75); }
 
@@ -456,7 +531,7 @@
   .subtabs button { background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-muted, #8c8378); cursor: pointer; font: inherit; font-size: 12.5px; padding: 6px 10px; display: inline-flex; align-items: center; gap: 5px; }
   .subtabs button:hover { color: var(--text-primary, #ece0c8); }
   .subtabs button.on { color: var(--accent-amber, #c9956b); border-bottom-color: var(--accent-amber, #c9956b); }
-  .sc { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; background: rgba(143,184,119,0.16); color: var(--accent-green, #8fb877); border-radius: 8px; padding: 0 5px; }
+  .sc { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-meta); background: rgba(143,184,119,0.16); color: var(--accent-green, #8fb877); border-radius: 8px; padding: 0 5px; }
   .subbody { flex: 1; min-height: 0; overflow-y: auto; }
 
   .none { color: var(--text-muted, #8c8378); font-style: italic; padding: 16px; font-size: 12.5px; }
@@ -468,12 +543,18 @@
   .dl-open { margin-top: 8px; background: color-mix(in srgb, var(--accent-amber, #c9956b) 16%, transparent); border: 1px solid color-mix(in srgb, var(--accent-amber, #c9956b) 45%, transparent); color: var(--accent-amber, #c9956b); border-radius: 8px; padding: 7px 16px; cursor: pointer; font: inherit; font-size: 12.5px; font-weight: 600; }
   .dl-open:hover { background: color-mix(in srgb, var(--accent-amber, #c9956b) 26%, transparent); }
 
-  .welcome { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 24px; text-align: center; color: var(--text-muted, #8c8378); }
-  .welcome :global(svg) { color: color-mix(in srgb, var(--accent-amber, #c9956b) 55%, transparent); margin-bottom: 4px; }
-  .w-lead { margin: 0; font-size: 15px; font-weight: 600; color: var(--text-secondary, #b6a888); }
-  .w-hint { margin: 0; max-width: 420px; font-size: 12.5px; line-height: 1.5; }
-  .w-sub b { font-family: var(--font-mono, ui-monospace, monospace); color: var(--accent-amber, #c9956b); font-weight: 600; }
-  .w-sub { margin: 6px 0 0; font-size: 11.5px; }
+  .welcome { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 24px; text-align: center; color: var(--text-muted, #8c8378); }
+  .welcome > :global(svg) { color: color-mix(in srgb, var(--accent-amber, #c9956b) 55%, transparent); margin-bottom: 4px; }
+  .w-lead { margin: 0; font-size: 17px; font-weight: 700; color: var(--text-primary, #ece0c8); }
+  .w-hint { margin: 0; max-width: 440px; font-size: 12.5px; line-height: 1.55; }
+  .w-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 6px; }
+  .w-go, .w-alt { display: inline-flex; align-items: center; gap: 7px; font: inherit; font-size: 12.5px; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+  .w-go { background: var(--accent-amber, #c9956b); border: 1px solid var(--accent-amber, #c9956b); color: var(--bg-primary, #12100c); font-weight: 600; }
+  .w-go:hover { filter: brightness(1.06); }
+  .w-alt { background: var(--bg-surface, #17140f); border: 1px solid var(--border-default, #332c22); color: var(--text-secondary, #b6a888); }
+  .w-alt:hover { border-color: var(--accent-amber, #c9956b); color: var(--text-primary, #ece0c8); }
+  .w-legend { margin: 12px 0 0; max-width: 480px; font-size: 11.5px; line-height: 1.6; color: var(--text-muted, #8c8378); border-top: 1px solid var(--border-muted, #211d16); padding-top: 12px; }
+  .w-legend b { font-family: var(--font-mono, ui-monospace, monospace); color: var(--accent-amber, #c9956b); font-weight: 600; }
 
   @media (max-width: 900px) {
     .body { grid-template-columns: 180px 1fr; }
