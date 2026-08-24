@@ -123,7 +123,7 @@
   .of-item:hover { background: color-mix(in srgb, var(--accent-amber, #c9956b) 12%, transparent); }
   .of-ref-open { color: var(--accent-amber, #c9956b); }
   .of-kind {
-    font-family: var(--font-mono, ui-monospace, monospace); font-size: 9px; text-transform: uppercase;
+    font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-badge); text-transform: uppercase;
     letter-spacing: .04em; padding: 2px 6px; border-radius: 4px; flex: none; min-width: 42px; text-align: center;
     background: var(--bg-primary, #12100c); border: 1px solid var(--border-muted, #2a2419); color: var(--text-muted, #9a9186);
   }

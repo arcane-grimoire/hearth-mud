@@ -406,7 +406,7 @@
   .rg-spacer { flex: 1; }
   .rg-warn { font-size: 11.5px; color: var(--accent-red, #d07a5a); }
   .rg-pill {
-    font-family: var(--font-mono, ui-monospace, monospace); font-size: 10.5px;
+    font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-meta);
     padding: 3px 8px; border-radius: 999px;
     background: var(--bg-primary, #12100c); border: 1px solid var(--border-default, #332c22);
     color: var(--text-muted, #9a9186);
@@ -431,7 +431,7 @@
     background: var(--bg-surface, #17140f);
     color: var(--text-muted, #b6a888);
     font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 10px; line-height: 1.4;
+    font-size: var(--fs-meta); line-height: 1.4;
     padding: 1px 5px; border-radius: 4px;
     border: 1px solid var(--border-muted, #2a2419);
   }
@@ -450,10 +450,10 @@
     border-radius: 12px; box-shadow: 0 12px 40px -18px rgba(0,0,0,.7);
   }
   .rg-insp header { display: flex; align-items: center; justify-content: space-between; padding: 11px 13px; border-bottom: 1px solid var(--border-default, #2a2419); }
-  .ri-eyebrow { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-muted, #9a9186); }
+  .ri-eyebrow { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-label); letter-spacing: .12em; text-transform: uppercase; color: var(--text-muted, #9a9186); }
   .ri-ref { color: var(--accent-amber, #c9956b); }
   .ri-body { padding: 12px 13px; overflow-y: auto; flex: 1; }
-  .ri-lbl { display: block; font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-muted, #9a9186); margin: 12px 0 5px; }
+  .ri-lbl { display: block; font-size: var(--fs-label); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-muted, #9a9186); margin: 12px 0 5px; }
   .ri-lbl:first-child { margin-top: 0; }
   .ri-in {
     width: 100%; font: inherit; font-size: 13px; color: var(--text-primary, #ece0c8);
@@ -465,10 +465,10 @@
   .ri-mono { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; opacity: .8; }
   .ri-desc { min-height: 82px; line-height: 1.5; resize: vertical; }
   .ri-tags { display: flex; flex-wrap: wrap; gap: 4px; }
-  .ri-tag { font-family: var(--font-mono, ui-monospace, monospace); font-size: 9px; padding: 2px 5px; border-radius: 4px; background: var(--bg-primary, #12100c); border: 1px solid var(--border-muted, #2a2419); color: var(--text-muted, #9a9186); }
-  .ri-sec { font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-muted, #9a9186); margin: 16px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--border-muted, #2a2419); }
+  .ri-tag { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-meta); padding: 2px 5px; border-radius: 4px; background: var(--bg-primary, #12100c); border: 1px solid var(--border-muted, #2a2419); color: var(--text-muted, #9a9186); }
+  .ri-sec { font-size: var(--fs-label); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-muted, #9a9186); margin: 16px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--border-muted, #2a2419); }
   .ri-exit { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: var(--bg-primary, #12100c); border: 1px solid var(--border-muted, #2a2419); border-radius: 7px; margin-bottom: 5px; }
-  .ri-dir { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px; text-transform: uppercase; color: var(--bg-primary, #12100c); background: var(--edge, #9c8863); border-radius: 4px; padding: 1px 6px; min-width: 30px; text-align: center; }
+  .ri-dir { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-badge); text-transform: uppercase; color: var(--bg-primary, #12100c); background: var(--edge, #9c8863); border-radius: 4px; padding: 1px 6px; min-width: 30px; text-align: center; }
   .ri-to { flex: 1; font-size: 12px; color: var(--text-muted, #b6a888); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ri-to b { color: var(--text-primary, #ece0c8); }
   .ri-go { background: none; border: none; color: var(--text-muted, #9a9186); cursor: pointer; padding: 2px; line-height: 0; border-radius: 4px; }

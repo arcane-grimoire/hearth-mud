@@ -75,6 +75,9 @@
 <style>
   .frame { background: var(--bg-inset); border: 1px solid var(--border-default); border-radius: 12px; box-shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.4); padding: 14px; display: inline-grid; gap: 12px; }
   .gridwrap { display: inline-grid; grid-template-columns: auto auto; grid-template-rows: auto auto; gap: 4px; }
+  /* .axis and .fx are on-canvas map annotations (coordinate ruler and per-tile
+     effect glyph), sized to the grid rather than the UI type scale — kept off
+     --fs-* on purpose so they track the cells, not the chrome. */
   .axis { display: grid; font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); }
   .axis.cols { grid-auto-flow: column; }
   .axis.rows { grid-auto-flow: row; }

@@ -228,7 +228,7 @@
   .mapname label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
   .mapname input { font-family: var(--font-mono); font-size: 13px; font-weight: 500; background: var(--bg-inset); border: 1px solid var(--border-default); color: var(--text-primary); border-radius: 6px; padding: 5px 9px; width: 150px; outline: none; }
   .mapname input:focus { border-color: var(--accent-amber); }
-  .live { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent-green); }
+  .live { font-family: var(--font-mono); font-size: var(--fs-meta); letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent-green); }
   .spacer { flex: 1; }
   .loading { padding: 24px; color: var(--text-muted); font-style: italic; }
   .cols { flex: 1; min-height: 0; display: grid; grid-template-columns: 236px minmax(0, 1fr) 340px; }

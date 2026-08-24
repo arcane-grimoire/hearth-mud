@@ -45,7 +45,7 @@
   }
   .rn-key {
     font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase;
+    font-size: var(--fs-label); letter-spacing: 0.06em; text-transform: uppercase;
     color: var(--text-muted, #8c8378);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
@@ -56,7 +56,7 @@
   .rn-tags { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 6px; }
   .rn-tag {
     font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 8.5px; padding: 1px 4px; border-radius: 3px;
+    font-size: var(--fs-meta); padding: 1px 4px; border-radius: 3px;
     background: var(--bg-primary, #12100c); color: var(--text-muted, #9a9186);
     border: 1px solid var(--border-muted, #2a2419);
   }

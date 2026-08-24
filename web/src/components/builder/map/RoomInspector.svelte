@@ -132,7 +132,7 @@
 
 <style>
   .insp { display: flex; flex-direction: column; padding: 16px 14px; overflow-y: auto; height: 100%; background: var(--bg-surface); border-left: 1px solid var(--border-default); }
-  .label { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-muted); margin: 0 0 12px; }
+  .label { font-family: var(--font-mono); font-size: var(--fs-label); letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-muted); margin: 0 0 12px; }
   .empty { color: var(--text-muted); font-size: 13px; line-height: 1.6; }
   .empty b { color: var(--text-primary); }
   .head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
@@ -149,13 +149,13 @@
   .check { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-primary); }
   .check input { width: 15px; height: 15px; accent-color: var(--accent-amber); }
   .sub { border-top: 1px solid var(--border-default); padding-top: 13px; margin-top: 13px; }
-  .sub h4 { margin: 0 0 9px; font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-muted); display: flex; justify-content: space-between; }
+  .sub h4 { margin: 0 0 9px; font-family: var(--font-mono); font-size: var(--fs-label); letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-muted); display: flex; justify-content: space-between; }
   .mini { position: relative; border: 1px solid var(--border-default); background: var(--bg-inset); border-radius: 8px; padding: 9px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 7px; }
   .del { position: absolute; top: 6px; right: 6px; border: none; background: none; color: var(--text-muted); font-size: 15px; width: 20px; height: 20px; border-radius: 5px; line-height: 1; cursor: pointer; }
   .del:hover { color: var(--accent-red); background: color-mix(in srgb, var(--accent-red) 14%, transparent); }
   .enc { display: grid; grid-template-columns: 1fr 46px 46px; gap: 6px; align-items: end; }
   .obj2 { display: grid; grid-template-columns: 1fr 74px; gap: 6px; align-items: end; }
-  .lbl { font-size: 10px; color: var(--text-muted); font-family: var(--font-mono); letter-spacing: 0.04em; margin-bottom: 3px; }
+  .lbl { font-size: var(--fs-label); color: var(--text-muted); font-family: var(--font-mono); letter-spacing: 0.04em; margin-bottom: 3px; }
   .mini input, .mini select { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: 6px; padding: 5px 7px; font-size: 12px; width: 100%; color: var(--text-primary); outline: none; }
   .mini input:focus, .mini select:focus { border-color: var(--accent-amber); }
   .addbtn { border: 1px dashed var(--border-default); background: transparent; color: var(--text-muted); border-radius: 7px; padding: 6px; font-size: 11.5px; font-weight: 500; width: 100%; cursor: pointer; }

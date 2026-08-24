@@ -110,7 +110,7 @@
   .edit { flex: 1; min-height: 0; overflow: hidden; }
   .none { color: var(--text-muted, #8c8378); font-style: italic; padding: 14px; }
   .out { border-top: 1px solid var(--border-default, #2a2419); background: var(--bg-surface, #17140f); max-height: 34vh; overflow: auto; }
-  .oh { display: flex; align-items: center; justify-content: space-between; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted, #9a9186); padding: 6px 12px; border-bottom: 1px solid var(--border-muted, #211d16); }
+  .oh { display: flex; align-items: center; justify-content: space-between; font-size: var(--fs-label); text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted, #9a9186); padding: 6px 12px; border-bottom: 1px solid var(--border-muted, #211d16); }
   .out.err .oh { color: var(--accent-red, #d07a5a); }
   .oh button { background: none; border: none; color: var(--text-muted, #8c8378); cursor: pointer; }
   .out pre { margin: 0; padding: 10px 12px; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; color: var(--text-primary, #ece0c8); white-space: pre-wrap; }

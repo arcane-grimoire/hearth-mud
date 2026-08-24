@@ -55,7 +55,7 @@
   .del { position: absolute; top: 6px; right: 6px; border: none; background: none; color: var(--text-muted); font-size: 15px; width: 20px; height: 20px; border-radius: 5px; line-height: 1; cursor: pointer; }
   .del:hover { color: var(--accent-red); background: color-mix(in srgb, var(--accent-red) 14%, transparent); }
   .grid { display: grid; grid-template-columns: 1fr 96px; gap: 6px; align-items: end; }
-  .lbl { font-size: 10px; color: var(--text-muted); font-family: var(--font-mono); letter-spacing: 0.04em; margin-bottom: 3px; }
+  .lbl { font-size: var(--fs-label); color: var(--text-muted); font-family: var(--font-mono); letter-spacing: 0.04em; margin-bottom: 3px; }
   input, select { background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: 6px; padding: 5px 7px; font-size: 12px; width: 100%; color: var(--text-primary); outline: none; }
   input:focus, select:focus { border-color: var(--accent-amber); }
   .addbtn { border: 1px dashed var(--border-default); background: transparent; color: var(--text-muted); border-radius: 7px; padding: 6px; font-size: 11.5px; font-weight: 500; width: 100%; cursor: pointer; }
