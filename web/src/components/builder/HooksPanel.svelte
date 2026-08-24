@@ -42,10 +42,9 @@
 
 <div class="hp">
   <div class="add">
-    <label class="add-lbl" for="hook-add">Add a hook</label>
+    <span class="add-lbl">Add a hook</span>
     <p class="hint">Luau scripts that run on events (<code>on_enter</code>, <code>can_get</code>…) or as commands (<code>cmd_…</code>). Pick one or type a name.</p>
     <Typeahead
-      id="hook-add"
       options={hookOpts}
       fallbackLabel="new hook"
       placeholder="on_enter, cmd_talk…"

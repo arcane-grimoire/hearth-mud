@@ -329,6 +329,9 @@
   .pv-screen { background: var(--bg-primary, #0e0c0a); border-radius: 8px; padding: 14px 16px; }
   .pv-name { color: var(--accent-amber, #c9956b); font-weight: 700; font-size: 14px; margin-bottom: 7px; }
   .pv-desc { color: var(--text-primary, #ece0c8); font-size: 13px; line-height: 1.65; max-width: 66ch; white-space: pre-wrap; }
+  /* Commands render as they look in play, but they aren't clickable in a
+     preview — don't imply they are. */
+  .pv-desc :global(.cmd) { cursor: default; }
   .pv-none { color: var(--text-muted, #8c8378); font-style: italic; font-size: 12.5px; }
   .fi:focus, .ft:focus, .mi:focus { border-color: var(--accent-amber, #c9956b); }
   .row { display: flex; gap: 6px; align-items: center; }
