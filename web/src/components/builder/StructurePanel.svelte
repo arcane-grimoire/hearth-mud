@@ -69,7 +69,7 @@
     const code = normDir(dir);
     const fullDir = DIR_FULL[code] || dir;
     const r = await api('create_exit', { source: obj.ref_id, direction: fullDir, target, aliases: null });
-    if (!r?.ok) { showFlash(r?.error || 'Exit failed', { tone: 'danger' }); return; }
+    if (!r?.ok) { showFlash(r?.error || 'Could not create the exit', { tone: 'danger' }); return; }
     // Optional reverse exit back from the target (only for known compass/updown dirs).
     const revCode = REV[code];
     if (exitReverse && revCode) {
@@ -83,7 +83,7 @@
   async function deleteExit(e) {
     const r = await api('delete_object', { ref_id: e.ref_id });
     if (r?.ok) { exits = exits.filter((x) => x.ref_id !== e.ref_id); confirmExit = null; onchanged(); }
-    else showFlash(r?.error || 'Failed', { tone: 'danger' });
+    else showFlash(r?.error || 'Could not delete the exit', { tone: 'danger' });
   }
 
   async function addObject() {
@@ -98,12 +98,12 @@
       location: obj.ref_id,
     });
     if (r?.ok) { newObjKey = ''; onchanged(); reload(); }
-    else showFlash(r?.error || 'Failed', { tone: 'danger' });
+    else showFlash(r?.error || `Could not create the ${newObjKind}`, { tone: 'danger' });
   }
   async function removeContent(o) {
     const r = await api('delete_object', { ref_id: o.ref_id });
     if (r?.ok) { contents = contents.filter((x) => x.ref_id !== o.ref_id); confirmContent = null; onchanged(); }
-    else showFlash(r?.error || 'Failed', { tone: 'danger' });
+    else showFlash(r?.error || `Could not delete the ${o.kind}`, { tone: 'danger' });
   }
 </script>
 

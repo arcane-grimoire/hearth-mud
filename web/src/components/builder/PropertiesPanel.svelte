@@ -41,21 +41,21 @@
 
   async function setTitle(e) {
     const res = await api('set_title', { ref_id: obj.ref_id, title: e.target.value });
-    res.ok ? onchanged() : showFlash(res.error || 'Failed', { tone: 'danger' });
+    res.ok ? onchanged() : showFlash(res.error || 'Could not save the title', { tone: 'danger' });
   }
   async function setDescription(e) {
     const res = await api('set_description', { ref_id: obj.ref_id, description: e.target.value });
-    res.ok ? onchanged() : showFlash(res.error || 'Failed', { tone: 'danger' });
+    res.ok ? onchanged() : showFlash(res.error || 'Could not save the description', { tone: 'danger' });
   }
   async function addTag() {
     const tag = newTag.trim();
     if (!tag) return;
     const res = await api('add_tag', { ref_id: obj.ref_id, tag });
-    if (res.ok) { newTag = ''; onchanged(); } else showFlash(res.error || 'Failed', { tone: 'danger' });
+    if (res.ok) { newTag = ''; onchanged(); } else showFlash(res.error || 'Could not add the tag', { tone: 'danger' });
   }
   async function removeTag(tag) {
     const res = await api('remove_tag', { ref_id: obj.ref_id, tag });
-    res.ok ? onchanged() : showFlash(res.error || 'Failed', { tone: 'danger' });
+    res.ok ? onchanged() : showFlash(res.error || 'Could not remove the tag', { tone: 'danger' });
   }
   function startEdit(key) {
     editingAttr = key;
@@ -66,11 +66,11 @@
     let value;
     try { value = JSON.parse(editValue); } catch { value = editValue; }
     const res = await api('set_attribute', { ref_id: obj.ref_id, key, value });
-    if (res.ok) { editingAttr = null; onchanged(); } else showFlash(res.error || 'Failed', { tone: 'danger' });
+    if (res.ok) { editingAttr = null; onchanged(); } else showFlash(res.error || 'Could not save the attribute', { tone: 'danger' });
   }
   async function deleteAttr(key) {
     const res = await api('set_attribute', { ref_id: obj.ref_id, key, value: null });
-    res.ok ? onchanged() : showFlash(res.error || 'Failed', { tone: 'danger' });
+    res.ok ? onchanged() : showFlash(res.error || 'Could not delete the attribute', { tone: 'danger' });
   }
   async function addAttr() {
     const key = newAttrKey.trim();
@@ -78,7 +78,7 @@
     let value;
     try { value = JSON.parse(newAttrValue); } catch { value = newAttrValue; }
     const res = await api('set_attribute', { ref_id: obj.ref_id, key, value });
-    if (res.ok) { newAttrKey = ''; newAttrValue = ''; onchanged(); } else showFlash(res.error || 'Failed', { tone: 'danger' });
+    if (res.ok) { newAttrKey = ''; newAttrValue = ''; onchanged(); } else showFlash(res.error || 'Could not add the attribute', { tone: 'danger' });
   }
   function attrKeydown(e, key) {
     if (e.key === 'Escape') editingAttr = null;
@@ -91,12 +91,12 @@
     const cur = obj.aliases || [];
     if (!a || cur.includes(a)) { newAlias = ''; return; }
     const res = await api('set_aliases', { ref_id: obj.ref_id, aliases: [...cur, a] });
-    if (res.ok) { newAlias = ''; onchanged(); } else showFlash(res.error || 'Failed', { tone: 'danger' });
+    if (res.ok) { newAlias = ''; onchanged(); } else showFlash(res.error || 'Could not add the alias', { tone: 'danger' });
   }
   async function removeAlias(a) {
     const next = (obj.aliases || []).filter((x) => x !== a);
     const res = await api('set_aliases', { ref_id: obj.ref_id, aliases: next });
-    res.ok ? onchanged() : showFlash(res.error || 'Failed', { tone: 'danger' });
+    res.ok ? onchanged() : showFlash(res.error || 'Could not remove the alias', { tone: 'danger' });
   }
 
   // Exit — retarget / rename direction in place.
@@ -106,7 +106,7 @@
       direction: exitDir.trim() || null,
       target: exitTarget.trim() || null,
     });
-    res.ok ? onchanged() : showFlash(res.error || 'Update failed', { tone: 'danger' });
+    res.ok ? onchanged() : showFlash(res.error || 'Could not update the exit', { tone: 'danger' });
   }
 
   // Location — move a non-room object into another ref.
@@ -114,13 +114,13 @@
     const dest = moveDest.trim();
     if (!dest) return;
     const res = await api('set_location', { ref_id: obj.ref_id, location: dest });
-    if (res.ok) { moveDest = ''; onchanged(); } else showFlash(res.error || 'Move failed', { tone: 'danger' });
+    if (res.ok) { moveDest = ''; onchanged(); } else showFlash(res.error || 'Could not move the object', { tone: 'danger' });
   }
 
   async function doDelete() {
     const res = await api('delete_object', { ref_id: obj.ref_id });
     if (res.ok) ondeleted(obj.ref_id);
-    else showFlash(res.error || 'Delete failed', { tone: 'danger' });
+    else showFlash(res.error || `Could not delete this ${obj.kind}`, { tone: 'danger' });
   }
 </script>
 

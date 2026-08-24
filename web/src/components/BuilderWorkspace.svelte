@@ -114,15 +114,21 @@
 
   async function loadObjects() {
     loading = true;
+    // Objects AND their area come from list_objects_full, where area is derived
+    // from each object's _file_key. Programs come separately, only to attach the
+    // hooks list (Code filter + Hooks count). The old path took area from the
+    // programs response — which lists only objects that HAVE a program — so
+    // every program-less room (most rooms) fell into "Unfiled" despite having a
+    // real _file_key area.
     const [objRes, progRes] = await Promise.all([
-      api('list_objects'),
+      api('list_objects_full', { limit: 3000 }),
       api('list_programs_all'),
     ]);
     const progById = new Map((progRes?.ok ? progRes.data : []).map((e) => [e.ref_id, e]));
-    const list = objRes?.ok ? objRes.data : [];
+    const list = objRes?.ok ? (objRes.data?.objects || []) : [];
     objects = list.map((o) => {
       const p = progById.get(o.ref_id);
-      return { ...o, hooks: p?.hooks || [], area: p?.area || '' };
+      return { ...o, hooks: p?.hooks || [] }; // area already on o, from _file_key
     });
     loading = false;
   }
