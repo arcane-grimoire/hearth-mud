@@ -98,15 +98,6 @@ object (`area/system/item/rules`) carries hero, troupe, and combat commands.
 - **Ticks**: 1s heartbeat. Objects with `on_tick` program + `tick_interval`
   attr run on the beat. Global scripts (`World.scripts`) also tick.
 
-## Pending: dbref migration
-
-See `docs/plans/dbref-migration.md`. This is the next major change:
-- Replace all string-path refs with auto-incrementing integer dbrefs (#1, #2)
-- File loader assigns dbrefs at load time (two-pass: create objects, then resolve refs)
-- Breaking change — requires fresh DB
-- Touches every file and every test
-- ~300-500 lines changed
-
 ## Common tasks
 
 ### Adding a new hook

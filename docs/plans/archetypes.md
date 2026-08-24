@@ -136,6 +136,58 @@ than today's inline stats, stage 1 earned its keep.
   (the Smalltalk-image payoff; most valuable *because* layered behavior is where
   "which script ran, and why did it break" gets murky).
 
+## Integration details (surfaced by code review, verified against the tree)
+
+These don't change the design — they're the touch-points stage 1 must get
+right.
+
+- **Sequencing vs. dbref migration: resolved.** The dbref migration is *done*
+  (`World::next_dbref` mints `#N`; string-path values are only the
+  `FILE_KEY_ATTR` identity, not refs). So `archetype_ref: Option<String>`
+  already holds a final `#N` ref — no double-migration risk, build order is
+  free. (`docs/plans/dbref-migration.md` was stale and has been removed.)
+
+- **Guards enforce at the intent, not the API wrapper (ADR 0001).** All
+  mutations flow through `apply_batch`, the single choke point covering Lua
+  `spawn`, the REST API, and the editor alike. The cycle check (can't set
+  `archetype_ref` to self or a descendant) and the delete guard belong there,
+  not only in the Luau wrapper — otherwise a path that bypasses the wrapper
+  bypasses the guard.
+
+- **`Intent::Spawn` must grow.** Today it's
+  `{ ref_id, key, kind, title, description, location, owner }`
+  (`src/softcode/mod.rs`, applied in `engine/mod.rs`). Stage 1 adds an
+  `archetype` and override fields → a variant change + `apply_batch` handling +
+  serde compat for any batch already queued. Plus a `Clone`/`Detach` intent.
+
+- **Loader / `@reload-world` interaction (decide before building).** Managed
+  objects reconcile from TOML every boot. Open questions the spec must answer:
+  can a *file-defined* object be an archetype for script-spawned instances
+  (presumably yes)? Then what happens when a TOML file stops defining an
+  archetype that live instances reference — does reconciliation refuse (the
+  delete-guard rule), orphan, or cascade? And does the loader ever set
+  `archetype_ref` between managed objects, and how does the two-pass loader
+  order that? Lean: reconciliation obeys the same delete guard (refuse to drop
+  an archetype with live instances; log loudly).
+
+- **Globals index must walk the chain.** `DerivedIndexes::build`
+  (`engine/mod.rs`) routes through the accessors and has `&World`, so an
+  instance tagged `system:global` *can* inherit `cmd_*`/`on_tick` from its
+  archetype — but only if `build()` actually walks the chain. Easy to miss; pin
+  it with a "global instance inherits command dispatch" test.
+
+- **The Rust attr resolver is the mechanism; Lua `__index` is only a bonus.**
+  The engine reads attrs natively in many places (~18 `.attrs.get()` sites in
+  `engine/mod.rs` alone), so chain-resolving attrs *must* exist in Rust
+  regardless. A `__index` metatable on the in-script `this` would be a
+  convenience on top, not the primary path.
+
+- **Error attribution (forward pointer to the stage-2 debugger).** When an
+  ancestor's script errors while running bound to an instance, the message/log
+  must name *both* the resolving object and the instance — otherwise live
+  debugging of inherited behavior is baffling. Cheap to do in stage 1's
+  error path; pays off with the live debugger.
+
 ## Trade-offs / open questions
 
 - Attr resolution is now a chain walk per read. Cache per instance if it bites
