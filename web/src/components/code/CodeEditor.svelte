@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { EditorView, keymap } from '@codemirror/view';
+  import { EditorView, keymap, hoverTooltip } from '@codemirror/view';
   import { EditorState } from '@codemirror/state';
   import { basicSetup } from 'codemirror';
   import { StreamLanguage, HighlightStyle, syntaxHighlighting } from '@codemirror/language';
@@ -11,11 +11,36 @@
   import { api } from '../../lib/api.js';
   import { API_FUNCTIONS, API_GLOBALS, OBJECT_MEMBERS } from './hearth-api.js';
 
-  let { value = $bindable(''), onsave = () => {}, onchange = () => {} } = $props();
+  let { value = $bindable(''), onsave = () => {}, onchange = () => {}, onlookup = null } = $props();
 
   let host;
   let view;
   let syncing = false;
+
+  // Flat name → reference entry, so a bare identifier (emit, this, display_name)
+  // resolves to its signature + doc for hover tooltips and right-click lookup.
+  // Functions and globals win over object members on a name clash; the same
+  // hearth-api.js lists power autocomplete, kept honest by the api.rs tests.
+  const API_INDEX = (() => {
+    const m = new Map();
+    for (const [name, sig, doc] of API_FUNCTIONS) m.set(name, { sig, doc });
+    for (const [name, sig, doc] of API_GLOBALS) if (!m.has(name)) m.set(name, { sig, doc });
+    for (const [name, info] of OBJECT_MEMBERS) if (!m.has(name)) m.set(name, { sig: name, doc: info });
+    return m;
+  })();
+
+  // The identifier under a document position, or null. Word chars are Luau
+  // identifier chars ([A-Za-z0-9_]); we widen left/right from pos to the token.
+  function wordAt(state, pos) {
+    const line = state.doc.lineAt(pos);
+    const text = line.text;
+    let i = pos - line.from, a = i, b = i;
+    const isW = (c) => c && /\w/.test(c);
+    while (a > 0 && isW(text[a - 1])) a--;
+    while (b < text.length && isW(text[b])) b++;
+    if (a === b) return null;
+    return { word: text.slice(a, b), from: line.from + a, to: line.from + b };
+  }
 
   // Identifiers known to hold a GameObject, so `x.` completes object fields.
   // The three hook params are always objects; add any local bound from an
@@ -57,6 +82,55 @@
       ],
     };
   }
+
+  // --- hover tooltips: signature + doc for a known API symbol ---
+  const hearthHover = hoverTooltip((view, pos) => {
+    const w = wordAt(view.state, pos);
+    const entry = w && API_INDEX.get(w.word);
+    if (!entry) return null;
+    return {
+      pos: w.from,
+      end: w.to,
+      above: true,
+      create() {
+        const dom = document.createElement('div');
+        dom.className = 'cm-hearth-tip';
+        const sig = document.createElement('code');
+        sig.className = 'cm-hearth-tip-sig';
+        sig.textContent = entry.sig;
+        dom.appendChild(sig);
+        if (entry.doc && entry.doc !== entry.sig) {
+          const p = document.createElement('div');
+          p.className = 'cm-hearth-tip-doc';
+          p.textContent = entry.doc;
+          dom.appendChild(p);
+        }
+        if (onlookup) {
+          const hint = document.createElement('div');
+          hint.className = 'cm-hearth-tip-hint';
+          hint.textContent = 'Right-click → Look up in Help';
+          dom.appendChild(hint);
+        }
+        return { dom };
+      },
+    };
+  }, { hoverTime: 250 });
+
+  // --- right-click a known symbol → open it in the Help panel ---
+  // Only hijacks the native menu when there's actually something to look up;
+  // right-clicking anything else leaves the browser's own menu alone.
+  const hearthContextMenu = EditorView.domEventHandlers({
+    contextmenu(e, view) {
+      if (!onlookup) return false;
+      const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+      if (pos == null) return false;
+      const w = wordAt(view.state, pos);
+      if (!w || !API_INDEX.has(w.word)) return false;
+      e.preventDefault();
+      onlookup(w.word);
+      return true;
+    },
+  });
 
   // --- lint via the engine's compile-check ---
   const hearthLinter = linter(
@@ -104,6 +178,10 @@
     '.cm-tooltip': { backgroundColor: 'var(--bg-surface, #17140f)', border: '1px solid var(--border-default, #332c22)', color: 'var(--text-primary, #ece0c8)', borderRadius: '7px' },
     '.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected]': { backgroundColor: 'color-mix(in srgb, var(--accent-amber, #c9956b) 22%, transparent)', color: 'var(--text-primary, #ece0c8)' },
     '.cm-completionDetail': { color: 'var(--text-muted, #9a9186)', fontStyle: 'normal', marginLeft: '8px' },
+    '.cm-tooltip .cm-hearth-tip': { padding: '7px 9px', maxWidth: '360px' },
+    '.cm-hearth-tip-sig': { display: 'block', fontFamily: 'var(--font-mono, ui-monospace, monospace)', fontSize: '12px', color: 'var(--accent-green, #8fb877)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
+    '.cm-hearth-tip-doc': { marginTop: '5px', fontSize: '11.5px', lineHeight: '1.45', color: 'var(--text-secondary, #b6a888)' },
+    '.cm-hearth-tip-hint': { marginTop: '7px', paddingTop: '6px', borderTop: '1px solid var(--border-muted, #2a2419)', fontSize: '10.5px', color: 'var(--text-muted, #8c8378)' },
   });
 
   const saveKeymap = keymap.of([
@@ -120,6 +198,8 @@
           StreamLanguage.define(lua),
           syntaxHighlighting(hearthHighlight),
           autocompletion({ override: [hearthComplete] }),
+          hearthHover,
+          hearthContextMenu,
           hearthLinter,
           lintGutter(),
           saveKeymap,

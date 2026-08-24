@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "web/src/components/code/HelpPanel.svelte"
+        ],
+        "createdAt": "2026-08-24T12:35:21.674Z",
+        "reason": "active-list-item indicator (current-hook row), not a card accent; restored verbatim from commit e584682^"
+      }
+    ]
+  }
+}
