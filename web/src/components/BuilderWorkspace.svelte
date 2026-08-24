@@ -40,6 +40,21 @@
   let objLoading = $state(false);
   let subtab = $state('props');    // Properties | Hooks | Dialogue within an object tab
 
+  // Which subtabs an object kind exposes. A room's exits + contents live inside
+  // Properties (right under identity), not a separate tab. Only NPCs get
+  // Dialogue. Everything gets Properties + Hooks.
+  const subtabsFor = (kind) => {
+    const t = ['props', 'hooks'];
+    if (kind === 'npc') t.push('dialogue');
+    return t;
+  };
+  const objSubtabs = $derived(subtabsFor(obj?.kind));
+  // Keep the active subtab valid when the selected object changes kind.
+  $effect(() => {
+    if (obj && !objSubtabs.includes(subtab)) subtab = 'props';
+  });
+  const rooms = $derived(objects.filter((o) => o.kind === 'room'));
+
   // Open editor tabs. Each: { id, type:'object'|'code'|'table'|'map', ref?, hook? }
   let tabs = $state([]);
   let activeId = $state(null);
@@ -175,6 +190,17 @@
   const openObject = (ref) => openTab({ type: 'object', ref });
   const openHookTab = (ref, hook) => openTab({ type: 'code', ref, hook });
   const openInkTab = (ref) => openTab({ type: 'ink', ref });
+
+  // A structural change (exit/content added or removed, hook removed) — re-examine
+  // the open object AND refresh the explorer tree, since the object set changed.
+  function structureChanged() { refresh(); loadObjects(); }
+
+  // The object was deleted from its Properties tab — drop its tab and refresh.
+  function onObjectDeleted(ref) {
+    const id = tabIdOf({ type: 'object', ref });
+    closeTab(id);
+    loadObjects();
+  }
 
   function nameOf(ref) {
     const o = objects.find((x) => x.ref_id === ref);
@@ -346,13 +372,15 @@
               <div class="subtabs">
                 <button class:on={subtab === 'props'} onclick={() => (subtab = 'props')}>Properties</button>
                 <button class:on={subtab === 'hooks'} onclick={() => (subtab = 'hooks')}>Hooks{#if obj.programs?.length} <span class="sc">{obj.programs.length}</span>{/if}</button>
-                <button class:on={subtab === 'dialogue'} onclick={() => (subtab = 'dialogue')}>Dialogue</button>
+                {#if objSubtabs.includes('dialogue')}
+                  <button class:on={subtab === 'dialogue'} onclick={() => (subtab = 'dialogue')}>Dialogue</button>
+                {/if}
               </div>
               <div class="subbody">
                 {#if subtab === 'props'}
-                  <PropertiesPanel {obj} onchanged={refresh} />
+                  <PropertiesPanel {obj} {rooms} onchanged={structureChanged} ondeleted={onObjectDeleted} onedit={openObject} />
                 {:else if subtab === 'hooks'}
-                  <HooksPanel {obj} activeHook={null} onopen={(h) => openHookTab(obj.ref_id, h)} />
+                  <HooksPanel {obj} activeHook={null} onopen={(h) => openHookTab(obj.ref_id, h)} onchanged={structureChanged} />
                 {:else}
                   <div class="dlg-launch">
                     <MessagesSquareIcon size={26} />

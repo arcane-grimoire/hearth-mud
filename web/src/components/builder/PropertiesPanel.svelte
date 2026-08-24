@@ -1,17 +1,41 @@
 <script>
   import { Button, showFlash, Tooltip } from '@kenn-io/kit-ui';
   import { api } from '../../lib/api.js';
+  import StructurePanel from './StructurePanel.svelte';
 
-  // Object properties: identity, tags, attributes. Lifted from Admin.svelte so
-  // the unified workspace has ONE properties surface instead of the three that
-  // exist today (Editor, Admin, RoomEditorModal each re-implemented this).
-  let { obj = null, onchanged = () => {} } = $props();
+  // Object properties: identity, tags, aliases, attributes, plus the
+  // kind-specific bits (an exit's direction/target, a movable object's
+  // location) and delete. Lifted from Admin.svelte + the old RoomEditorModal so
+  // the unified workspace has ONE properties surface instead of the several that
+  // used to each re-implement this.
+  let { obj = null, rooms = [], onchanged = () => {}, ondeleted = () => {}, onedit = () => {} } = $props();
 
   let editingAttr = $state(null);
   let editValue = $state('');
   let newAttrKey = $state('');
   let newAttrValue = $state('');
   let newTag = $state('');
+  let newAlias = $state('');
+
+  // Kind-specific editable state, reseeded whenever the panel points at a
+  // different object (examine returns fresh data after each onchanged()).
+  let exitDir = $state('');
+  let exitTarget = $state('');
+  let moveDest = $state('');
+  let confirmDelete = $state(false);
+  let syncedFor = $state(null);
+  $effect(() => {
+    if (obj && obj.ref_id !== syncedFor) {
+      syncedFor = obj.ref_id;
+      exitDir = obj.kind === 'exit' ? (obj.key || '') : '';
+      exitTarget = obj.kind === 'exit' ? (obj.target_ref || '') : '';
+      moveDest = '';
+      confirmDelete = false;
+    }
+  });
+
+  const isExit = $derived(obj?.kind === 'exit');
+  const isRoom = $derived(obj?.kind === 'room');
 
   let sortedAttrs = $derived(obj ? Object.keys(obj.attrs || {}).sort() : []);
 
@@ -60,6 +84,44 @@
     if (e.key === 'Escape') editingAttr = null;
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveAttr(key); }
   }
+
+  // Aliases — the whole set is replaced on every change (set_aliases).
+  async function addAlias() {
+    const a = newAlias.trim();
+    const cur = obj.aliases || [];
+    if (!a || cur.includes(a)) { newAlias = ''; return; }
+    const res = await api('set_aliases', { ref_id: obj.ref_id, aliases: [...cur, a] });
+    if (res.ok) { newAlias = ''; onchanged(); } else showFlash(res.error || 'Failed', { tone: 'danger' });
+  }
+  async function removeAlias(a) {
+    const next = (obj.aliases || []).filter((x) => x !== a);
+    const res = await api('set_aliases', { ref_id: obj.ref_id, aliases: next });
+    res.ok ? onchanged() : showFlash(res.error || 'Failed', { tone: 'danger' });
+  }
+
+  // Exit — retarget / rename direction in place.
+  async function saveExit() {
+    const res = await api('update_exit', {
+      ref_id: obj.ref_id,
+      direction: exitDir.trim() || null,
+      target: exitTarget.trim() || null,
+    });
+    res.ok ? onchanged() : showFlash(res.error || 'Update failed', { tone: 'danger' });
+  }
+
+  // Location — move a non-room object into another ref.
+  async function doMove() {
+    const dest = moveDest.trim();
+    if (!dest) return;
+    const res = await api('set_location', { ref_id: obj.ref_id, location: dest });
+    if (res.ok) { moveDest = ''; onchanged(); } else showFlash(res.error || 'Move failed', { tone: 'danger' });
+  }
+
+  async function doDelete() {
+    const res = await api('delete_object', { ref_id: obj.ref_id });
+    if (res.ok) ondeleted(obj.ref_id);
+    else showFlash(res.error || 'Delete failed', { tone: 'danger' });
+  }
 </script>
 
 {#if obj}
@@ -74,6 +136,38 @@
       </label>
     </section>
 
+    {#if isRoom}
+      <!-- A room's connectivity + contents are its most important content, so
+           they sit right under identity rather than behind attributes. -->
+      <StructurePanel {obj} {rooms} {onchanged} {onedit} />
+    {/if}
+
+    {#if isExit}
+      <section>
+        <h3>Exit</h3>
+        <label class="fl">Direction
+          <input type="text" class="fi" bind:value={exitDir} placeholder="north" />
+        </label>
+        <label class="fl">Target room
+          <input type="text" class="fi" bind:value={exitTarget} placeholder="#12" />
+        </label>
+        <div class="row">
+          <span class="none">from {obj.location_ref || '(unplaced)'}</span>
+          <span style="flex:1"></span>
+          <Button size="sm" onclick={saveExit} label="Save exit" />
+        </div>
+      </section>
+    {:else if !isRoom}
+      <section>
+        <h3>Location</h3>
+        <div class="none">in {obj.location_ref || '(nowhere)'}</div>
+        <div class="row">
+          <input class="mi" placeholder="move to a room ref, e.g. #12" bind:value={moveDest} onkeydown={(e) => e.key === 'Enter' && doMove()} />
+          <Button size="sm" onclick={doMove} label="Move" />
+        </div>
+      </section>
+    {/if}
+
     <section>
       <h3>Tags</h3>
       <div class="tags">
@@ -85,6 +179,20 @@
       <div class="row">
         <input class="mi" placeholder="category:key" bind:value={newTag} onkeydown={(e) => e.key === 'Enter' && addTag()} />
         <Button size="sm" onclick={addTag} label="Add" />
+      </div>
+    </section>
+
+    <section>
+      <h3>Aliases</h3>
+      <div class="tags">
+        {#each obj.aliases || [] as a}
+          <span class="tag">{a}<Tooltip text="Remove alias"><button aria-label="Remove alias" onclick={() => removeAlias(a)}>×</button></Tooltip></span>
+        {/each}
+        {#if !(obj.aliases || []).length}<span class="none">no aliases</span>{/if}
+      </div>
+      <div class="row">
+        <input class="mi" placeholder={isExit ? 'alt direction (e.g. n)' : 'name people can use'} bind:value={newAlias} onkeydown={(e) => e.key === 'Enter' && addAlias()} />
+        <Button size="sm" onclick={addAlias} label="Add" />
       </div>
     </section>
 
@@ -131,13 +239,26 @@
         </table>
       </section>
     {/if}
+
+    <section class="danger">
+      {#if confirmDelete}
+        <span class="confirm">Delete {obj.key} permanently?</span>
+        <Button size="sm" tone="critical" onclick={doDelete} label="Delete" />
+        <Button size="sm" onclick={() => (confirmDelete = false)} label="Cancel" />
+      {:else}
+        <button class="del-link" onclick={() => (confirmDelete = true)}>Delete {obj.kind}</button>
+      {/if}
+    </section>
   </div>
 {/if}
 
 <style>
-  .pp { display: flex; flex-direction: column; gap: 18px; padding: 14px; }
-  section { display: flex; flex-direction: column; gap: 8px; }
-  h3 { margin: 0; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted, #8c8378); }
+  .pp { display: flex; flex-direction: column; gap: 12px; padding: 12px; }
+  /* Each group is a raised card so the long form reads as distinct blocks
+     rather than one undivided scroll. */
+  section { display: flex; flex-direction: column; gap: 8px; background: var(--bg-surface, #17140f); border: 1px solid var(--border-muted, #211d16); border-radius: 10px; padding: 12px 14px; }
+  section.danger { background: none; border: none; border-radius: 0; padding: 6px 14px 0; }
+  h3 { margin: 0 0 2px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted, #8c8378); }
   .fl { display: flex; flex-direction: column; gap: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted, #8c8378); }
   .fi, .ft, .mi {
     background: var(--bg-inset, #12100c); color: var(--text-primary, #ece0c8);
@@ -163,4 +284,8 @@
   .aa button { background: none; border: none; color: var(--text-muted, #8c8378); cursor: pointer; font-size: 10.5px; padding: 2px 4px; }
   .aa button:hover { color: var(--text-primary, #ece0c8); }
   .aa button.del:hover { color: var(--accent-red, #e06c75); }
+  .danger { flex-direction: row; align-items: center; gap: 8px; }
+  .confirm { font-size: 12.5px; color: var(--accent-red, #e06c75); margin-right: auto; }
+  .del-link { background: none; border: none; color: var(--text-muted, #8c8378); cursor: pointer; font: inherit; font-size: 12.5px; padding: 4px 2px; }
+  .del-link:hover { color: var(--accent-red, #e06c75); }
 </style>
