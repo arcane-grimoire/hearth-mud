@@ -103,7 +103,14 @@ pub enum ApiRequest {
     SetAliases { ref_id: String, aliases: Vec<String> },
     AddTag { ref_id: String, tag: String },
     RemoveTag { ref_id: String, tag: String },
-    DeleteObject { ref_id: String },
+    /// `cascade`: if `ref_id` is an archetype with live instances, flatten
+    /// (detach) each of them first instead of refusing — see the same guard
+    /// in apply_to's `Intent::Destroy`.
+    DeleteObject {
+        ref_id: String,
+        #[serde(default)]
+        cascade: bool,
+    },
     /// Set an object's whole behavior script (hooks as functions in one shared
     /// scope). Replaces the object's existing script.
     SetScript { ref_id: String, source: String },
@@ -351,6 +358,20 @@ fn ink_output_json(out: &crate::softcode::ink::InkOutput) -> serde_json::Value {
     })
 }
 
+/// Prefix a hook error with which archetype it actually ran on, when that
+/// differs from the instance the hook was fired on. Plain `err` (unchanged)
+/// when the instance's own script was what ran. See
+/// docs/plans/archetypes.md's "error attribution" integration note — without
+/// this, an error from inherited behavior names only the instance, which is
+/// baffling to debug once chains get deep.
+fn annotate_archetype_error(err: String, this_ref: &str, resolving_ref: &str) -> String {
+    if resolving_ref == this_ref {
+        err
+    } else {
+        format!("{} (via archetype {}): {}", this_ref, resolving_ref, err)
+    }
+}
+
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719468;
     let era = z.div_euclid(146097);
@@ -437,19 +458,22 @@ impl DerivedIndexes {
             troupes: HashMap::new(),
         };
         for obj in world.objects.values() {
-            if hooks::object_defines_hook(obj, "on_tick") {
-                let interval = obj
-                    .attrs
-                    .get("tick_interval")
+            // `object_responds`/`resolve_hook_names` walk the archetype chain
+            // (see docs/plans/archetypes.md) so an instance that only
+            // delegates its `on_tick`/`cmd_*`/etc. still ticks and dispatches
+            // — without this an archetype-based NPC would look inert.
+            if hooks::object_responds(world, obj, "on_tick") {
+                let interval = world
+                    .resolved_attr(obj, "tick_interval")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(1);
                 idx.tickables.push((obj.ref_id.clone(), interval));
             }
-            if obj.tags.iter().any(|t| t.category == "system" && t.key == "global") {
-                if let Some(script) = hooks::get_script(obj) {
-                    for hook in &script.hooks {
-                        idx.globals_by_hook.entry(hook.clone()).or_default().push(obj.ref_id.clone());
-                    }
+            // `system:global` may itself be inherited from an archetype (a
+            // shared "rules" object) — resolved_tags covers that.
+            if world.resolved_tags(obj).iter().any(|t| t.category == "system" && t.key == "global") {
+                for hook in hooks::resolve_hook_names(world, obj) {
+                    idx.globals_by_hook.entry(hook).or_default().push(obj.ref_id.clone());
                 }
             }
             for tag in &obj.tags {
@@ -788,7 +812,7 @@ impl Engine {
             .world
             .objects
             .values()
-            .filter(|obj| hooks::object_defines_hook(obj, hook_name))
+            .filter(|obj| hooks::object_responds(&self.world, obj, hook_name))
             .map(|obj| obj.ref_id.clone())
             .collect();
         let mut ran = 0u32;
@@ -806,16 +830,41 @@ impl Engine {
     }
 
     fn fire_on_create(&mut self, ref_id: &str) {
-        if !self
-            .world
-            .get(ref_id)
-            .is_some_and(|o| hooks::object_defines_hook(o, "on_create"))
-        {
+        let responds = match self.world.get(ref_id) {
+            Some(o) => hooks::object_responds(&self.world, o, "on_create"),
+            None => false,
+        };
+        if !responds {
             return;
         }
         if let Err(e) = self.fire_tick_hook_named(ref_id, "on_create") {
             tracing::warn!(hook = "on_create", target = %ref_id, error = %e, "on_create hook error");
         }
+    }
+
+    /// Resolve the script that should run for `hook_name` on `this_ref` — its
+    /// own if it defines the hook, else the first archetype ancestor's (see
+    /// `hooks::resolve_script`). Returns the script (cloned) plus the
+    /// resolving object's ref, for error attribution.
+    ///
+    /// Crucially, when the resolving ref differs from `this_ref` (the hook
+    /// came from an archetype), `state` is swapped for `this_ref`'s own —
+    /// `state` is never delegated (docs/plans/archetypes.md), so the ancestor
+    /// script's *code* runs but `state` seen and written back is always the
+    /// instance's.
+    fn resolve_hook_script(
+        &self,
+        this_ref: &str,
+        hook_name: &str,
+    ) -> Option<(hooks::ObjectScript, String)> {
+        let obj = self.world.get(this_ref)?;
+        let (script, resolving_ref) = hooks::resolve_script(&self.world, obj, hook_name)?;
+        let resolving_ref = resolving_ref.to_string();
+        let mut script = script.clone();
+        if resolving_ref != this_ref {
+            script.state = obj.script.as_ref().map(|s| s.state.clone()).unwrap_or_default();
+        }
+        Some((script, resolving_ref))
     }
 
     fn fire_tick_hook_with_args(
@@ -824,12 +873,8 @@ impl Engine {
         hook_name: &str,
         args: Option<&str>,
     ) -> Result<(), String> {
-        let script = match self
-            .world
-            .get(this_ref)
-            .and_then(|o| hooks::get_script(o).filter(|s| s.defines(hook_name)))
-        {
-            Some(s) => s.clone(),
+        let (script, resolving_ref) = match self.resolve_hook_script(this_ref, hook_name) {
+            Some(x) => x,
             None => return Ok(()),
         };
 
@@ -856,7 +901,7 @@ impl Engine {
                 &self.scheduled_hooks,
                 self.tick_count,
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| annotate_archetype_error(e.to_string(), this_ref, &resolving_ref))?;
 
         let effects = softcode::apply_batch(&mut self.world, &result.batch)?;
         self.world.next_id = dbref_counter.get();
@@ -875,6 +920,11 @@ impl Engine {
     /// Persist the object's `state` table after a hook run. Only `on_tick`
     /// hooks read/write `state` (see [`SoftcodeRuntime::run_hook`]), so other
     /// hooks return an empty map — don't clobber the stored state with it.
+    ///
+    /// Uses [`hooks::ensure_own_state_slot`] rather than requiring `obj.script`
+    /// to already exist: an instance that only *delegates* its `on_tick` (no
+    /// script of its own) still needs somewhere of its own to persist `state`
+    /// between runs, since `state` is never resolved from the archetype.
     fn write_back_script_state(
         &mut self,
         this_ref: &str,
@@ -883,9 +933,8 @@ impl Engine {
     ) {
         if hook_name == "on_tick"
             && let Some(obj) = self.world.get_mut(this_ref)
-            && let Some(script) = obj.script.as_mut()
         {
-            script.state = state;
+            hooks::ensure_own_state_slot(obj).state = state;
         }
     }
 
@@ -1237,7 +1286,7 @@ impl Engine {
                             "target_ref": obj.target_ref,
                             "attrs": obj.attrs,
                             "tags": tags,
-                            "has_script": obj.script.is_some(),
+                            "has_script": hooks::has_authored_script(obj),
                             "hooks": hook_names,
                             "libs": lib_names,
                             "locks": locks,
@@ -1372,9 +1421,31 @@ impl Engine {
                     None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
                 }
             }
-            ApiRequest::DeleteObject { ref_id } => {
+            ApiRequest::DeleteObject { ref_id, cascade } => {
                 if self.world.get(&ref_id).map(|o| o.kind == Kind::Player).unwrap_or(false) {
                     return ApiResponse::error("Cannot delete player objects");
+                }
+                let instances: Vec<String> = self
+                    .world
+                    .objects
+                    .values()
+                    .filter(|o| o.archetype_ref.as_deref() == Some(ref_id.as_str()))
+                    .map(|o| o.ref_id.clone())
+                    .collect();
+                if !instances.is_empty() {
+                    if !cascade {
+                        return ApiResponse::error(format!(
+                            "{} is an archetype with live instances",
+                            ref_id
+                        ));
+                    }
+                    // Flatten every instance before removing the archetype
+                    // they depend on — cascade never orphans.
+                    for instance_ref in &instances {
+                        if let Err(e) = softcode::detach_object(&mut self.world, instance_ref) {
+                            return ApiResponse::error(e);
+                        }
+                    }
                 }
                 if self.world.remove_object(&ref_id).is_some() {
                     ApiResponse::ok()
@@ -1637,11 +1708,16 @@ impl Engine {
                 Err(e) => ApiResponse::success(serde_json::json!({ "valid": false, "error": e })),
             },
             ApiRequest::ListProgramsAll => {
+                // A script that's only the empty state-only stub
+                // (`hooks::ensure_own_state_slot` — an instance that ticks
+                // purely on an inherited `on_tick`) doesn't count as "has a
+                // script" here: nobody authored it, so it shouldn't appear
+                // as a program to edit.
                 let mut out: Vec<serde_json::Value> = self
                     .world
                     .objects
                     .values()
-                    .filter(|o| o.script.is_some() || !o.libs.is_empty())
+                    .filter(|o| hooks::has_authored_script(o) || !o.libs.is_empty())
                     .map(|o| {
                         let mut hooks: Vec<String> = o
                             .script
@@ -1657,7 +1733,7 @@ impl Engine {
                             "title": o.title,
                             "kind": o.kind.to_string(),
                             "area": Self::room_area(o),
-                            "has_script": o.script.is_some(),
+                            "has_script": hooks::has_authored_script(o),
                             "hooks": hooks,
                             "libs": libs,
                         })
@@ -2183,7 +2259,7 @@ impl Engine {
                 let name = self
                     .world
                     .get(actor_ref)
-                    .map(|o| o.display_name().to_string())
+                    .map(|o| self.world.display_name(o))
                     .unwrap_or_default();
                 // Mark player as offline but keep them in the world.
                 // Attrs, tags, inventory, location all persist.
@@ -2488,14 +2564,14 @@ impl Engine {
             let name = self
                 .world
                 .get(ref_id)
-                .map(|o| o.display_name().to_string())
+                .map(|o| self.world.display_name(o))
                 .unwrap_or_else(|| ref_id.clone());
             let location = self
                 .world
                 .get(ref_id)
                 .and_then(|o| o.location_ref.as_ref())
                 .and_then(|loc| self.world.get(loc))
-                .map(|r| r.display_name().to_string())
+                .map(|r| self.world.display_name(r))
                 .unwrap_or_else(|| "unknown".into());
             msg.push_str(&format!("  {}) {} ({})\r\n", i + 1, name, location));
         }
@@ -3035,14 +3111,42 @@ impl Engine {
             return "Permission denied.\r\n".to_string();
         }
         if args.is_empty() {
-            return "Usage: @destroy <ref>\r\n".to_string();
+            return "Usage: @destroy <ref> [--cascade]\r\n".to_string();
         }
-        let target_ref = args.trim();
+        // `--cascade` opts into deleting an archetype that still has live
+        // instances — see the same guard in apply_to's Intent::Destroy.
+        let (target_ref, cascade) = match args.trim().strip_suffix("--cascade") {
+            Some(rest) => (rest.trim(), true),
+            None => (args.trim(), false),
+        };
         if !self.can_modify_object(session_id, actor_ref, target_ref) {
             return "Permission denied (not owner).\r\n".to_string();
         }
         if self.world.get(target_ref).map(|o| o.kind == Kind::Player).unwrap_or(false) {
             return "Cannot destroy player objects.\r\n".to_string();
+        }
+        let instances: Vec<String> = self
+            .world
+            .objects
+            .values()
+            .filter(|o| o.archetype_ref.as_deref() == Some(target_ref))
+            .map(|o| o.ref_id.clone())
+            .collect();
+        if !instances.is_empty() {
+            if !cascade {
+                return format!(
+                    "{} is an archetype with live instances — pass --cascade to delete anyway.\r\n",
+                    target_ref
+                );
+            }
+            // Flatten every instance before the archetype they depend on is
+            // removed — cascade means "detach then delete", never "delete
+            // and orphan" (matches apply_to's Intent::Destroy handling).
+            for instance_ref in &instances {
+                if let Err(e) = softcode::detach_object(&mut self.world, instance_ref) {
+                    tracing::warn!(target = %instance_ref, error = %e, "cascade detach failed");
+                }
+            }
         }
         if let Some(obj) = self.world.get(target_ref) {
             if obj.kind == Kind::Room {
@@ -3051,7 +3155,7 @@ impl Engine {
                     return "Cannot destroy a room with objects in it.\r\n".to_string();
                 }
             }
-            let name = obj.display_name().to_string();
+            let name = self.world.display_name(obj);
             // If it's a room, also remove exits that source from or target it
             if obj.kind == Kind::Room {
                 let exit_refs: Vec<String> = self
@@ -3111,7 +3215,8 @@ impl Engine {
 
         if let Some(obj) = self.world.get_mut(&resolved_ref) {
             obj.attrs.insert(attr_key.to_string(), json_val);
-            format!("Set {}/{} on {}.\r\n", resolved_ref, attr_key, obj.display_name())
+            let name = self.world.display_name(self.world.get(&resolved_ref).unwrap());
+            format!("Set {}/{} on {}.\r\n", resolved_ref, attr_key, name)
         } else {
             format!("No object with ref '{}'.\r\n", resolved_ref)
         }
@@ -3429,12 +3534,8 @@ impl Engine {
         room_ref: Option<&str>,
         args: Option<&str>,
     ) -> Result<HookRun, String> {
-        let script = match self
-            .world
-            .get(this_ref)
-            .and_then(|o| hooks::get_script(o).filter(|s| s.defines(hook_name)))
-        {
-            Some(s) => s.clone(),
+        let (script, resolving_ref) = match self.resolve_hook_script(this_ref, hook_name) {
+            Some(x) => x,
             None => {
                 return Ok(HookRun {
                     denied: false,
@@ -3461,7 +3562,7 @@ impl Engine {
                 &self.scheduled_hooks,
                 self.tick_count,
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| annotate_archetype_error(e.to_string(), this_ref, &resolving_ref))?;
 
         let denied = result.denied;
         let effects = softcode::apply_batch(&mut self.world, &result.batch)?;
@@ -3813,7 +3914,7 @@ impl Engine {
             }
         }
 
-        let name = self.world.get(&item_ref).unwrap().display_name().to_string();
+        let name = self.world.display_name(self.world.get(&item_ref).unwrap());
         if let Some(obj) = self.world.get_mut(&item_ref) {
             obj.location_ref = Some(actor_ref.to_string());
         }
@@ -3874,8 +3975,8 @@ impl Engine {
             }
         }
 
-        let item_display = self.world.get(&item_ref).unwrap().display_name().to_string();
-        let container_display = self.world.get(&container_ref).unwrap().display_name().to_string();
+        let item_display = self.world.display_name(self.world.get(&item_ref).unwrap());
+        let container_display = self.world.display_name(self.world.get(&container_ref).unwrap());
         if let Some(obj) = self.world.get_mut(&item_ref) {
             obj.location_ref = Some(actor_ref.to_string());
         }
@@ -3919,8 +4020,10 @@ impl Engine {
             key: "container".into(),
         };
         match self.world.get(&container_ref) {
-            Some(c) if !c.tags.contains(&container_tag) => {
-                return format!("{} is not a container.\r\n", c.display_name());
+            // `item:container` may be inherited from an archetype — see
+            // docs/plans/archetypes.md.
+            Some(c) if !self.world.resolved_tags(c).contains(&container_tag) => {
+                return format!("{} is not a container.\r\n", self.world.display_name(c));
             }
             None => return "Container not found.\r\n".to_string(),
             _ => {}
@@ -3930,11 +4033,12 @@ impl Engine {
             return "You can't put something inside itself.\r\n".to_string();
         }
 
-        // Check capacity
+        // Check capacity — also archetype-resolved (a shared "all bags hold
+        // 10 items" default on the archetype).
         if let Some(capacity) = self
             .world
             .get(&container_ref)
-            .and_then(|c| c.attrs.get("container_capacity"))
+            .and_then(|c| self.world.resolved_attr(c, "container_capacity"))
             .and_then(|v| v.as_u64())
         {
             let current = self
@@ -3976,13 +4080,8 @@ impl Engine {
             }
         }
 
-        let item_display = self.world.get(&item_ref).unwrap().display_name().to_string();
-        let container_display = self
-            .world
-            .get(&container_ref)
-            .unwrap()
-            .display_name()
-            .to_string();
+        let item_display = self.world.display_name(self.world.get(&item_ref).unwrap());
+        let container_display = self.world.display_name(self.world.get(&container_ref).unwrap());
         if let Some(obj) = self.world.get_mut(&item_ref) {
             obj.location_ref = Some(container_ref.clone());
         }
@@ -4016,16 +4115,19 @@ impl Engine {
                     .into_iter()
                     .filter(|o| o.ref_id != actor_ref);
                 let inv_objs = self.world.objects_in(actor_ref).into_iter();
+                // `system:global` may be inherited from an archetype (e.g. a
+                // shared "rules" archetype) — see docs/plans/archetypes.md.
                 let global_objs = self
                     .world
                     .objects
                     .values()
-                    .filter(|o| o.tags.contains(&global_tag));
+                    .filter(|o| self.world.resolved_tags(o).contains(&global_tag));
                 hooks::find_cmd_hook(
+                    &self.world,
                     room_itself.chain(room_objs).chain(inv_objs).chain(global_objs),
                     cmd,
                 )
-                .map(|(obj, _)| obj.ref_id.clone())
+                .map(|obj| obj.ref_id.clone())
             };
 
             if let Some(target_ref) = target_ref {
@@ -4236,7 +4338,7 @@ impl Engine {
         for session in self.sessions.values() {
             if let SessionState::Playing { actor_ref, .. } = &session.state
                 && let Some(actor) = self.world.get(actor_ref) {
-                    out.push_str(&format!("  {}\r\n", actor.display_name()));
+                    out.push_str(&format!("  {}\r\n", self.world.display_name(actor)));
                     count += 1;
                 }
         }
@@ -4282,13 +4384,14 @@ impl Engine {
         let hidden_tag = Tag { category: "system".into(), key: "hidden".into() };
         let offline_tag = Tag { category: "system".into(), key: "offline".into() };
 
-        // Resolve can_see for hidden objects (same logic as look_with_visibility)
+        // Resolve can_see for hidden objects (same logic as look_with_visibility).
+        // `system:hidden` may be inherited from an archetype.
         let hidden_candidates: Vec<(String, bool)> = self
             .world
             .objects_in(&room_ref)
             .iter()
-            .filter(|o| o.tags.contains(&hidden_tag) && o.ref_id != actor_ref)
-            .map(|o| (o.ref_id.clone(), hooks::object_defines_hook(o, "can_see")))
+            .filter(|o| self.world.resolved_tags(o).contains(&hidden_tag) && o.ref_id != actor_ref)
+            .map(|o| (o.ref_id.clone(), hooks::object_responds(&self.world, o, "can_see")))
             .collect();
         let mut hidden_refs: Vec<String> = Vec::new();
         for (ref_id, has_can_see) in hidden_candidates {
@@ -4310,11 +4413,13 @@ impl Engine {
         let exits: Vec<ExitData> = self.world.exits_from(&room_ref).iter().map(|e| {
             let dest_name = e.target_ref.as_ref()
                 .and_then(|t| self.world.get(t))
-                .map(|r| r.display_name().to_string())
+                .map(|r| self.world.display_name(r))
                 .unwrap_or_default();
             ExitData { dir: e.key.clone(), name: dest_name }
         }).collect();
 
+        // Resolved names — an archetype-based instance with no title of its
+        // own shows the archetype's (docs/plans/archetypes.md).
         let contents: Vec<EntityData> = self.world.objects_in(&room_ref).into_iter()
             .filter(|o| {
                 o.ref_id != actor_ref
@@ -4322,7 +4427,7 @@ impl Engine {
                     && !hidden_refs.contains(&o.ref_id)
             })
             .map(|o| EntityData {
-                name: o.display_name().to_string(),
+                name: self.world.display_name(o),
                 kind: format!("{}", o.kind),
                 ref_id: o.ref_id.clone(),
                 owned: o.owner_ref.as_deref() == Some(actor_ref),
@@ -4331,8 +4436,8 @@ impl Engine {
 
         if let Some(session) = self.sessions.get(session_id) {
             let _ = session.tx.send(ClientMessage::Room {
-                name: room.display_name().to_string(),
-                description: room.description.clone(),
+                name: self.world.display_name(room),
+                description: self.world.resolved_description(room),
                 exits,
                 contents,
             });
@@ -4398,14 +4503,15 @@ impl Engine {
                 .filter(|o| o.ref_id != actor_ref);
             let inv_objs = self.world.objects_in(actor_ref).into_iter();
             let global_objs = self.world.objects.values()
-                .filter(|o| o.tags.contains(&global_tag));
+                .filter(|o| self.world.resolved_tags(o).contains(&global_tag));
 
             for obj in room_itself.chain(room_objs).chain(inv_objs).chain(global_objs) {
-                if let Some(script) = hooks::get_script(obj) {
-                    for hook in &script.hooks {
-                        if let Some(cmd) = hook.strip_prefix("cmd_") {
-                            cmds.push(cmd.to_string());
-                        }
+                // Own hooks plus anything inherited via `archetype_ref` — an
+                // instance that delegates its `cmd_*` hooks should still show
+                // up in the command list.
+                for hook in hooks::resolve_hook_names(&self.world, obj) {
+                    if let Some(cmd) = hook.strip_prefix("cmd_") {
+                        cmds.push(cmd.to_string());
                     }
                 }
             }
@@ -4439,7 +4545,7 @@ impl Engine {
             Some(r) => r.clone(),
             None => return "You're nowhere.\r\n".to_string(),
         };
-        let sender_name = actor.display_name().to_string();
+        let sender_name = self.world.display_name(actor);
 
         let lower_target = target_name.to_lowercase();
         let target_session = self.sessions.iter().find(|(sid, s)| {
@@ -4450,7 +4556,7 @@ impl Engine {
                         .map(|o| {
                             o.location_ref.as_deref() == Some(&room_ref)
                                 && (o.key.to_lowercase() == lower_target
-                                    || o.display_name().to_lowercase() == lower_target)
+                                    || self.world.display_name(o).to_lowercase() == lower_target)
                         })
                         .unwrap_or(false)
                 } else {
@@ -4488,7 +4594,7 @@ impl Engine {
             None => return "You're nowhere.\r\n".to_string(),
         };
 
-        let name = actor.display_name().to_string();
+        let name = self.world.display_name(actor);
 
         let others_msg = ClientMessage::Text { text: format!("{} {}\r\n", name, message) };
         for (sid, session) in &self.sessions {
@@ -4996,7 +5102,7 @@ impl Engine {
                 .collect();
             match candidates.iter().find(|o| {
                 o.key.to_lowercase().contains(&target_lower)
-                    || o.display_name().to_lowercase().contains(&target_lower)
+                    || self.world.display_name(o).to_lowercase().contains(&target_lower)
             }) {
                 Some(o) => o.ref_id.clone(),
                 None => return format!("Cannot find '{}'.\r\n", target_input),
@@ -5388,7 +5494,7 @@ impl Engine {
         let room_has_on_look = self
             .world
             .get(&room_ref)
-            .is_some_and(|o| hooks::object_defines_hook(o, "on_look"));
+            .is_some_and(|o| hooks::object_responds(&self.world, o, "on_look"));
         if room_has_on_look {
             let _ = self.fire_hook(&room_ref, "on_look", actor_ref, Some(&room_ref), None);
             return String::new();
@@ -5404,8 +5510,8 @@ impl Engine {
             .world
             .objects_in(&room_ref)
             .iter()
-            .filter(|o| o.tags.contains(&hidden_tag) && o.ref_id != actor_ref)
-            .map(|o| (o.ref_id.clone(), hooks::object_defines_hook(o, "can_see")))
+            .filter(|o| self.world.resolved_tags(o).contains(&hidden_tag) && o.ref_id != actor_ref)
+            .map(|o| (o.ref_id.clone(), hooks::object_responds(&self.world, o, "can_see")))
             .collect();
 
         for (ref_id, has_can_see) in candidates {
@@ -5438,7 +5544,7 @@ impl Engine {
                 .chain(self.world.objects_in(actor_ref))
                 .find(|o| {
                     o.key.to_lowercase().contains(&target_name)
-                        || o.display_name().to_lowercase().contains(&target_name)
+                        || self.world.display_name(o).to_lowercase().contains(&target_name)
                 })
                 .map(|o| o.ref_id.clone());
 
@@ -5596,7 +5702,7 @@ impl Engine {
             .find(|o| {
                 o.kind == Kind::Item
                     && (o.key.to_lowercase().contains(&target_name)
-                        || o.display_name().to_lowercase().contains(&target_name))
+                        || self.world.display_name(o).to_lowercase().contains(&target_name))
             })
             .map(|o| o.ref_id.clone());
 
@@ -5630,7 +5736,7 @@ impl Engine {
             }
         }
 
-        let name = self.world.get(&item_ref).unwrap().display_name().to_string();
+        let name = self.world.display_name(self.world.get(&item_ref).unwrap());
         if let Some(obj) = self.world.get_mut(&item_ref) {
             obj.location_ref = Some(room_ref.clone());
         }
@@ -5660,7 +5766,7 @@ impl Engine {
             .chain(self.world.objects_in(actor_ref))
             .find(|o| {
                 o.key.to_lowercase().contains(&target_name)
-                    || o.display_name().to_lowercase().contains(&target_name)
+                    || self.world.display_name(o).to_lowercase().contains(&target_name)
             })
             .map(|o| o.ref_id.clone());
 
@@ -5701,7 +5807,7 @@ impl Engine {
                 let name = self
                     .world
                     .get(&target_ref)
-                    .map(|o| o.display_name().to_string())
+                    .map(|o| self.world.display_name(o))
                     .unwrap_or_default();
                 format!("You use {}. Nothing happens.\r\n", name)
             }
@@ -5745,7 +5851,7 @@ impl Engine {
         let room_has_on_say = self
             .world
             .get(&room_ref)
-            .is_some_and(|o| hooks::object_defines_hook(o, "on_say"));
+            .is_some_and(|o| hooks::object_responds(&self.world, o, "on_say"));
         if room_has_on_say {
             // Store the message as an attr so the hook can read it
             if let Some(room_obj) = self.world.get_mut(&room_ref) {
@@ -5761,7 +5867,7 @@ impl Engine {
         let speaker_name = self
             .world
             .get(actor_ref)
-            .map(|a| a.display_name().to_string())
+            .map(|a| self.world.display_name(a))
             .unwrap_or_default();
 
         let others_msg = ClientMessage::Text { text: format!("{} says, \"{}\"\r\n", speaker_name, message) };
@@ -5992,14 +6098,14 @@ impl Engine {
             let name = self
                 .world
                 .get(ref_id)
-                .map(|o| o.display_name().to_string())
+                .map(|o| self.world.display_name(o))
                 .unwrap_or_else(|| ref_id.clone());
             let location = self
                 .world
                 .get(ref_id)
                 .and_then(|o| o.location_ref.as_ref())
                 .and_then(|loc| self.world.get(loc))
-                .map(|r| r.display_name().to_string())
+                .map(|r| self.world.display_name(r))
                 .unwrap_or_else(|| "unknown".into());
             let marker = if *ref_id == active { " [active]" } else { "" };
             out.push_str(&format!("  {} ({}){}\r\n", name, location, marker));
@@ -6076,7 +6182,7 @@ impl Engine {
                 .find(|r| {
                     self.world
                         .get(r.as_str())
-                        .map(|o| o.display_name().to_lowercase().contains(&name) || o.key.to_lowercase().contains(&name))
+                        .map(|o| self.world.display_name(o).to_lowercase().contains(&name) || o.key.to_lowercase().contains(&name))
                         .unwrap_or(false)
                 })
                 .cloned();
@@ -6137,7 +6243,7 @@ impl Engine {
                 .find(|r| {
                     self.world
                         .get(r.as_str())
-                        .map(|o| o.display_name().to_lowercase() == name || o.key.to_lowercase() == name)
+                        .map(|o| self.world.display_name(o).to_lowercase() == name || o.key.to_lowercase() == name)
                         .unwrap_or(false)
                 })
                 .cloned();
@@ -6156,7 +6262,7 @@ impl Engine {
         let char_name = self
             .world
             .get(&target_ref)
-            .map(|o| o.display_name().to_string())
+            .map(|o| self.world.display_name(o))
             .unwrap_or_default();
 
         if let Some(account) = self.accounts.get_mut(&account_id) {
@@ -6192,7 +6298,7 @@ impl Engine {
             return "Permission denied. You need builder/puppeteer scope and ownership, or admin.\r\n".to_string();
         }
 
-        let target_name = target.display_name().to_string();
+        let target_name = self.world.display_name(target);
 
         if let Some(session) = self.sessions.get_mut(session_id)
             && let SessionState::Playing { puppet_ref, .. } = &mut session.state {
@@ -6309,12 +6415,23 @@ fn describe_intent(intent: &softcode::Intent, world: &World) -> String {
         Intent::UnsetTag { target, tag } => {
             format!("tag {} -{}:{}", label(target), tag.category, tag.key)
         }
-        Intent::Spawn { ref_id, key, kind, location, .. } => {
-            format!("spawn {} {} ({}) in {}", kind, key, ref_id, label(location))
-        }
+        Intent::Spawn { ref_id, key, kind, location, archetype, .. } => match archetype {
+            Some(a) => format!(
+                "spawn {} {} ({}) in {} (archetype {})",
+                kind, key, ref_id, label(location), label(a)
+            ),
+            None => format!("spawn {} {} ({}) in {}", kind, key, ref_id, label(location)),
+        },
         Intent::SetTitle { target, .. } => format!("set title of {}", label(target)),
         Intent::SetDescription { target, .. } => format!("set description of {}", label(target)),
-        Intent::Destroy { target } => format!("destroy {}", label(target)),
+        Intent::Destroy { target, cascade } => {
+            if *cascade {
+                format!("destroy {} (cascade)", label(target))
+            } else {
+                format!("destroy {}", label(target))
+            }
+        }
+        Intent::Detach { target } => format!("clone/detach {}", label(target)),
         Intent::CreateExit { source, direction, target, .. } => {
             format!("exit '{}' from {} → {}", direction, label(source), label(target))
         }
@@ -6615,6 +6732,7 @@ mod tests {
 
         let resp = api_call(&tx, ApiRequest::DeleteObject {
             ref_id: item_ref.clone(),
+            cascade: false,
         }).await;
         assert!(resp.ok);
 
@@ -6754,6 +6872,620 @@ mod tests {
         let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
         let out = engine.cmd_eval(&session_id, &actor_ref, "return 1 + 1");
         assert!(out.contains("=> 2"), "unexpected output: {}", out);
+    }
+
+    // -- Archetype (is-a) resolution seams — docs/plans/archetypes.md Stage 1 --
+
+    /// An instance with no script of its own inherits its archetype's hook:
+    /// `fire_hook` resolves the *archetype's* code but binds it to the
+    /// *instance* — the write lands on the instance, not the archetype.
+    #[test]
+    fn archetype_instance_inherits_hook_fires_bound_to_instance() {
+        let (mut engine, _session_id, actor_ref) = test_engine_with_session(true);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        let archetype_ref = engine.world.next_dbref();
+        let mut archetype = GameObject::new(&archetype_ref, "goblin", Kind::Npc)
+            .with_location(&room_ref);
+        hooks::set_script(
+            &mut archetype,
+            r#"
+                function on_get(this, actor, room)
+                    set_attr(this, "got_by", actor.ref_id)
+                end
+            "#
+            .to_string(),
+        );
+        engine.world.add_object(archetype);
+
+        let instance_ref = engine.world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "goblin1", Kind::Npc)
+            .with_location(&room_ref);
+        instance.archetype_ref = Some(archetype_ref.clone());
+        engine.world.add_object(instance);
+
+        let result = engine.fire_hook(&instance_ref, "on_get", &actor_ref, Some(&room_ref), None);
+        assert!(result.is_ok(), "hook should run: {:?}", result.err());
+
+        assert_eq!(
+            engine.world.get(&instance_ref).unwrap().attrs.get("got_by"),
+            Some(&serde_json::json!(actor_ref)),
+            "the archetype's code ran, bound to the instance"
+        );
+        assert!(
+            engine.world.get(&archetype_ref).unwrap().attrs.get("got_by").is_none(),
+            "the archetype itself must be untouched"
+        );
+    }
+
+    /// When the resolved script errors, the message names both the instance
+    /// the hook was fired on and the archetype whose code actually ran — see
+    /// docs/plans/archetypes.md's "error attribution" integration note.
+    #[test]
+    fn archetype_hook_error_names_both_instance_and_archetype() {
+        let (mut engine, _session_id, actor_ref) = test_engine_with_session(true);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        let archetype_ref = engine.world.next_dbref();
+        let mut archetype = GameObject::new(&archetype_ref, "goblin", Kind::Npc)
+            .with_location(&room_ref);
+        hooks::set_script(
+            &mut archetype,
+            r#"function on_get(this, actor, room) error("kaboom") end"#.to_string(),
+        );
+        engine.world.add_object(archetype);
+
+        let instance_ref = engine.world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "goblin1", Kind::Npc)
+            .with_location(&room_ref);
+        instance.archetype_ref = Some(archetype_ref.clone());
+        engine.world.add_object(instance);
+
+        let err = match engine.fire_hook(&instance_ref, "on_get", &actor_ref, Some(&room_ref), None) {
+            Err(e) => e,
+            Ok(_) => panic!("expected the script to error"),
+        };
+        assert!(err.contains(&instance_ref), "error should name the instance: {}", err);
+        assert!(err.contains(&archetype_ref), "error should name the resolving archetype: {}", err);
+    }
+
+    /// `state` is never delegated: two instances sharing an inherited
+    /// `on_tick` accumulate independent state, and the archetype itself
+    /// never accumulates any.
+    #[test]
+    fn tick_state_stays_per_instance_when_the_hook_is_inherited() {
+        let (mut engine, _session_id, _actor_ref) = test_engine_with_session(true);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        let archetype_ref = engine.world.next_dbref();
+        let mut archetype = GameObject::new(&archetype_ref, "ticking_monster", Kind::Npc)
+            .with_location(&room_ref);
+        hooks::set_script(
+            &mut archetype,
+            r#"
+                function on_tick(this, state, room)
+                    state.count = (state.count or 0) + 1
+                end
+            "#
+            .to_string(),
+        );
+        engine.world.add_object(archetype);
+
+        let a_ref = engine.world.next_dbref();
+        let mut a = GameObject::new(&a_ref, "monster_a", Kind::Npc).with_location(&room_ref);
+        a.archetype_ref = Some(archetype_ref.clone());
+        engine.world.add_object(a);
+
+        let b_ref = engine.world.next_dbref();
+        let mut b = GameObject::new(&b_ref, "monster_b", Kind::Npc).with_location(&room_ref);
+        b.archetype_ref = Some(archetype_ref.clone());
+        engine.world.add_object(b);
+
+        engine.fire_tick_hook_named(&a_ref, "on_tick").unwrap();
+        engine.fire_tick_hook_named(&a_ref, "on_tick").unwrap();
+        engine.fire_tick_hook_named(&b_ref, "on_tick").unwrap();
+
+        let count_of = |engine: &Engine, r: &str| {
+            engine.world.get(r).unwrap().script.as_ref().unwrap().state["count"]
+                .as_u64()
+                .unwrap()
+        };
+        assert_eq!(count_of(&engine, &a_ref), 2, "instance A ticked twice");
+        assert_eq!(count_of(&engine, &b_ref), 1, "instance B's state is independent of A's");
+        assert!(
+            engine.world.get(&archetype_ref).unwrap().script.as_ref().unwrap().state.is_empty(),
+            "the archetype's own script.state must never accumulate instance state"
+        );
+    }
+
+    /// `dispatch_fallback`'s `cmd_*` resolution (`hooks::find_cmd_hook`)
+    /// walks the archetype chain — a `system:global`-tagged instance with no
+    /// script of its own still dispatches its archetype's `cmd_*` hook.
+    #[test]
+    fn global_instance_inherits_cmd_dispatch_from_archetype() {
+        let (mut engine, _session_id, actor_ref) = test_engine_with_session(true);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        let archetype_ref = engine.world.next_dbref();
+        let mut archetype = GameObject::new(&archetype_ref, "rules", Kind::Item)
+            .with_location(&room_ref);
+        hooks::set_script(
+            &mut archetype,
+            r#"
+                function cmd_greet(this, actor, room, args)
+                    set_attr(actor, "greeted", true)
+                end
+            "#
+            .to_string(),
+        );
+        engine.world.add_object(archetype);
+
+        let instance_ref = engine.world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "rules_instance", Kind::Item)
+            .with_location(&room_ref);
+        instance.archetype_ref = Some(archetype_ref.clone());
+        instance.tags.insert(Tag { category: "system".into(), key: "global".into() });
+        engine.world.add_object(instance);
+
+        let output = engine.dispatch_fallback(&actor_ref, "greet", "");
+        assert_eq!(output, "", "cmd_greet should have dispatched with no fallback error text");
+        assert_eq!(
+            engine.world.get(&actor_ref).unwrap().attrs.get("greeted"),
+            Some(&serde_json::json!(true))
+        );
+    }
+
+    /// `DerivedIndexes::build`'s `globals_by_hook` index — which drives
+    /// `fire_global_hooks` (e.g. a world-wide `on_enter`) — also walks the
+    /// chain, per the plan's explicit review-finding callout.
+    #[test]
+    fn derived_indexes_globals_by_hook_includes_inherited_hooks() {
+        let (mut engine, _session_id, _actor_ref) = test_engine_with_session(true);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        let archetype_ref = engine.world.next_dbref();
+        let mut archetype = GameObject::new(&archetype_ref, "town_crier", Kind::Item)
+            .with_location(&room_ref);
+        hooks::set_script(
+            &mut archetype,
+            "function on_enter(this, actor, room) end".to_string(),
+        );
+        engine.world.add_object(archetype);
+
+        let instance_ref = engine.world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "crier_instance", Kind::Item)
+            .with_location(&room_ref);
+        instance.archetype_ref = Some(archetype_ref.clone());
+        instance.tags.insert(Tag { category: "system".into(), key: "global".into() });
+        engine.world.add_object(instance);
+
+        let refs = engine.indexes().globals_by_hook.get("on_enter").cloned().unwrap_or_default();
+        assert!(
+            refs.contains(&instance_ref),
+            "an instance that only inherits on_enter should still be indexed as global: {:?}",
+            refs
+        );
+    }
+
+    /// End-to-end through the real Luau API: `spawn({archetype = ...})`
+    /// inherits the archetype's attrs (no override needed) and fires the
+    /// constructor `on_create` bound to the new instance.
+    #[test]
+    fn spawn_via_luau_inherits_attrs_and_runs_constructor() {
+        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        let archetype_ref = engine.world.next_dbref();
+        let mut archetype = GameObject::new(&archetype_ref, "goblin", Kind::Npc)
+            .with_location(&room_ref);
+        archetype.attrs.insert("max_hp".into(), serde_json::json!(10));
+        hooks::set_script(
+            &mut archetype,
+            r#"
+                function on_create(this, actor, room)
+                    set_attr(this, "welcomed", true)
+                end
+            "#
+            .to_string(),
+        );
+        engine.world.add_object(archetype);
+
+        let out = engine.cmd_eval(
+            &session_id,
+            &actor_ref,
+            &format!(
+                r#"return spawn({{ key = "goblin1", kind = "npc", location = "{}", archetype = "{}" }})"#,
+                room_ref, archetype_ref
+            ),
+        );
+        assert!(out.contains("=>"), "spawn should return the new ref: {}", out);
+        let instance_ref = engine
+            .world
+            .objects
+            .values()
+            .find(|o| o.key == "goblin1")
+            .map(|o| o.ref_id.clone())
+            .expect("instance should have been spawned");
+
+        let instance = engine.world.get(&instance_ref).unwrap();
+        assert_eq!(instance.archetype_ref.as_deref(), Some(archetype_ref.as_str()));
+        // No max_hp override was given — resolves from the archetype.
+        assert_eq!(
+            engine.world.resolved_attr(instance, "max_hp"),
+            Some(&serde_json::json!(10))
+        );
+        // Constructor seam: on_create ran bound to the instance.
+        assert_eq!(instance.attrs.get("welcomed"), Some(&serde_json::json!(true)));
+    }
+
+    /// `clone(ref)` flattens an instance: resolved fields land on the
+    /// object and `archetype_ref` clears, all through the real Luau API.
+    #[test]
+    fn clone_via_luau_detaches_the_instance() {
+        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        let archetype_ref = engine.world.next_dbref();
+        let mut archetype = GameObject::new(&archetype_ref, "goblin", Kind::Npc)
+            .with_title("Goblin")
+            .with_location(&room_ref);
+        archetype.attrs.insert("max_hp".into(), serde_json::json!(10));
+        engine.world.add_object(archetype);
+
+        let instance_ref = engine.world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "goblin1", Kind::Npc)
+            .with_location(&room_ref);
+        instance.archetype_ref = Some(archetype_ref.clone());
+        engine.world.add_object(instance);
+
+        let out = engine.cmd_eval(&session_id, &actor_ref, &format!(r#"clone("{}")"#, instance_ref));
+        assert!(out.starts_with("OK."), "unexpected output: {}", out);
+
+        let instance = engine.world.get(&instance_ref).unwrap();
+        assert!(instance.archetype_ref.is_none());
+        assert_eq!(instance.title.as_deref(), Some("Goblin"));
+        assert_eq!(instance.attrs.get("max_hp"), Some(&serde_json::json!(10)));
+    }
+
+    /// The native `@destroy` command enforces the same delete guard as
+    /// `apply_to`'s `Intent::Destroy` — refuses an archetype with live
+    /// instances unless `--cascade` is passed.
+    #[test]
+    fn cmd_destroy_refuses_archetype_with_live_instances_unless_cascaded() {
+        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        let archetype_ref = engine.world.next_dbref();
+        let mut archetype = GameObject::new(&archetype_ref, "goblin", Kind::Npc)
+            .with_title("Goblin")
+            .with_location(&room_ref)
+            .with_owner(&actor_ref);
+        archetype.attrs.insert("max_hp".into(), serde_json::json!(10));
+        engine.world.add_object(archetype);
+
+        let instance_ref = engine.world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "goblin1", Kind::Npc)
+            .with_location(&room_ref);
+        instance.archetype_ref = Some(archetype_ref.clone());
+        engine.world.add_object(instance);
+
+        let out = engine.cmd_destroy(&session_id, &actor_ref, &archetype_ref);
+        assert!(out.contains("live instances"), "unexpected output: {}", out);
+        assert!(engine.world.get(&archetype_ref).is_some(), "refused delete must not touch the world");
+
+        let out = engine.cmd_destroy(&session_id, &actor_ref, &format!("{} --cascade", archetype_ref));
+        assert!(out.starts_with("Destroyed"), "unexpected output: {}", out);
+        assert!(engine.world.get(&archetype_ref).is_none());
+
+        // cascade FLATTENS, it never orphans: the instance survives with its
+        // resolved fields copied down and archetype_ref cleared.
+        let instance = engine.world.get(&instance_ref).expect("instance must survive cascade delete");
+        assert!(instance.archetype_ref.is_none());
+        assert_eq!(instance.title.as_deref(), Some("Goblin"));
+        assert_eq!(instance.attrs.get("max_hp"), Some(&serde_json::json!(10)));
+    }
+
+    /// The REST `DeleteObject` action enforces the same guard/cascade
+    /// behavior as `apply_to`'s `Intent::Destroy` and `@destroy`.
+    #[test]
+    fn api_delete_object_cascades_by_flattening_instances() {
+        let (mut engine, token, _account_id) = engine_with_api_token(&[Scope::Builder]);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        let archetype_ref = engine.world.next_dbref();
+        let archetype = GameObject::new(&archetype_ref, "goblin", Kind::Npc)
+            .with_title("Goblin")
+            .with_location(&room_ref);
+        engine.world.add_object(archetype);
+
+        let instance_ref = engine.world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "goblin1", Kind::Npc)
+            .with_location(&room_ref);
+        instance.archetype_ref = Some(archetype_ref.clone());
+        engine.world.add_object(instance);
+
+        let resp = engine.handle_api_request(
+            ApiRequest::DeleteObject { ref_id: archetype_ref.clone(), cascade: false },
+            Some(token.clone()),
+        );
+        assert!(!resp.ok, "should refuse without cascade");
+        assert!(engine.world.get(&archetype_ref).is_some());
+
+        let resp = engine.handle_api_request(
+            ApiRequest::DeleteObject { ref_id: archetype_ref.clone(), cascade: true },
+            Some(token),
+        );
+        assert!(resp.ok, "cascade should succeed: {:?}", resp.error);
+        assert!(engine.world.get(&archetype_ref).is_none());
+
+        let instance = engine.world.get(&instance_ref).expect("instance survives cascade delete");
+        assert!(instance.archetype_ref.is_none());
+        assert_eq!(instance.title.as_deref(), Some("Goblin"));
+    }
+
+    // -- Attr/tag/name resolution consistency — docs/plans/archetypes.md --
+
+    /// `has_attr`, `pick`, and `find_by_attr` all resolve up the archetype
+    /// chain, not just `get_attr`/`this.foo`.
+    #[test]
+    fn has_attr_pick_and_find_by_attr_resolve_inherited_attrs() {
+        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        let archetype_ref = engine.world.next_dbref();
+        let mut archetype = GameObject::new(&archetype_ref, "goblin", Kind::Npc)
+            .with_location(&room_ref);
+        archetype.attrs.insert(
+            "stats".into(),
+            serde_json::json!({"hp": 10, "def": 3}),
+        );
+        engine.world.add_object(archetype);
+
+        let instance_ref = engine.world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "goblin1", Kind::Npc)
+            .with_location(&room_ref);
+        instance.archetype_ref = Some(archetype_ref.clone());
+        engine.world.add_object(instance);
+
+        let out = engine.cmd_eval(
+            &session_id,
+            &actor_ref,
+            &format!(r#"return has_attr("{}", "stats")"#, instance_ref),
+        );
+        assert!(out.contains("=> true"), "has_attr should see the inherited attr: {}", out);
+
+        let out = engine.cmd_eval(
+            &session_id,
+            &actor_ref,
+            &format!(r#"return pick("{}", "stats", "hp")"#, instance_ref),
+        );
+        assert!(out.contains("=> 10"), "pick should read the inherited nested value: {}", out);
+
+        let out = engine.cmd_eval(
+            &session_id,
+            &actor_ref,
+            &format!(
+                r#"
+                local found = find_by_attr("stats", {{ hp = 10, def = 3 }})
+                for _, o in ipairs(found) do
+                    if o.ref_id == "{}" then return true end
+                end
+                return false
+                "#,
+                instance_ref
+            ),
+        );
+        assert!(out.contains("=> true"), "find_by_attr should find the instance via its inherited attr: {}", out);
+    }
+
+    /// `set_val` on an instance that inherits the whole attr (no override of
+    /// its own) must copy the FULL resolved value down before editing the
+    /// leaf — otherwise the un-edited siblings are dropped.
+    #[test]
+    fn set_val_on_an_inherited_attr_preserves_untouched_siblings() {
+        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        let archetype_ref = engine.world.next_dbref();
+        let mut archetype = GameObject::new(&archetype_ref, "goblin", Kind::Npc)
+            .with_location(&room_ref);
+        archetype.attrs.insert(
+            "stats".into(),
+            serde_json::json!({"hp": 10, "def": 3, "name": "Grunt"}),
+        );
+        engine.world.add_object(archetype);
+
+        // No own "stats" attr — it's fully inherited.
+        let instance_ref = engine.world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "goblin1", Kind::Npc)
+            .with_location(&room_ref);
+        instance.archetype_ref = Some(archetype_ref.clone());
+        engine.world.add_object(instance);
+
+        let out = engine.cmd_eval(
+            &session_id,
+            &actor_ref,
+            &format!(r#"set_val("{}", "stats", "hp", 99)"#, instance_ref),
+        );
+        assert!(out.starts_with("OK."), "unexpected output: {}", out);
+
+        let instance = engine.world.get(&instance_ref).unwrap();
+        let stats = instance.attrs.get("stats").expect("set_val must copy the whole value onto the instance");
+        assert_eq!(stats["hp"], 99, "the edited leaf");
+        assert_eq!(stats["def"], 3, "an untouched sibling must survive");
+        assert_eq!(stats["name"], "Grunt", "another untouched sibling must survive");
+
+        // The archetype's own copy is untouched.
+        let archetype = engine.world.get(&archetype_ref).unwrap();
+        assert_eq!(archetype.attrs.get("stats").unwrap()["hp"], 10);
+    }
+
+    /// `item:container` inherited from an archetype makes `is_container`
+    /// true, and `has_tag` sees an inherited tag directly.
+    #[test]
+    fn is_container_and_has_tag_see_an_inherited_tag() {
+        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        let archetype_ref = engine.world.next_dbref();
+        let mut archetype = GameObject::new(&archetype_ref, "bag", Kind::Item).with_location(&room_ref);
+        archetype.tags.insert(Tag { category: "item".into(), key: "container".into() });
+        engine.world.add_object(archetype);
+
+        // No own tags — item:container is purely inherited.
+        let instance_ref = engine.world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "bag1", Kind::Item).with_location(&room_ref);
+        instance.archetype_ref = Some(archetype_ref.clone());
+        engine.world.add_object(instance);
+
+        let out = engine.cmd_eval(&session_id, &actor_ref, &format!(r#"return is_container("{}")"#, instance_ref));
+        assert!(out.contains("=> true"), "is_container should see the inherited tag: {}", out);
+
+        let out = engine.cmd_eval(&session_id, &actor_ref, &format!(r#"return has_tag("{}", "item:container")"#, instance_ref));
+        assert!(out.contains("=> true"), "has_tag should see the inherited tag: {}", out);
+
+        // find_by_tag must also resolve up the chain — an instance that only
+        // inherits the tag is still found (regression: it filtered raw tags).
+        let out = engine.cmd_eval(
+            &session_id,
+            &actor_ref,
+            &format!(r#"for _, o in find_by_tag("item:container") do if o.ref_id == "{}" then return "found" end end return "missing""#, instance_ref),
+        );
+        assert!(out.contains("found"), "find_by_tag should return the inheriting instance: {}", out);
+    }
+
+    /// `system:global` inherited from an archetype (not set on the instance
+    /// itself) still makes the instance count as global — both in
+    /// `DerivedIndexes::build`'s `globals_by_hook` index and in actual
+    /// `cmd_*` dispatch.
+    #[test]
+    fn system_global_tag_inherited_from_archetype_makes_instance_globally_dispatched() {
+        let (mut engine, _session_id, actor_ref) = test_engine_with_session(true);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        let archetype_ref = engine.world.next_dbref();
+        let mut archetype = GameObject::new(&archetype_ref, "rules", Kind::Item).with_location(&room_ref);
+        archetype.tags.insert(Tag { category: "system".into(), key: "global".into() });
+        hooks::set_script(
+            &mut archetype,
+            r#"
+                function cmd_greet(this, actor, room, args)
+                    set_attr(actor, "greeted", true)
+                end
+            "#
+            .to_string(),
+        );
+        engine.world.add_object(archetype);
+
+        // No own system:global tag — only inherited from the archetype.
+        let instance_ref = engine.world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "rules_instance", Kind::Item)
+            .with_location(&room_ref);
+        instance.archetype_ref = Some(archetype_ref.clone());
+        engine.world.add_object(instance);
+
+        let refs = engine.indexes().globals_by_hook.get("cmd_greet").cloned().unwrap_or_default();
+        assert!(
+            refs.contains(&instance_ref),
+            "instance should be indexed as global via its inherited system:global tag: {:?}",
+            refs
+        );
+
+        let output = engine.dispatch_fallback(&actor_ref, "greet", "");
+        assert_eq!(output, "", "cmd_greet should have dispatched with no fallback error text");
+        assert_eq!(
+            engine.world.get(&actor_ref).unwrap().attrs.get("greeted"),
+            Some(&serde_json::json!(true))
+        );
+    }
+
+    /// An instance with no title of its own inherits its archetype's, and
+    /// the native `get` command's fuzzy name matcher resolves the chain too
+    /// — so a player can `get goblin ear` even though only the archetype
+    /// carries that title.
+    #[test]
+    fn get_command_matches_an_instance_by_its_inherited_title() {
+        let (mut engine, _session_id, actor_ref) = test_engine_with_session(true);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        // The archetype itself isn't placed anywhere in the world — like a
+        // real prototype/blueprint object, only its instances are physically
+        // present (giving it the same room location would make it a second,
+        // ambiguous name-match for "goblin ear" alongside the instance).
+        let archetype_ref = engine.world.next_dbref();
+        let archetype = GameObject::new(&archetype_ref, "goblin_ear_archetype", Kind::Item)
+            .with_title("Goblin Ear");
+        engine.world.add_object(archetype);
+
+        let instance_ref = engine.world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "trophy1", Kind::Item)
+            .with_location(&room_ref);
+        instance.archetype_ref = Some(archetype_ref.clone());
+        engine.world.add_object(instance);
+
+        let out = engine.cmd_get(&actor_ref, "goblin ear");
+        assert!(out.starts_with("You pick up"), "unexpected output: {}", out);
+        assert_eq!(
+            engine.world.get(&instance_ref).and_then(|o| o.location_ref.clone()),
+            Some(actor_ref.clone()),
+            "the instance (not the archetype) should have moved into the actor's inventory"
+        );
+    }
+
+    /// The empty state-only stub `ensure_own_state_slot` leaves on an
+    /// instance that only ticks an inherited `on_tick` must not read as "has
+    /// a script" anywhere that's surfaced to a person.
+    #[test]
+    fn phantom_state_only_stub_does_not_count_as_has_script() {
+        let (mut engine, token, _account_id) = engine_with_api_token(&[Scope::Builder]);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        let archetype_ref = engine.world.next_dbref();
+        let mut archetype = GameObject::new(&archetype_ref, "ticking_monster", Kind::Npc)
+            .with_location(&room_ref);
+        hooks::set_script(
+            &mut archetype,
+            "function on_tick(this, state, room) state.count = (state.count or 0) + 1 end".to_string(),
+        );
+        engine.world.add_object(archetype);
+
+        let instance_ref = engine.world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "monster1", Kind::Npc).with_location(&room_ref);
+        instance.archetype_ref = Some(archetype_ref.clone());
+        engine.world.add_object(instance);
+
+        // Firing the inherited tick creates the state-only stub.
+        engine.fire_tick_hook_named(&instance_ref, "on_tick").unwrap();
+        assert!(
+            engine.world.get(&instance_ref).unwrap().script.is_some(),
+            "sanity: the stub was created"
+        );
+
+        let resp = engine.handle_api_request(
+            ApiRequest::Examine { ref_id: instance_ref.clone() },
+            Some(token.clone()),
+        );
+        assert!(resp.ok);
+        assert_eq!(
+            resp.data.unwrap()["has_script"],
+            false,
+            "a state-only stub is not an authored script"
+        );
+
+        let resp = engine.handle_api_request(ApiRequest::ListProgramsAll, Some(token));
+        assert!(resp.ok);
+        let listed = resp.data.unwrap();
+        let refs: Vec<String> = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["ref_id"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            !refs.contains(&instance_ref),
+            "an instance with only a state stub shouldn't appear in the program list: {:?}",
+            refs
+        );
     }
 
     #[test]
@@ -7573,7 +8305,7 @@ end
         let b = mk_room(&mut engine, &token, "town", "b");
         mk_exit(&mut engine, &token, &a, &b); // a -> b
         // Delete b so the a->b exit dangles.
-        engine.handle_api_request(ApiRequest::DeleteObject { ref_id: b.clone() }, Some(token.clone()));
+        engine.handle_api_request(ApiRequest::DeleteObject { ref_id: b.clone(), cascade: false }, Some(token.clone()));
         // Inject a script that doesn't compile (bypassing SetScript's own check).
         if let Some(obj) = engine.world.get_mut(&a) {
             hooks::set_script(obj, "local x = (".to_string());

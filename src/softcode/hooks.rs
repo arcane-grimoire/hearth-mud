@@ -13,11 +13,11 @@
 //! be a function in the shared script scope. Those live in [`GameObject::libs`]
 //! as [`LibModule`]s, one per name.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::world::GameObject;
+use crate::world::{GameObject, World, MAX_ARCHETYPE_DEPTH};
 
 /// The fixed set of non-`cmd_` hooks the engine knows how to fire on its own.
 /// `cmd_*` hooks are open-ended — any suffix is a valid command name.
@@ -292,6 +292,200 @@ pub fn object_defines_hook(obj: &GameObject, hook: &str) -> bool {
     obj.script.as_ref().is_some_and(|s| s.defines(hook))
 }
 
+/// Whether `obj` has a script a user actually authored — as opposed to the
+/// empty state-only stub [`ensure_own_state_slot`] leaves on an instance
+/// that only ever ticked an inherited `on_tick`. `obj.script.is_some()` is
+/// true for both; this is what "has a script" should mean anywhere that's
+/// surfaced to a person (`examine`, the `ListProgramsAll` filter) — a stub
+/// with empty source and no hooks isn't a script anyone wrote.
+pub fn has_authored_script(obj: &GameObject) -> bool {
+    obj.script
+        .as_ref()
+        .is_some_and(|s| !s.source.is_empty() || !s.hooks.is_empty())
+}
+
+// -- Archetype (is-a) resolution — see docs/plans/archetypes.md --
+//
+// An instance with no script of its own (or one that just doesn't define a
+// given hook) delegates to the first ancestor up its `archetype_ref` chain
+// whose script does. `run_hook` already takes the script and the instance's
+// `this_ref` as separate parameters, so running an ancestor's code bound to
+// the instance needs no change there — only *which* script gets resolved.
+
+/// The script that should run for `hook` on `obj`: its own if it defines the
+/// hook, else the first archetype ancestor's. Returns the script plus the
+/// *resolving* object's ref (for error attribution — "ran goblin's on_death,
+/// bound to instance #42" beats a bare error naming only the instance).
+///
+/// `state` on the returned script is whatever the resolving object's own
+/// script happens to hold — callers that care about per-instance `state`
+/// (only `on_tick` does) must substitute the instance's own state when the
+/// resolving ref differs from `obj`'s, since `state` never delegates.
+pub fn resolve_script<'a>(
+    world: &'a World,
+    obj: &'a GameObject,
+    hook: &str,
+) -> Option<(&'a ObjectScript, &'a str)> {
+    if let Some(s) = get_script(obj)
+        && s.defines(hook)
+    {
+        return Some((s, obj.ref_id.as_str()));
+    }
+    let mut next = obj.archetype_ref.clone();
+    let mut visited: HashSet<String> = HashSet::new();
+    visited.insert(obj.ref_id.clone());
+    while let Some(aref) = next {
+        if !visited.insert(aref.clone()) || visited.len() > MAX_ARCHETYPE_DEPTH {
+            break;
+        }
+        let Some(anc) = world.get(&aref) else { break };
+        if let Some(s) = get_script(anc)
+            && s.defines(hook)
+        {
+            return Some((s, anc.ref_id.as_str()));
+        }
+        next = anc.archetype_ref.clone();
+    }
+    None
+}
+
+/// Whether `obj` responds to `hook` — its own script, or an archetype
+/// ancestor's. The boolean counterpart to [`resolve_script`], for call sites
+/// that only need to know "does this fire" without the script itself (tick
+/// indexing, fast-path dispatch checks).
+pub fn object_responds(world: &World, obj: &GameObject, hook: &str) -> bool {
+    if object_defines_hook(obj, hook) {
+        return true;
+    }
+    let mut next = obj.archetype_ref.clone();
+    let mut visited: HashSet<String> = HashSet::new();
+    visited.insert(obj.ref_id.clone());
+    while let Some(aref) = next {
+        if !visited.insert(aref.clone()) || visited.len() > MAX_ARCHETYPE_DEPTH {
+            break;
+        }
+        let Some(anc) = world.get(&aref) else { break };
+        if object_defines_hook(anc, hook) {
+            return true;
+        }
+        next = anc.archetype_ref.clone();
+    }
+    false
+}
+
+/// Every hook name resolvable on `obj` — the union of hook names defined at
+/// any level of the archetype chain (own script first, then each ancestor's).
+/// Used where the engine enumerates *which* hooks are available rather than
+/// resolving one by name (the `system:global` command index, per-room
+/// command listings) — `resolve_script`/`object_responds` answer "does this
+/// one hook resolve", this answers "list them all".
+pub fn resolve_hook_names(world: &World, obj: &GameObject) -> HashSet<String> {
+    let mut names: HashSet<String> = HashSet::new();
+    if let Some(s) = get_script(obj) {
+        names.extend(s.hooks.iter().cloned());
+    }
+    let mut next = obj.archetype_ref.clone();
+    let mut visited: HashSet<String> = HashSet::new();
+    visited.insert(obj.ref_id.clone());
+    while let Some(aref) = next {
+        if !visited.insert(aref.clone()) || visited.len() > MAX_ARCHETYPE_DEPTH {
+            break;
+        }
+        let Some(anc) = world.get(&aref) else { break };
+        if let Some(s) = get_script(anc) {
+            names.extend(s.hooks.iter().cloned());
+        }
+        next = anc.archetype_ref.clone();
+    }
+    names
+}
+
+/// The nearest archetype ancestor's own script, verbatim — used by
+/// `clone`/`detach` when the instance being flattened has no script of its
+/// own to keep (a pure delegate). Returns `None` if `obj` has no archetype
+/// chain, or nothing in it carries a script.
+pub fn nearest_ancestor_script(world: &World, obj: &GameObject) -> Option<ObjectScript> {
+    let mut next = obj.archetype_ref.clone();
+    let mut visited: HashSet<String> = HashSet::new();
+    visited.insert(obj.ref_id.clone());
+    while let Some(aref) = next {
+        if !visited.insert(aref.clone()) || visited.len() > MAX_ARCHETYPE_DEPTH {
+            break;
+        }
+        let Some(anc) = world.get(&aref) else { break };
+        if let Some(s) = get_script(anc) {
+            return Some(s.clone());
+        }
+        next = anc.archetype_ref.clone();
+    }
+    None
+}
+
+/// Flatten `obj`'s whole resolved behavior into one source string, for
+/// detaching an instance from its archetype chain.
+///
+/// Concatenates every authored script in the chain **farthest ancestor first,
+/// then the instance's own last**, so nearer/own `function <hook>` definitions
+/// shadow inherited ones (Lua runs the chunk top-to-bottom; the last
+/// assignment into the shared env wins) — the same precedence [`resolve_script`]
+/// gives per hook. So a partial override (a local `on_death` alongside an
+/// inherited `on_tick`) keeps BOTH after detaching, instead of dropping the
+/// inherited half. Empty state-only stubs (see [`ensure_own_state_slot`])
+/// contribute nothing. Returns `None` when nothing in the chain has real
+/// source.
+pub fn flattened_chain_source(world: &World, obj: &GameObject) -> Option<String> {
+    let mut sources: Vec<String> = Vec::new();
+    if let Some(s) = &obj.script
+        && !s.source.is_empty()
+    {
+        sources.push(s.source.clone());
+    }
+    let mut next = obj.archetype_ref.clone();
+    let mut visited: HashSet<String> = HashSet::new();
+    visited.insert(obj.ref_id.clone());
+    while let Some(aref) = next {
+        if !visited.insert(aref.clone()) || visited.len() > MAX_ARCHETYPE_DEPTH {
+            break;
+        }
+        let Some(anc) = world.get(&aref) else { break };
+        if let Some(s) = &anc.script
+            && !s.source.is_empty()
+        {
+            sources.push(s.source.clone());
+        }
+        next = anc.archetype_ref.clone();
+    }
+    if sources.is_empty() {
+        return None;
+    }
+    // Own-first collection above; reverse so the farthest ancestor is emitted
+    // first and the instance's own source last (own wins on redefinition).
+    sources.reverse();
+    Some(sources.join("\n\n"))
+}
+
+/// Ensure `obj` has an own [`ObjectScript`] to hold its per-instance `state`,
+/// even when its behavior fully delegates to an archetype (no source of its
+/// own). `state` is never delegated (see docs/plans/archetypes.md) — an
+/// instance that ticks purely on an inherited `on_tick` still needs somewhere
+/// of its own to remember between runs. The stub has empty source and no
+/// hooks, so it never participates in hook resolution itself; it exists only
+/// to carry `state`.
+///
+/// Note this means such an instance's `has_script`-style checks (the builder
+/// tree, `@programs`) will report "has a script" even though it authors none
+/// — a known Stage 1 wrinkle; the authoring-surface work in Stage 2 should
+/// distinguish "has a script" from "has instance state".
+pub fn ensure_own_state_slot(obj: &mut GameObject) -> &mut ObjectScript {
+    obj.script.get_or_insert_with(|| ObjectScript {
+        source: String::new(),
+        enabled: true,
+        state: HashMap::new(),
+        origin: ProgramOrigin::InGame,
+        hooks: Vec::new(),
+    })
+}
+
 /// Attach (or replace) a `require`able lib module on `obj`, keyed by its bare
 /// `<name>` (no `lib_` prefix).
 pub fn set_lib(obj: &mut GameObject, name: &str, source: String, origin: ProgramOrigin) {
@@ -305,20 +499,21 @@ pub fn remove_lib(obj: &mut GameObject, name: &str) -> bool {
     obj.libs.remove(name).is_some()
 }
 
-/// Find the first object among `candidates` whose script defines an enabled
-/// `cmd_<command>` hook, per the command-resolution order in ADR 0004 (callers
-/// control the order via `candidates`).
+/// Find the first object among `candidates` whose script — its own, or an
+/// archetype ancestor's — defines an enabled `cmd_<command>` hook, per the
+/// command-resolution order in ADR 0004 (callers control the order via
+/// `candidates`). Returns the object; callers resolve the actual script to
+/// run via [`resolve_script`] when they fire it (`fire_hook` does this), so
+/// this only needs to answer "does this object respond".
 pub fn find_cmd_hook<'a>(
+    world: &World,
     candidates: impl IntoIterator<Item = &'a GameObject>,
     command: &str,
-) -> Option<(&'a GameObject, &'a ObjectScript)> {
+) -> Option<&'a GameObject> {
     let hook = format!("cmd_{}", command);
-    candidates.into_iter().find_map(|obj| {
-        obj.script
-            .as_ref()
-            .filter(|s| s.defines(&hook))
-            .map(|s| (obj, s))
-    })
+    candidates
+        .into_iter()
+        .find(|obj| object_responds(world, obj, &hook))
 }
 
 #[cfg(test)]

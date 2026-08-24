@@ -140,6 +140,15 @@ impl GameObject {
         self
     }
 
+    /// This object's OWN title-or-key — does **not** resolve `title` up the
+    /// `archetype_ref` chain, because there's no `World` here to walk it
+    /// with. Every display/name-matching call site in the engine and the
+    /// Lua snapshot uses `World::display_name`/`World::resolved_title`
+    /// instead (see docs/plans/archetypes.md), which do resolve the chain.
+    /// Kept for callers that only have the raw object and genuinely want
+    /// "its own title, not an inherited one" (there are currently none in
+    /// this crate — `#[allow(dead_code)]` covers the gap until one exists).
+    #[allow(dead_code)]
     pub fn display_name(&self) -> &str {
         self.title.as_deref().unwrap_or(&self.key)
     }

@@ -27,8 +27,8 @@ pub fn format_look(
     };
 
     let mut out = String::new();
-    out.push_str(&format!("\r\n{}\r\n", ansi::room_title(room.display_name())));
-    out.push_str(&format!("{}\r\n", room.description));
+    out.push_str(&format!("\r\n{}\r\n", ansi::room_title(&world.display_name(room))));
+    out.push_str(&format!("{}\r\n", world.resolved_description(room)));
 
     let exits = world.exits_from(room_ref);
     if !exits.is_empty() {
@@ -62,13 +62,13 @@ pub fn format_look(
                         .count();
                     if troupe_count > 0 {
                         format!("{} is here, leading a troupe of {}.",
-                            ansi::player_name(obj.display_name()), troupe_count)
+                            ansi::player_name(&world.display_name(obj)), troupe_count)
                     } else {
-                        format!("{} is here.", ansi::player_name(obj.display_name()))
+                        format!("{} is here.", ansi::player_name(&world.display_name(obj)))
                     }
                 }
-                Kind::Npc => format!("{} is here.", obj.display_name()),
-                Kind::Item => format!("{}{}{} is here.", ansi::DIM, obj.display_name(), ansi::RESET),
+                Kind::Npc => format!("{} is here.", world.display_name(obj)),
+                Kind::Item => format!("{}{}{} is here.", ansi::DIM, world.display_name(obj), ansi::RESET),
                 Kind::Room | Kind::Exit | Kind::Code => continue,
             };
             out.push_str(&label);
@@ -128,8 +128,8 @@ pub fn do_inventory(world: &World, actor_ref: &str) -> String {
         };
         let mut out = "You are carrying:\r\n".to_string();
         for obj in carrying {
-            out.push_str(&format!("  {}\r\n", obj.display_name()));
-            if obj.tags.contains(&container_tag) {
+            out.push_str(&format!("  {}\r\n", world.display_name(obj)));
+            if world.resolved_tags(obj).contains(&container_tag) {
                 format_container_contents(world, &obj.ref_id, &mut out, 2);
             }
         }
@@ -152,8 +152,8 @@ fn format_container_contents(world: &World, container_ref: &str, out: &mut Strin
         key: "container".into(),
     };
     for obj in contents {
-        out.push_str(&format!("{}  {}\r\n", indent, obj.display_name()));
-        if obj.tags.contains(&container_tag) && depth < 4 {
+        out.push_str(&format!("{}  {}\r\n", indent, world.display_name(obj)));
+        if world.resolved_tags(obj).contains(&container_tag) && depth < 4 {
             format_container_contents(world, &obj.ref_id, out, depth + 1);
         }
     }
@@ -191,7 +191,7 @@ pub fn find_item_ref(world: &World, room_ref: &str, name: &str) -> Option<String
         .find(|o| {
             o.kind == Kind::Item
                 && (o.key.to_lowercase().contains(&target_name)
-                    || o.display_name().to_lowercase().contains(&target_name))
+                    || world.display_name(o).to_lowercase().contains(&target_name))
         })
         .map(|o| o.ref_id.clone())
 }
@@ -213,13 +213,13 @@ pub fn do_drop(world: &mut World, actor_ref: &str, args: &str) -> String {
         .find(|o| {
             o.kind == Kind::Item
                 && (o.key.to_lowercase().contains(&target_name)
-                    || o.display_name().to_lowercase().contains(&target_name))
+                    || world.display_name(o).to_lowercase().contains(&target_name))
         })
         .map(|o| o.ref_id.clone());
 
     match item_ref {
         Some(ref_id) => {
-            let name = world.get(&ref_id).unwrap().display_name().to_string();
+            let name = world.display_name(world.get(&ref_id).unwrap());
             if let Some(obj) = world.get_mut(&ref_id) {
                 obj.location_ref = Some(room_ref);
             }
@@ -251,27 +251,37 @@ pub fn do_examine(world: &World, actor_ref: &str, args: &str) -> String {
             .chain(world.objects_in(actor_ref))
             .find(|o| {
                 o.key.to_lowercase().contains(&target_name)
-                    || o.display_name().to_lowercase().contains(&target_name)
+                    || world.display_name(o).to_lowercase().contains(&target_name)
             })
     };
 
     match obj {
         Some(obj) => {
-            let mut out = format!("{} ({})\r\n", obj.display_name(), obj.kind);
-            if !obj.description.is_empty() {
-                out.push_str(&format!("{}\r\n", obj.description));
+            // Resolved (instance-first, then archetype chain) rather than
+            // the raw fields — see docs/plans/archetypes.md. An instance
+            // with no title/description of its own shows its archetype's.
+            let mut out = format!("{} ({})\r\n", world.display_name(obj), obj.kind);
+            let description = world.resolved_description(obj);
+            if !description.is_empty() {
+                out.push_str(&format!("{}\r\n", description));
             }
             out.push_str(&format!("Ref: {}\r\n", obj.ref_id));
+            if let Some(archetype_ref) = &obj.archetype_ref {
+                let archetype_name = world.get(archetype_ref)
+                    .map(|o| world.display_name(o))
+                    .unwrap_or_else(|| archetype_ref.clone());
+                out.push_str(&format!("Archetype: {} ({})\r\n", archetype_name, archetype_ref));
+            }
             if let Some(owner) = &obj.owner_ref {
                 let owner_name = world.get(owner)
-                    .map(|o| o.display_name().to_string())
+                    .map(|o| world.display_name(o))
                     .unwrap_or_else(|| owner.clone());
                 out.push_str(&format!("Owner: {} ({})\r\n", owner_name, owner));
             }
             if obj.kind == Kind::Exit {
                 if let Some(target_ref) = &obj.target_ref {
                     let dest_name = world.get(target_ref)
-                        .map(|r| r.display_name().to_string())
+                        .map(|r| world.display_name(r))
                         .unwrap_or_else(|| target_ref.clone());
                     out.push_str(&format!("Destination: {} ({})\r\n", dest_name, target_ref));
                 }
@@ -290,35 +300,44 @@ pub fn do_examine(world: &World, actor_ref: &str, args: &str) -> String {
                 if !troupe.is_empty() {
                     out.push_str("Troupe:\r\n");
                     for h in &troupe {
-                        let class = h.attrs.get("class")
+                        let class = world.resolved_attr(h, "class")
                             .and_then(|v| v.as_str())
-                            .unwrap_or("?");
-                        let hp = h.attrs.get("hp")
+                            .unwrap_or("?")
+                            .to_string();
+                        let hp = world.resolved_attr(h, "hp")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
-                        let max_hp = h.attrs.get("max_hp")
+                        let max_hp = world.resolved_attr(h, "max_hp")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
                         out.push_str(&format!("  {} [{}] {}/{} HP\r\n",
-                            h.display_name(), class, hp, max_hp));
+                            world.display_name(h), class, hp, max_hp));
                     }
                 }
             }
-            if !obj.attrs.is_empty() {
+            // Merged with the archetype chain (World::resolved_attrs) — an
+            // instance's examine shows its own overrides plus whatever it
+            // inherits. Stage 1 doesn't mark which is which (see
+            // docs/plans/archetypes.md Stage 2's inspector).
+            let attrs = world.resolved_attrs(obj);
+            if !attrs.is_empty() {
                 out.push_str("Attributes:\r\n");
-                for (k, v) in &obj.attrs {
+                for (k, v) in &attrs {
                     out.push_str(&format!("  {}: {}\r\n", k, v));
                 }
             }
-            if !obj.tags.is_empty() {
-                let tags: Vec<String> = obj.tags.iter().map(|t| t.as_spec()).collect();
+            // Merged with the archetype chain, same as attrs above.
+            let resolved_tags = world.resolved_tags(obj);
+            if !resolved_tags.is_empty() {
+                let mut tags: Vec<String> = resolved_tags.iter().map(|t| t.as_spec()).collect();
+                tags.sort();
                 out.push_str(&format!("Tags: {}\r\n", tags.join(", ")));
             }
             let container_tag = Tag {
                 category: "item".into(),
                 key: "container".into(),
             };
-            if obj.tags.contains(&container_tag) {
+            if resolved_tags.contains(&container_tag) {
                 let contents: Vec<_> = world
                     .objects_in(&obj.ref_id)
                     .into_iter()
@@ -329,7 +348,7 @@ pub fn do_examine(world: &World, actor_ref: &str, args: &str) -> String {
                 } else {
                     out.push_str("Contents:\r\n");
                     for item in contents {
-                        out.push_str(&format!("  {}\r\n", item.display_name()));
+                        out.push_str(&format!("  {}\r\n", world.display_name(item)));
                     }
                 }
             }

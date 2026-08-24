@@ -33,6 +33,11 @@ type Object = {
     description: string,
     location_ref: string?,
     owner_ref: string?,
+    -- The archetype this object delegates to, if it's an instance (see
+    -- docs/plans/archetypes.md). `title`, `description`, and `attrs` above
+    -- are already resolved up this chain — spawn()'s `archetype` option and
+    -- clone() are the write side.
+    archetype_ref: string?,
     attrs: { [string]: any },
     tags: { string },
 }
@@ -50,6 +55,11 @@ type SpawnOpts = {
     description: string?,
     location: ObjectRef?,
     ref: string?,
+    -- Delegate to an archetype (a dbref, a file key like "town/goblin", or an
+    -- Object) — see docs/plans/archetypes.md. The instance inherits the
+    -- archetype's script and any unset title/description/attrs; explicit
+    -- fields above still override.
+    archetype: ObjectRef?,
 }
 
 -- ═══════════════════════════════════════
@@ -232,8 +242,18 @@ declare function set_title(ref: ObjectRef, title: string): ()
 --- Change an object's description.
 declare function set_description(ref: ObjectRef, description: string): ()
 
---- Remove an object from the world. Cannot destroy player objects.
+--- Remove an object from the world. Cannot destroy player objects. Refuses to
+--- remove an archetype that still has live instances (objects whose
+--- archetype_ref points at it) — see docs/plans/archetypes.md.
 declare function destroy(ref: ObjectRef): ()
+
+--- Flatten an archetype instance in place: copy its resolved title,
+--- description, attrs, and (if it has none of its own) its nearest
+--- archetype's script onto the object, then clear archetype_ref. The
+--- delegation escape hatch — spawn() defaults to delegating, this is the
+--- loud opt-out. Returns the same ref. A no-op on an object that isn't an
+--- instance.
+declare function clone(ref: ObjectRef): string
 
 --- Fire a hook on another object. The triggered hook runs after this
 --- script's intents are applied. Use for connected machinery, puzzles,

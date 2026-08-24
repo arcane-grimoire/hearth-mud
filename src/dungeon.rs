@@ -421,6 +421,7 @@ pub fn generate(
                 description: Some(text),
                 location,
                 owner: None,
+                archetype: None,
             });
 
             for (key, value) in [

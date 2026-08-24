@@ -88,6 +88,7 @@ impl Database {
         let _ = self.conn.execute("ALTER TABLE accounts ADD COLUMN active_character TEXT", []);
         let _ = self.conn.execute("ALTER TABLE accounts ADD COLUMN max_characters INTEGER", []);
         let _ = self.conn.execute("ALTER TABLE objects ADD COLUMN owner_ref TEXT", []);
+        let _ = self.conn.execute("ALTER TABLE objects ADD COLUMN archetype_ref TEXT", []);
 
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS scheduled_hooks (
@@ -331,7 +332,7 @@ impl Database {
 
         {
             let mut obj_stmt = tx.prepare(
-                "INSERT INTO objects (ref_id, key, kind, title, description, location_ref, target_ref, attrs_json, aliases_json, script_json, libs_json, locks_json, id, owner_ref) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                "INSERT INTO objects (ref_id, key, kind, title, description, location_ref, target_ref, attrs_json, aliases_json, script_json, libs_json, locks_json, id, owner_ref, archetype_ref) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             )?;
             let mut tag_stmt = tx.prepare(
                 "INSERT INTO tags (object_ref, category, key) VALUES (?1, ?2, ?3)",
@@ -363,6 +364,7 @@ impl Database {
                     locks_json,
                     obj.id,
                     obj.owner_ref,
+                    obj.archetype_ref,
                 ])?;
                 for tag in &obj.tags {
                     tag_stmt.execute(params![obj.ref_id, tag.category, tag.key])?;
@@ -394,7 +396,7 @@ impl Database {
 
         {
             let mut obj_stmt = tx.prepare(
-                "INSERT OR REPLACE INTO objects (ref_id, key, kind, title, description, location_ref, target_ref, attrs_json, aliases_json, script_json, libs_json, locks_json, id, owner_ref) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                "INSERT OR REPLACE INTO objects (ref_id, key, kind, title, description, location_ref, target_ref, attrs_json, aliases_json, script_json, libs_json, locks_json, id, owner_ref, archetype_ref) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             )?;
             let mut tag_del = tx.prepare("DELETE FROM tags WHERE object_ref = ?1")?;
             let mut tag_stmt = tx.prepare(
@@ -436,6 +438,7 @@ impl Database {
                     locks_json,
                     obj.id,
                     obj.owner_ref,
+                    obj.archetype_ref,
                 ])?;
                 for tag in &obj.tags {
                     tag_stmt.execute(params![obj.ref_id, tag.category, tag.key])?;
@@ -450,7 +453,7 @@ impl Database {
         let mut world = World::new();
 
         let mut obj_stmt = self.conn.prepare(
-            "SELECT ref_id, key, kind, title, description, location_ref, target_ref, attrs_json, aliases_json, script_json, libs_json, locks_json, id, owner_ref FROM objects",
+            "SELECT ref_id, key, kind, title, description, location_ref, target_ref, attrs_json, aliases_json, script_json, libs_json, locks_json, id, owner_ref, archetype_ref FROM objects",
         )?;
         let obj_rows = obj_stmt.query_map([], |row| {
             let ref_id: String = row.get(0)?;
@@ -467,17 +470,18 @@ impl Database {
             let locks_json: String = row.get(11)?;
             let id: String = row.get(12)?;
             let owner_ref: Option<String> = row.get(13)?;
+            let archetype_ref: Option<String> = row.get(14)?;
             Ok((
                 ref_id, key, kind_str, title, description, location_ref,
                 target_ref, attrs_json, aliases_json, script_json, libs_json, locks_json, id,
-                owner_ref,
+                owner_ref, archetype_ref,
             ))
         })?;
 
         for row in obj_rows {
             let (ref_id, key, kind_str, title, description, location_ref,
                 target_ref, attrs_json, aliases_json, script_json, libs_json, locks_json, id,
-                owner_ref) = row?;
+                owner_ref, archetype_ref) = row?;
             let kind = match kind_str.as_str() {
                 "room" => Kind::Room,
                 "item" => Kind::Item,
@@ -507,7 +511,7 @@ impl Database {
                 location_ref,
                 owner_ref,
                 target_ref,
-                archetype_ref: None,
+                archetype_ref,
                 attrs,
                 tags: HashSet::new(),
                 aliases,
@@ -817,6 +821,33 @@ mod tests {
         let gem = loaded.get(&gem_ref).unwrap();
         assert!(hooks::object_defines_hook(gem, "on_get"));
         assert!(gem.script.as_ref().unwrap().source.contains("Sparkle!"));
+    }
+
+    #[test]
+    fn world_round_trip_archetype_ref() {
+        // An instance's archetype_ref must survive a checkpoint — otherwise
+        // every instance becomes standalone (losing inherited title/attrs/
+        // hooks) on the next restart. Regression for the persistence gap.
+        let db = temp_db();
+        let mut world = World::new();
+
+        let arch_ref = world.next_dbref();
+        world.add_object(GameObject::new(&arch_ref, "goblin", Kind::Npc).with_title("Goblin"));
+        let inst_ref = world.next_dbref();
+        let mut inst = GameObject::new(&inst_ref, "grunt", Kind::Npc);
+        inst.archetype_ref = Some(arch_ref.clone());
+        world.add_object(inst);
+
+        db.save_world(&world).unwrap();
+        let loaded = db.load_world().unwrap();
+
+        assert_eq!(
+            loaded.get(&inst_ref).unwrap().archetype_ref.as_deref(),
+            Some(arch_ref.as_str()),
+            "archetype_ref must round-trip through save/load"
+        );
+        // And the archetype with none stays None.
+        assert_eq!(loaded.get(&arch_ref).unwrap().archetype_ref, None);
     }
 
     #[test]

@@ -40,6 +40,11 @@ instance; instances override per-field, copy-on-write.
 | the script (behavior) | `state` (this instance's memory) |
 | default title, description, base attrs, tags | position, HP, per-field overrides |
 
+Title/description/attrs resolve copy-on-write (instance value wins if set,
+else the archetype's); tags resolve as a **union** (instance's own plus every
+ancestor's) since there's no single "value" for a tag to override — see
+Decision 3.
+
 This mirrors the object-script `source` (shared) vs `state` (per-object) split
 one layer up: **program shared, object-variables per-clone** (LP), **member
 vars per-node** (Godot). `state` is *never* resolved from the archetype — it is
@@ -53,11 +58,28 @@ always the instance's own.
 2. **Copy-on-write per field, uniformly** — title, description, attrs, script:
    instance value if set, else the archetype's. One rule, no special cases.
    `state` is always per-instance (not an exception — a different axis).
-3. **Refuse to delete an archetype while instances exist** (or offer
-   `--cascade`). Orphaned instances that silently lose behavior are a
-   three-sessions-later bug. Fail loud at delete time, matching the
-   `system:managed` reconciliation instinct.
-4. **Single parent, depth allowed.** One `archetype_ref` per object (never
+3. **Tags are the one field that doesn't fit the copy-on-write shape —
+   they union instead.** A tag isn't a single value with an instance-vs-
+   archetype winner; `resolved_tags(obj)` is the instance's own tags plus
+   every ancestor's, unioned up the chain (same walk as `resolved_attrs`).
+   This is additive-only for Stage 1: there is no per-instance "clear an
+   inherited tag" yet (that's `clear_attr`'s sibling, deliberately deferred to
+   Stage 2 alongside it — see Stage 2+ below). Every tag-reading call site
+   (`has_tag`, the `is_*` predicates, `system:hidden`/`can_see` visibility,
+   `system:global` command dispatch and the `globals_by_hook` index) resolves
+   through this union, not the raw field.
+4. **Refuse to delete an archetype while instances exist, unless `--cascade` —
+   and `--cascade` means flatten-then-delete, never delete-and-orphan.**
+   Orphaned instances that silently lose behavior are a three-sessions-later
+   bug; that's true whether the orphaning is silent (no guard) or the result
+   of an opt-in cascade that doesn't clean up after itself. So cascade
+   detaches (flattens) every live instance — same mechanism as `clone`/
+   `detach`: resolved title/description/attrs/tags/script copied down,
+   `archetype_ref` cleared — *before* the archetype they depended on is
+   actually removed. Fail loud at delete time by default, matching the
+   `system:managed` reconciliation instinct; cascade is the loud, deliberate
+   opt-out, not a quieter way to lose behavior.
+5. **Single parent, depth allowed.** One `archetype_ref` per object (never
    multiple — no MI). The chain may be deep; a per-hook walk up a single parent
    line is unambiguous, so `goblin_chief → goblin → monster` is fine. (This
    reverses an earlier "one level only" caution — that fear was class-MRO
@@ -94,15 +116,26 @@ site (fire_hook, tick loop, lifecycle, cmd resolution, can_see/on_look/on_say
 fast-paths, globals index) routes through these, so this is the bulk of the
 change and it's localized.
 
-**2. Field delegation, copy-on-write.** Reading `title`, `description`, and any
-`attr` resolves instance-first, then up the chain; `state` never delegates
-(always the instance's own). Implement one resolver used by both the engine
-reads and the Lua `this`/object snapshot. (Option to evaluate: point the Lua
-object table's metatable `__index` up the chain so in-script `this.max_hp`
-delegates for free — the native Lua mechanism — rather than resolving in Rust.)
-Writing an attr on an instance sets it on the instance (the override); a future
-`clear_attr` reverts it to inheriting (MOO `clear_property`) — clear can be
-stage 1b.
+**2. Field delegation, copy-on-write (plus tags, unioned).** Reading `title`,
+`description`, and any `attr` resolves instance-first, then up the chain;
+`state` never delegates (always the instance's own). Tags resolve as a
+**union** of the instance's own and every ancestor's (Decision 3) — additive
+only, no instance-side clear yet. Implement resolvers used by both the engine
+reads and the Lua `this`/object snapshot — every attr-reading Luau function
+(`get_attr`, `has_attr`, `pick`, `find_by_attr`) and every tag-reading one
+(`has_tag`, `get_tags`, the `is_*` predicates) goes through them, not just
+property syntax. (Option to evaluate: point the Lua object table's metatable
+`__index` up the chain so in-script `this.max_hp` delegates for free — the
+native Lua mechanism — rather than resolving in Rust.) Writing an attr on an
+instance sets it on the instance (the override); a future `clear_attr` reverts
+it to inheriting (MOO `clear_property`) — clear can be stage 1b.
+
+`set_val` (the nested-path attr writer) needs copy-on-write at the *whole
+value* level, not just the leaf: if the target attr isn't set on the instance
+itself but resolves from an archetype, start the write from the full resolved
+value, edit the leaf, then write the whole thing back onto the instance — an
+edit that started from just the leaf would silently drop every untouched
+sibling in the inherited object.
 
 **3. Spawn + clone.**
 - `spawn({ archetype = "<ref-or-key>", ... })` → instance with `archetype_ref`
@@ -114,8 +147,10 @@ stage 1b.
 
 **4. Guards.**
 - Refuse setting `archetype_ref` to self or any descendant (cycle prevention).
-- Refuse `destroy` of an object that has live instances, unless `--cascade`
-  (orphaned instances silently losing behavior is the three-sessions-later bug).
+- Refuse `destroy` of an object that has live instances, unless `--cascade` —
+  and `--cascade` flattens (detaches) every instance first, then deletes.
+  Orphaning with a dangling `archetype_ref` is never an option, opted-in or
+  not (see Decision 4).
 
 **5. Proof.** Convert the dungeon monsters (goblin/skeleton/etc. in
 `src/dungeon.rs` / the encounter tables) from inline attr-stamping to

@@ -123,7 +123,7 @@ pub fn object_to_value(
     proxy_mt: Option<&Table>,
 ) -> mlua::Result<Value> {
     match world.get(ref_id) {
-        Some(obj) => Ok(Value::Table(object_to_table(lua, obj, proxy_mt)?)),
+        Some(obj) => Ok(Value::Table(object_to_table(lua, world, obj, proxy_mt)?)),
         None => Ok(Value::Nil),
     }
 }
@@ -142,6 +142,7 @@ const OBJECT_FIELDS: &[&str] = &[
     "description",
     "location_ref",
     "owner_ref",
+    "archetype_ref",
     "attrs",
     "tags",
 ];
@@ -155,7 +156,12 @@ const PROTECTED_FIELDS: &[(&str, &str)] = &[
     ("location_ref", "read-only — use move_object(ref, destination)"),
 ];
 
-fn object_to_table(lua: &Lua, obj: &GameObject, proxy_mt: Option<&Table>) -> mlua::Result<Table> {
+fn object_to_table(
+    lua: &Lua,
+    world: &World,
+    obj: &GameObject,
+    proxy_mt: Option<&Table>,
+) -> mlua::Result<Table> {
     if let Some(mt) = proxy_mt {
         // Hook-facing proxy: an empty table whose reads/writes resolve through
         // the shared metatable's __index/__newindex against the live batch.
@@ -170,20 +176,27 @@ fn object_to_table(lua: &Lua, obj: &GameObject, proxy_mt: Option<&Table>) -> mlu
     t.set("ref_id", obj.ref_id.clone())?;
     t.set("key", obj.key.clone())?;
     t.set("kind", obj.kind.to_string())?;
-    t.set("title", obj.title.clone())?;
-    t.set("display_name", obj.display_name().to_string())?;
-    t.set("description", obj.description.clone())?;
+    // Instance-first, then up the archetype chain — see
+    // docs/plans/archetypes.md. Plain (non-proxy) snapshots are used by list
+    // results (all_objects, get_room_contents, ...), so they get the same
+    // delegation the hook-facing proxy's __index does.
+    t.set("title", world.resolved_title(obj))?;
+    t.set("display_name", world.display_name(obj))?;
+    t.set("description", world.resolved_description(obj))?;
     t.set("location_ref", obj.location_ref.clone())?;
     t.set("owner_ref", obj.owner_ref.clone())?;
+    t.set("archetype_ref", obj.archetype_ref.clone())?;
 
     let attrs = lua.create_table()?;
-    for (k, v) in &obj.attrs {
-        attrs.set(k.clone(), lua.to_value(v)?)?;
+    for (k, v) in world.resolved_attrs(obj) {
+        attrs.set(k, lua.to_value(&v)?)?;
     }
     t.set("attrs", attrs)?;
 
+    // Union with the archetype chain — tags are additive-only (no per-
+    // instance clear in Stage 1, see docs/plans/archetypes.md).
     let tags = lua.create_table()?;
-    for (i, tag) in obj.tags.iter().enumerate() {
+    for (i, tag) in world.resolved_tags(obj).iter().enumerate() {
         tags.set(i + 1, tag.as_spec())?;
     }
     t.set("tags", tags)?;
@@ -225,7 +238,12 @@ fn resolve_attr<'a>(
     match batch.pending_attr(target, key) {
         Some(Some(v)) => Some(v),
         Some(None) => None, // pending unset
-        None => world.get(target).and_then(|o| o.attrs.get(key)),
+        // Instance-first, then up the archetype chain (World::resolved_attr)
+        // — see docs/plans/archetypes.md. A pending write on the instance
+        // always wins (handled above); an unwritten attr falls through to
+        // whichever object in the chain — instance or ancestor — actually
+        // has it.
+        None => world.get(target).and_then(|o| world.resolved_attr(o, key)),
     }
 }
 
@@ -246,15 +264,18 @@ fn object_pairs_state(lua: &Lua, world: &World, r: &str) -> mlua::Result<Table> 
                     let s = o.kind.to_string();
                     Some(Value::String(lua.create_string(s.as_str())?))
                 }
-                "title" => match &o.title {
+                // Instance-first, then the archetype chain — see
+                // docs/plans/archetypes.md.
+                "title" => match world.resolved_title(o) {
                     Some(t) => Some(Value::String(lua.create_string(t.as_str())?)),
                     None => None,
                 },
                 "display_name" => {
-                    Some(Value::String(lua.create_string(o.display_name())?))
+                    Some(Value::String(lua.create_string(world.display_name(o))?))
                 }
                 "description" => {
-                    Some(Value::String(lua.create_string(o.description.as_str())?))
+                    let d = world.resolved_description(o);
+                    Some(Value::String(lua.create_string(d.as_str())?))
                 }
                 "location_ref" => match &o.location_ref {
                     Some(l) => Some(Value::String(lua.create_string(l.as_str())?)),
@@ -264,17 +285,23 @@ fn object_pairs_state(lua: &Lua, world: &World, r: &str) -> mlua::Result<Table> 
                     Some(l) => Some(Value::String(lua.create_string(l.as_str())?)),
                     None => None,
                 },
+                "archetype_ref" => match &o.archetype_ref {
+                    Some(l) => Some(Value::String(lua.create_string(l.as_str())?)),
+                    None => None,
+                },
                 "tags" => {
                     let out = lua.create_table()?;
-                    for (j, tag) in o.tags.iter().enumerate() {
+                    for (j, tag) in world.resolved_tags(o).iter().enumerate() {
                         out.set(j + 1, tag.as_spec())?;
                     }
                     Some(Value::Table(out))
                 }
                 _ => {
+                    // "attrs" — merged with the archetype chain, instance
+                    // wins per key (World::resolved_attrs).
                     let out = lua.create_table()?;
-                    for (k, av) in &o.attrs {
-                        out.set(k.as_str(), lua.to_value(av)?)?;
+                    for (k, av) in world.resolved_attrs(o) {
+                        out.set(k, lua.to_value(&av)?)?;
                     }
                     Some(Value::Table(out))
                 }
@@ -293,15 +320,17 @@ fn object_pairs_state(lua: &Lua, world: &World, r: &str) -> mlua::Result<Table> 
     Ok(state)
 }
 
-/// Same shape for the `attrs` sub-proxy: snapshot attr keys/values.
+/// Same shape for the `attrs` sub-proxy: snapshot attr keys/values, merged
+/// with the archetype chain (instance wins per key — see
+/// `World::resolved_attrs`).
 fn attrs_pairs_state(lua: &Lua, world: &World, r: &str) -> mlua::Result<Table> {
     let state = lua.create_table()?;
     let mut i = 0i64;
     if let Some(o) = world.get(r) {
-        for (k, v) in &o.attrs {
+        for (k, v) in world.resolved_attrs(o) {
             i += 1;
             state.raw_set(i, k.clone())?;
-            state.raw_set(format!("v{}", i), lua.to_value(v)?)?;
+            state.raw_set(format!("v{}", i), lua.to_value(&v)?)?;
             state.raw_set(format!("p_{}", k), i).ok();
         }
     }
@@ -454,7 +483,7 @@ pub fn install<'scope, 'env>(
                     "tags" => {
                         let out = lua.create_table()?;
                         if let Some(o) = world.get(&r) {
-                            for (i, tag) in o.tags.iter().enumerate() {
+                            for (i, tag) in world.resolved_tags(o).iter().enumerate() {
                                 out.set(i + 1, tag.as_spec())?;
                             }
                         }
@@ -465,7 +494,11 @@ pub fn install<'scope, 'env>(
                 if !OBJECT_FIELDS.contains(&key.as_str()) {
                     return Ok(Value::Nil);
                 }
-                // Pending-aware fields first (read-your-writes), then snapshot.
+                // Pending-aware fields first (read-your-writes), then
+                // snapshot — falling through the archetype chain
+                // (World::resolved_title/resolved_description) when the
+                // instance itself has neither pending nor its own value. See
+                // docs/plans/archetypes.md.
                 match key.as_str() {
                     "title" | "description" => {
                         let pending = b.borrow();
@@ -476,8 +509,8 @@ pub fn install<'scope, 'env>(
                         drop(pending);
                         let v = owned.or_else(|| {
                             world.get(&r).and_then(|o| match key.as_str() {
-                                "title" => o.title.clone(),
-                                _ => Some(o.description.clone()),
+                                "title" => world.resolved_title(o),
+                                _ => Some(world.resolved_description(o)),
                             })
                         });
                         Ok(match v {
@@ -486,13 +519,14 @@ pub fn install<'scope, 'env>(
                         })
                     }
                     "display_name" => Ok(match world.get(&r) {
-                        Some(o) => Value::String(lua.create_string(o.display_name())?),
+                        Some(o) => Value::String(lua.create_string(world.display_name(o))?),
                         None => Value::Nil,
                     }),
-                    "location_ref" | "owner_ref" => {
+                    "location_ref" | "owner_ref" | "archetype_ref" => {
                         let v = world.get(&r).and_then(|o| match key.as_str() {
                             "location_ref" => o.location_ref.clone(),
-                            _ => o.owner_ref.clone(),
+                            "owner_ref" => o.owner_ref.clone(),
+                            _ => o.archetype_ref.clone(),
                         });
                         Ok(match v {
                             Some(s) => Value::String(lua.create_string(s)?),
@@ -624,10 +658,11 @@ pub fn install<'scope, 'env>(
             if let Some(pending) = b.borrow().pending_attr(&r, &key) {
                 return Ok(pending.is_some());
             }
+            // Instance-first, then up the archetype chain — see
+            // docs/plans/archetypes.md.
             Ok(world
                 .get(&r)
-                .map(|o| o.attrs.contains_key(&key))
-                .unwrap_or(false))
+                .is_some_and(|o| world.resolved_attr(o, &key).is_some()))
         })?,
     )?;
 
@@ -652,7 +687,8 @@ pub fn install<'scope, 'env>(
                     None => return Ok(Value::Nil),
                 }
             } else {
-                match world.get(&r).and_then(|o| o.attrs.get(&attr_key)) {
+                // Instance-first, then up the archetype chain.
+                match world.get(&r).and_then(|o| world.resolved_attr(o, &attr_key)) {
                     Some(v) => root_val = v.clone(),
                     None => return Ok(Value::Nil),
                 }
@@ -707,9 +743,16 @@ pub fn install<'scope, 'env>(
                 }
             }
 
+            // Copy-on-write: if `attr_key` isn't set on the instance itself
+            // but resolves from an archetype, start from the FULL resolved
+            // value (not just the leaf being edited) so the write-back below
+            // doesn't drop the rest of the inherited object — see
+            // docs/plans/archetypes.md. `resolved_attr` already does
+            // instance-first-then-chain, so this one call covers both the
+            // "own value" and "inherited value" cases.
             let mut root: serde_json::Value = world
                 .get(&target)
-                .and_then(|o| o.attrs.get(&attr_key).cloned())
+                .and_then(|o| world.resolved_attr(o, &attr_key).cloned())
                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
 
             // Walk to the leaf and set the value using a pointer built from path
@@ -729,7 +772,10 @@ pub fn install<'scope, 'env>(
         scope.create_function(move |_, (r, spec): (Value, String)| {
             let r = ref_of(&r)?;
             let tag = parse_tag(&spec)?;
-            Ok(world.get(&r).map(|o| o.tags.contains(&tag)).unwrap_or(false))
+            // Instance-first, then up the archetype chain.
+            Ok(world
+                .get(&r)
+                .is_some_and(|o| world.resolved_tags(o).contains(&tag)))
         })?,
     )?;
 
@@ -739,7 +785,7 @@ pub fn install<'scope, 'env>(
             let r = ref_of(&r)?;
             let out = lua.create_table()?;
             if let Some(obj) = world.get(&r) {
-                for (i, tag) in obj.tags.iter().enumerate() {
+                for (i, tag) in world.resolved_tags(obj).iter().enumerate() {
                     out.set(i + 1, tag.as_spec())?;
                 }
             }
@@ -753,7 +799,7 @@ pub fn install<'scope, 'env>(
             let r = ref_of(&r)?;
             let out = lua.create_table()?;
             for (i, obj) in world.objects_in(&r).into_iter().enumerate() {
-                out.set(i + 1, object_to_table(lua, obj, None)?)?;
+                out.set(i + 1, object_to_table(lua, world, obj, None)?)?;
             }
             Ok(out)
         })?,
@@ -798,8 +844,11 @@ pub fn install<'scope, 'env>(
             let out = lua.create_table()?;
             let mut i = 1;
             for obj in world.objects.values() {
-                if obj.tags.contains(&tag) {
-                    out.set(i, object_to_table(lua, obj, None)?)?;
+                // Resolve up the archetype chain — an instance that inherits
+                // the tag from its archetype is still found, matching has_tag
+                // and the object snapshot.
+                if world.resolved_tags(obj).contains(&tag) {
+                    out.set(i, object_to_table(lua, world, obj, None)?)?;
                     i += 1;
                 }
             }
@@ -814,8 +863,11 @@ pub fn install<'scope, 'env>(
             let out = lua.create_table()?;
             let mut i = 1;
             for obj in world.objects.values() {
-                if obj.attrs.get(&key).is_some_and(|v| *v == target) {
-                    out.set(i, object_to_table(lua, obj, None)?)?;
+                // Instance-first, then up the archetype chain — an instance
+                // that inherits the matching attr from its archetype is
+                // still found.
+                if world.resolved_attr(obj, &key).is_some_and(|v| *v == target) {
+                    out.set(i, object_to_table(lua, world, obj, None)?)?;
                     i += 1;
                 }
             }
@@ -831,7 +883,7 @@ pub fn install<'scope, 'env>(
             let lower = name.to_lowercase();
             for obj in world.objects_in(&room) {
                 if obj.key.to_lowercase().contains(&lower)
-                    || obj.display_name().to_lowercase().contains(&lower)
+                    || world.display_name(obj).to_lowercase().contains(&lower)
                 {
                     return object_to_value(lua, world, &obj.ref_id, Some(&find_mt));
                 }
@@ -848,7 +900,7 @@ pub fn install<'scope, 'env>(
             let mut i = 1;
             for obj in world.objects_in(&r) {
                 if obj.kind == Kind::Item {
-                    out.set(i, object_to_table(lua, obj, None)?)?;
+                    out.set(i, object_to_table(lua, world, obj, None)?)?;
                     i += 1;
                 }
             }
@@ -865,7 +917,7 @@ pub fn install<'scope, 'env>(
             let mut i = 1;
             for obj in world.objects_in(&r) {
                 if obj.kind == Kind::Player && !obj.tags.contains(&offline) {
-                    out.set(i, object_to_table(lua, obj, None)?)?;
+                    out.set(i, object_to_table(lua, world, obj, None)?)?;
                     i += 1;
                 }
             }
@@ -883,7 +935,7 @@ pub fn install<'scope, 'env>(
             let mut i = 1;
             for obj in world.objects.values() {
                 if obj.kind == kind {
-                    out.set(i, object_to_table(lua, obj, None)?)?;
+                    out.set(i, object_to_table(lua, world, obj, None)?)?;
                     i += 1;
                 }
             }
@@ -957,7 +1009,10 @@ pub fn install<'scope, 'env>(
         scope.create_function(move |_, (actor, item_tag): (Value, String)| {
             let actor_ref = ref_of(&actor)?;
             let tag = parse_tag(&item_tag)?;
-            Ok(world.objects_in(&actor_ref).iter().any(|o| o.tags.contains(&tag)))
+            Ok(world
+                .objects_in(&actor_ref)
+                .iter()
+                .any(|o| world.resolved_tags(o).contains(&tag)))
         })?,
     )?;
 
@@ -982,8 +1037,7 @@ pub fn install<'scope, 'env>(
             };
             Ok(world
                 .get(&r)
-                .map(|o| o.tags.contains(&container_tag))
-                .unwrap_or(false))
+                .is_some_and(|o| world.resolved_tags(o).contains(&container_tag)))
         })?,
     )?;
 
@@ -995,7 +1049,7 @@ pub fn install<'scope, 'env>(
             let mut i = 1;
             for obj in world.objects_in(&r) {
                 if obj.kind == Kind::Item {
-                    out.set(i, object_to_table(lua, obj, None)?)?;
+                    out.set(i, object_to_table(lua, world, obj, None)?)?;
                     i += 1;
                 }
             }
@@ -1200,7 +1254,7 @@ pub fn install<'scope, 'env>(
                 let dx = ox - x;
                 let dy = oy - y;
                 if dx * dx + dy * dy <= r2 {
-                    out.set(i, object_to_table(lua, obj, None)?)?;
+                    out.set(i, object_to_table(lua, world, obj, None)?)?;
                     i += 1;
                 }
             }
@@ -1251,7 +1305,7 @@ pub fn install<'scope, 'env>(
                 entry.set("ref", ref_id.clone())?;
                 entry.set("distance", *dist)?;
                 if let Some(obj) = world.get(ref_id) {
-                    entry.set("name", obj.display_name().to_string())?;
+                    entry.set("name", world.display_name(obj))?;
                 }
                 out.set(i + 1, entry)?;
             }
@@ -1355,6 +1409,42 @@ pub fn install<'scope, 'env>(
                 Some(v) => Some(ref_of(&v)?),
             };
 
+            // Archetype: a dbref (`"#12"`), an object table, or a file key
+            // (`"town/goblin"`) resolved the same way `resolve_key()` does —
+            // "both" per docs/plans/archetypes.md's open question.
+            let archetype: Option<Value> = opts.get("archetype").ok();
+            let archetype = match archetype {
+                Some(Value::Nil) | None => None,
+                Some(v @ Value::Table(_)) => Some(ref_of(&v)?),
+                Some(Value::String(s)) => {
+                    let s = s.to_str()?.to_string();
+                    if s.starts_with('#') {
+                        Some(s)
+                    } else {
+                        Some(crate::loader::resolve_file_key(world, &s).ok_or_else(|| {
+                            mlua::Error::RuntimeError(format!(
+                                "spawn: no archetype '{}'",
+                                s
+                            ))
+                        })?)
+                    }
+                }
+                Some(other) => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "spawn: 'archetype' must be a ref, key, or object, got {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            if let Some(a) = &archetype
+                && world.get(a).is_none()
+            {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "spawn: no archetype '{}'",
+                    a
+                )));
+            }
+
             b.borrow_mut().push(Intent::Spawn {
                 ref_id: ref_id.clone(),
                 key,
@@ -1363,6 +1453,7 @@ pub fn install<'scope, 'env>(
                 description,
                 location,
                 owner,
+                archetype,
             });
             Ok(ref_id)
         })?,
@@ -1394,8 +1485,22 @@ pub fn install<'scope, 'env>(
         "destroy",
         scope.create_function(move |_, r: Value| {
             let target = ref_of(&r)?;
-            b.borrow_mut().push(Intent::Destroy { target });
+            // Scripted destroy never cascades — an archetype with live
+            // instances refuses (see apply_to's Destroy handling). Cascading
+            // deletion is a deliberate, out-of-band admin action in Stage 1,
+            // not something a hook can trigger in passing.
+            b.borrow_mut().push(Intent::Destroy { target, cascade: false });
             Ok(())
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
+        "clone",
+        scope.create_function(move |_, r: Value| {
+            let target = ref_of(&r)?;
+            b.borrow_mut().push(Intent::Detach { target: target.clone() });
+            Ok(target)
         })?,
     )?;
 
@@ -1653,7 +1758,7 @@ pub fn install<'scope, 'env>(
                 .collect();
 
             for target in refs_to_destroy.into_iter().chain(exit_refs) {
-                b.borrow_mut().push(Intent::Destroy { target });
+                b.borrow_mut().push(Intent::Destroy { target, cascade: false });
             }
             Ok(())
         })?,

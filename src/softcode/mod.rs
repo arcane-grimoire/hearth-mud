@@ -75,6 +75,10 @@ pub enum Intent {
         description: Option<String>,
         location: String,
         owner: Option<String>,
+        /// The archetype (blueprint) this instance delegates to, already
+        /// resolved to a dbref — see docs/plans/archetypes.md Stage 1. `None`
+        /// spawns a standalone object, same as before archetypes existed.
+        archetype: Option<String>,
     },
     SetTitle {
         target: String,
@@ -85,6 +89,21 @@ pub enum Intent {
         description: String,
     },
     Destroy {
+        target: String,
+        /// Delete even if other objects have `archetype_ref` pointing at this
+        /// one. Default `false` — see [`apply_to`]'s `Destroy` handling: an
+        /// archetype with live instances refuses to delete unless this is
+        /// set, so orphaning them (silently losing behavior) is a loud,
+        /// opt-in choice rather than a three-sessions-later bug.
+        cascade: bool,
+    },
+    /// Flatten an instance in place: copy its *resolved* title, description,
+    /// attrs, and (if it has none of its own) its nearest archetype
+    /// ancestor's script onto the object, then clear `archetype_ref`. The
+    /// `clone`/`detach` escape hatch from docs/plans/archetypes.md Stage 1 —
+    /// delegation stays the default; this is the loud opt-out. `state` is
+    /// untouched (it was always the instance's own).
+    Detach {
         target: String,
     },
     CreateExit {
@@ -364,6 +383,51 @@ fn refuse(verb: &str, target: &str) -> String {
     format!("{}: permission denied on '{}'", verb, target)
 }
 
+/// Flatten `target` in place: copy its *resolved* title, description, attrs,
+/// and tags onto the object, plus (if it has none of its own) its nearest
+/// archetype ancestor's script, then clear `archetype_ref`. A no-op if
+/// `target` isn't an instance (no `archetype_ref` set).
+///
+/// The shared mechanism behind two callers: `Intent::Detach` (the scripted
+/// `clone()`/`detach()` escape hatch) and cascade-delete (`Intent::Destroy`
+/// with `cascade: true`, which flattens every live instance *before*
+/// removing the archetype they depend on, so cascading never orphans
+/// anything — see docs/plans/archetypes.md).
+pub(crate) fn detach_object(world: &mut World, target: &str) -> Result<(), String> {
+    let obj = world
+        .get(target)
+        .ok_or_else(|| format!("clone: no object '{}'", target))?
+        .clone();
+    if obj.archetype_ref.is_none() {
+        return Ok(());
+    }
+    let title = world.resolved_title(&obj);
+    let description = world.resolved_description(&obj);
+    let attrs = world.resolved_attrs(&obj);
+    let tags = world.resolved_tags(&obj);
+    // Flatten the WHOLE resolved behavior — the instance's own script plus
+    // every ancestor's, own/nearest winning — into one source, so a partial
+    // override (a local hook alongside inherited ones) keeps ALL its hooks
+    // after detaching, not just the locally-defined ones. See
+    // `hooks::flattened_chain_source`.
+    let flattened = hooks::flattened_chain_source(world, &obj);
+    let target_obj = world
+        .get_mut(target)
+        .ok_or_else(|| format!("clone: no object '{}'", target))?;
+    target_obj.title = title;
+    target_obj.description = description;
+    target_obj.attrs = attrs;
+    target_obj.tags = tags;
+    if let Some(source) = flattened {
+        // `set_script_with_origin` re-derives the hook index and PRESERVES the
+        // instance's own `state` (never the ancestor's — state doesn't
+        // delegate), which is exactly what a detach wants.
+        hooks::set_script_with_origin(target_obj, source, hooks::ProgramOrigin::InGame);
+    }
+    target_obj.archetype_ref = None;
+    Ok(())
+}
+
 /// Whether `authority` is already at its object ceiling. Counts on demand
 /// rather than caching: creation is rare next to reads, and a stale cache
 /// here would be a worse bug than the scan is a cost.
@@ -566,6 +630,7 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 description,
                 location,
                 owner,
+                archetype,
             } => {
                 if at_object_quota(world, authority) {
                     return Err(format!(
@@ -588,6 +653,22 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                     // invariant unconditional.
                     return Err("spawn: cannot spawn kind 'code'".into());
                 }
+                if let Some(a) = archetype {
+                    if world.get(a).is_none() {
+                        return Err(format!("spawn: no archetype '{}'", a));
+                    }
+                    // A freshly minted `ref_id` can never already be part of
+                    // an existing chain, so this is defense in depth today —
+                    // it earns its keep the moment anything besides Spawn can
+                    // set `archetype_ref` (Stage 1 has no reparent operation;
+                    // `clone`/`detach` only ever clears it).
+                    if world.would_cycle_archetype(ref_id, a) {
+                        return Err(format!(
+                            "spawn: archetype '{}' would create a cycle",
+                            a
+                        ));
+                    }
+                }
                 let mut obj = GameObject::new(ref_id.clone(), key.clone(), kind.clone())
                     .with_location(location.clone());
                 if let Some(t) = title {
@@ -599,7 +680,19 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 if let Some(o) = owner {
                     obj = obj.with_owner(o.clone());
                 }
+                obj.archetype_ref = archetype.clone();
                 world.add_object(obj);
+                // Constructor seam: an archetype's on_create (or the
+                // instance's own, if it somehow already has a script) fires
+                // on the new instance, same as CreateExit below. Delivered as
+                // an Effect (not run inline) so it goes through the normal
+                // fire_hook path — including archetype hook resolution — once
+                // this whole batch has actually committed.
+                effects.push(Effect::TriggerHook {
+                    target: ref_id.clone(),
+                    hook: "on_create".to_string(),
+                    data: None,
+                });
             }
             Intent::SetTitle { target, title } => {
                 if !may_modify(world, authority, target) {
@@ -619,7 +712,7 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                     .ok_or_else(|| format!("set_description: no object '{}'", target))?;
                 obj.description = description.clone();
             }
-            Intent::Destroy { target } => {
+            Intent::Destroy { target, cascade } => {
                 if !may_modify(world, authority, target) {
                     return Err(refuse("destroy", target));
                 }
@@ -628,10 +721,44 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                         return Err("destroy: cannot destroy player objects".into());
                     }
                     Some(_) => {
+                        let instances: Vec<String> = world
+                            .objects
+                            .values()
+                            .filter(|o| o.archetype_ref.as_deref() == Some(target.as_str()))
+                            .map(|o| o.ref_id.clone())
+                            .collect();
+                        if !instances.is_empty() {
+                            // Refuse to delete an archetype out from under its
+                            // instances by default — an orphaned
+                            // `archetype_ref` (silently losing behavior) is a
+                            // three-sessions-later bug, not an error anyone
+                            // would notice at delete time.
+                            if !cascade {
+                                return Err(format!(
+                                    "destroy: '{}' is an archetype with live instances — pass cascade to delete anyway",
+                                    target
+                                ));
+                            }
+                            // `cascade` means "detach then delete", never
+                            // "delete and orphan": flatten every instance
+                            // (copy its resolved fields/script down, clear
+                            // archetype_ref) *before* the archetype it
+                            // depends on is removed, so none of them lose
+                            // behavior.
+                            for instance_ref in &instances {
+                                detach_object(world, instance_ref)?;
+                            }
+                        }
                         world.remove_object(target);
                     }
                     None => return Err(format!("destroy: no object '{}'", target)),
                 }
+            }
+            Intent::Detach { target } => {
+                if !may_modify(world, authority, target) {
+                    return Err(refuse("clone", target));
+                }
+                detach_object(world, target)?;
             }
             Intent::CreateExit { ref_id, source, direction, target, aliases } => {
                 if at_object_quota(world, authority) {
@@ -2389,7 +2516,11 @@ mod tests {
             .unwrap();
 
         let effects = apply_batch(&mut world, &result.batch).unwrap();
-        assert_eq!(effects.len(), 1);
+        // The `emit` plus the on_create constructor trigger every Spawn now
+        // queues (see docs/plans/archetypes.md's "constructor seam") — the
+        // imp has no script so that trigger is a no-op, but the effect is
+        // still queued for delivery.
+        assert_eq!(effects.len(), 2);
         let imp = world
             .objects
             .values()
@@ -2609,6 +2740,220 @@ mod tests {
         "##);
         let mut w = world.clone();
         assert!(apply_batch(&mut w, &result.batch).is_err());
+    }
+
+    // -- Archetype (is-a) — docs/plans/archetypes.md Stage 1 --
+
+    /// `Intent::Spawn`'s `archetype` sets `archetype_ref` on the new
+    /// instance, and queues the constructor-seam `on_create` trigger exactly
+    /// like `CreateExit` already does — see the "Constructor seam" comment
+    /// in `apply_to`'s `Spawn` arm. (Whether the archetype's `on_create`
+    /// actually *runs* bound to the instance is the engine's job — see
+    /// `engine::tests::archetype_instance_inherits_hook_fires_bound_to_instance`.)
+    #[test]
+    fn spawn_with_archetype_sets_archetype_ref_and_queues_on_create() {
+        let mut world = test_world();
+        let archetype_ref = "#7".to_string(); // the guard NPC, per test_world()'s doc comment
+
+        let batch = IntentBatch::from_intents(vec![Intent::Spawn {
+            ref_id: "#100".into(),
+            key: "goblin1".into(),
+            kind: Kind::Npc,
+            title: None,
+            description: None,
+            location: "#1".into(),
+            owner: None,
+            archetype: Some(archetype_ref.clone()),
+        }]);
+
+        let effects = apply_batch(&mut world, &batch).expect("spawn should succeed");
+        let instance = world.get("#100").expect("instance should exist");
+        assert_eq!(instance.archetype_ref.as_deref(), Some(archetype_ref.as_str()));
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::TriggerHook { target, hook, .. }
+                    if target == "#100" && hook == "on_create"
+            )),
+            "spawn should queue the on_create constructor trigger: {:?}",
+            effects
+        );
+    }
+
+    #[test]
+    fn spawn_refuses_a_nonexistent_archetype() {
+        let mut world = test_world();
+        let batch = IntentBatch::from_intents(vec![Intent::Spawn {
+            ref_id: "#100".into(),
+            key: "goblin1".into(),
+            kind: Kind::Npc,
+            title: None,
+            description: None,
+            location: "#1".into(),
+            owner: None,
+            archetype: Some("#999".into()),
+        }]);
+        let err = apply_batch(&mut world, &batch).expect_err("no such archetype");
+        assert!(err.contains("no archetype"), "unexpected error: {}", err);
+        assert!(world.get("#100").is_none(), "the batch should roll back entirely");
+    }
+
+    /// Refuse to delete an archetype while instances still delegate to it —
+    /// orphaning them (silently losing behavior) is the "three sessions
+    /// later" bug the plan calls out. `cascade: true` is the loud opt-out.
+    #[test]
+    fn destroy_refuses_an_archetype_with_live_instances_unless_cascaded() {
+        let mut world = test_world();
+        let archetype_ref = "#7".to_string();
+        {
+            let archetype = world.get_mut(&archetype_ref).unwrap();
+            archetype
+                .attrs
+                .insert("max_hp".into(), serde_json::json!(10));
+            archetype
+                .tags
+                .insert(Tag { category: "quest".into(), key: "elite".into() });
+            hooks::set_script(
+                archetype,
+                "function on_get(this, actor, room) end".to_string(),
+            );
+        }
+        let instance_ref = world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "goblin1", Kind::Npc)
+            .with_location("#1");
+        instance.archetype_ref = Some(archetype_ref.clone());
+        world.add_object(instance);
+
+        let refuse = IntentBatch::from_intents(vec![Intent::Destroy {
+            target: archetype_ref.clone(),
+            cascade: false,
+        }]);
+        let err = apply_batch(&mut world, &refuse).expect_err("archetype has a live instance");
+        assert!(err.contains("live instances"), "unexpected error: {}", err);
+        assert!(world.get(&archetype_ref).is_some(), "refused delete must not touch the world");
+
+        let cascade = IntentBatch::from_intents(vec![Intent::Destroy {
+            target: archetype_ref.clone(),
+            cascade: true,
+        }]);
+        apply_batch(&mut world, &cascade).expect("cascade should override the guard");
+        assert!(world.get(&archetype_ref).is_none(), "the archetype itself is gone");
+
+        // `cascade` FLATTENS every instance before deleting the archetype —
+        // it must never orphan them with a dangling archetype_ref (that's
+        // exactly the bug the guard exists to prevent).
+        let instance = world
+            .get(&instance_ref)
+            .expect("the instance itself must survive a cascade delete");
+        assert!(instance.archetype_ref.is_none(), "archetype_ref must be cleared");
+        assert_eq!(instance.title.as_deref(), Some("A Town Guard"));
+        assert_eq!(instance.attrs.get("max_hp"), Some(&serde_json::json!(10)));
+        assert!(instance.tags.contains(&Tag { category: "quest".into(), key: "elite".into() }));
+        let script = instance.script.as_ref().expect("script copied down from the archetype");
+        assert!(script.hooks.contains(&"on_get".to_string()));
+    }
+
+    /// `clone`/`detach`: flatten an instance in place — resolved fields and
+    /// (since this instance has no script of its own) the archetype's script
+    /// copied verbatim, `archetype_ref` cleared, and any accumulated
+    /// `state` preserved rather than overwritten by the archetype's.
+    #[test]
+    fn detach_flattens_an_instance_and_keeps_its_own_state() {
+        let mut world = test_world();
+        let archetype_ref = world.next_dbref();
+        let mut archetype = GameObject::new(&archetype_ref, "goblin", Kind::Npc)
+            .with_title("Goblin")
+            .with_description("A snarling goblin.");
+        archetype.attrs.insert("max_hp".into(), serde_json::json!(10));
+        archetype.tags.insert(Tag { category: "quest".into(), key: "elite".into() });
+        hooks::set_script(
+            &mut archetype,
+            "function on_get(this, actor, room) end".to_string(),
+        );
+        world.add_object(archetype);
+
+        let instance_ref = world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "goblin1", Kind::Npc)
+            .with_location("#1");
+        instance.archetype_ref = Some(archetype_ref.clone());
+        instance.attrs.insert("name_tag".into(), serde_json::json!("Grubnak"));
+        instance.tags.insert(Tag { category: "loot".into(), key: "weapon".into() });
+        world.add_object(instance);
+        // Simulate accumulated tick state predating the detach — must survive.
+        hooks::ensure_own_state_slot(world.get_mut(&instance_ref).unwrap())
+            .state
+            .insert("ticks".into(), serde_json::json!(5));
+
+        let batch = IntentBatch::from_intents(vec![Intent::Detach {
+            target: instance_ref.clone(),
+        }]);
+        apply_batch(&mut world, &batch).expect("detach should succeed");
+
+        let instance = world.get(&instance_ref).unwrap();
+        assert!(instance.archetype_ref.is_none(), "detach clears archetype_ref");
+        assert_eq!(instance.title.as_deref(), Some("Goblin"));
+        assert_eq!(instance.description, "A snarling goblin.");
+        assert_eq!(instance.attrs.get("max_hp"), Some(&serde_json::json!(10)));
+        assert_eq!(instance.attrs.get("name_tag"), Some(&serde_json::json!("Grubnak")));
+        // Tags union: the instance's own plus the archetype's.
+        assert!(instance.tags.contains(&Tag { category: "quest".into(), key: "elite".into() }));
+        assert!(instance.tags.contains(&Tag { category: "loot".into(), key: "weapon".into() }));
+        let script = instance.script.as_ref().expect("script copied from archetype");
+        assert!(script.hooks.contains(&"on_get".to_string()));
+        assert_eq!(
+            script.state.get("ticks"),
+            Some(&serde_json::json!(5)),
+            "state must survive detach — it was never delegated"
+        );
+
+        // The archetype itself is untouched.
+        let archetype = world.get(&archetype_ref).unwrap();
+        assert_eq!(archetype.title.as_deref(), Some("Goblin"));
+    }
+
+    #[test]
+    fn detach_preserves_inherited_hooks_on_partial_override() {
+        // A partial override — the instance defines its OWN on_get but
+        // inherits on_tick from its archetype — must keep BOTH hooks after
+        // detaching. Regression: detach used to keep only the instance's own
+        // script, silently dropping every inherited hook.
+        let mut world = test_world();
+        let archetype_ref = world.next_dbref();
+        let mut archetype = GameObject::new(&archetype_ref, "goblin", Kind::Npc);
+        hooks::set_script(
+            &mut archetype,
+            "function on_get(this, actor, room) end\nfunction on_tick(this, state, room) end".to_string(),
+        );
+        world.add_object(archetype);
+
+        let instance_ref = world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "goblin1", Kind::Npc).with_location("#1");
+        instance.archetype_ref = Some(archetype_ref.clone());
+        // Own on_get override; on_tick is inherited only.
+        hooks::set_script(
+            &mut instance,
+            "function on_get(this, actor, room) emit(actor, \"mine\") end".to_string(),
+        );
+        world.add_object(instance);
+
+        apply_batch(
+            &mut world,
+            &IntentBatch::from_intents(vec![Intent::Detach { target: instance_ref.clone() }]),
+        )
+        .expect("detach should succeed");
+
+        let inst = world.get(&instance_ref).unwrap();
+        assert!(inst.archetype_ref.is_none());
+        let script = inst.script.as_ref().expect("flattened script");
+        assert!(script.hooks.contains(&"on_get".to_string()), "own hook kept: {:?}", script.hooks);
+        assert!(
+            script.hooks.contains(&"on_tick".to_string()),
+            "inherited hook must survive detach: {:?}",
+            script.hooks
+        );
+        // The instance's own on_get wins (it's emitted last in the flattened
+        // source), while the inherited on_tick is preserved.
+        assert!(script.source.contains("\"mine\""), "own on_get override retained");
     }
 
     #[test]
@@ -4069,7 +4414,7 @@ mod tests {
 
         let batch = batch_as(
             Some("#builder-a"),
-            vec![Intent::Destroy { target: target.clone() }],
+            vec![Intent::Destroy { target: target.clone(), cascade: false }],
         );
 
         assert!(apply_batch(&mut world, &batch).is_err(), "expected refusal");
@@ -4311,6 +4656,7 @@ mod tests {
                 description: None,
                 location: room.clone(),
                 owner: Some("#builder-a".into()),
+                archetype: None,
             }],
         );
 
@@ -4344,6 +4690,7 @@ mod tests {
                 description: None,
                 location: room.clone(),
                 owner: None,
+                archetype: None,
             }],
         );
 

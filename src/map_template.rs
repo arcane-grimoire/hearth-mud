@@ -469,6 +469,7 @@ pub fn instantiate(
                     description: Some(description),
                     location,
                     owner: None,
+                    archetype: None,
                 });
 
                 ref_id
@@ -530,6 +531,7 @@ pub fn instantiate(
                         description: obj.description.clone(),
                         location: room_ref.clone(),
                         owner: None,
+                        archetype: None,
                     });
                 }
 
