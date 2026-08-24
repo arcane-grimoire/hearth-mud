@@ -2,7 +2,7 @@
 //
 // The app is a Vite + Svelte 5 SPA served by the engine, whose static handler
 // already falls back to index.html for unknown paths (src/net/web.rs) — so
-// clean deep links like /builder/rooms load the app and resolve here, with no
+// clean deep links like /builder/workspace load the app and resolve here, with no
 // hash needed. We only have a handful of top-level surfaces (the game, the
 // builder tools), so a full router framework would be more than this earns.
 //

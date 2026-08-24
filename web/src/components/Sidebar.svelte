@@ -2,7 +2,7 @@
   import { Chip, StatusDot } from '@kenn-io/kit-ui';
   import GamePanel from './GamePanel.svelte';
 
-  let { status = 'disconnected', room = null, sendCommand = () => {}, isBuilder = false, onedit = () => {}, gamePanels = new Map() } = $props();
+  let { status = 'disconnected', room = null, sendCommand = () => {}, isBuilder = false, gamePanels = new Map() } = $props();
 
   let grouped = $derived.by(() => {
     const g = { players: [], npcs: [], items: [] };
@@ -41,9 +41,6 @@
         {#each npcs as n}
           <div class="entity npc">
             <span>{n.name}</span>
-            {#if n.owned || isBuilder}
-              <button class="edit-btn" onclick={() => onedit(n)}>edit</button>
-            {/if}
           </div>
         {/each}
       {:else}
@@ -59,9 +56,6 @@
         {#each items as item}
           <div class="entity item">
             <span>{item.name}</span>
-            {#if item.owned || isBuilder}
-              <button class="edit-btn" onclick={() => onedit(item)}>edit</button>
-            {/if}
           </div>
         {/each}
       {:else}
@@ -143,21 +137,6 @@
   .player { color: var(--accent-teal, #56b6c2); font-weight: 600; }
   .npc { color: var(--text-primary); }
   .item { color: var(--text-secondary); }
-
-  .edit-btn {
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    font-family: inherit;
-    font-size: var(--font-size-2xs, 10px);
-    cursor: pointer;
-    padding: 0 4px;
-    text-decoration: underline;
-    text-underline-offset: 2px;
-    flex-shrink: 0;
-  }
-
-  .edit-btn:hover { color: var(--accent-amber, #c9956b); }
 
   .exits {
     display: flex;

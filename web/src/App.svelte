@@ -3,22 +3,14 @@
   import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
   import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
   import SettingsIcon from '@lucide/svelte/icons/settings';
-  import DatabaseIcon from '@lucide/svelte/icons/database';
   import WrenchIcon from '@lucide/svelte/icons/wrench';
-  import Maximize2 from '@lucide/svelte/icons/maximize-2';
-  import Minimize2 from '@lucide/svelte/icons/minimize-2';
   import Output from './components/Output.svelte';
   import InputBar from './components/InputBar.svelte';
   import Sidebar from './components/Sidebar.svelte';
-  import Editor from './components/Editor.svelte';
-  import Admin from './components/Admin.svelte';
   import Settings from './components/Settings.svelte';
   import { setToken, getSavedToken } from './lib/api.js';
   import { navigate, matches, route } from './lib/router.svelte.js';
   import TerminalIcon from '@lucide/svelte/icons/terminal';
-  import WaypointsIcon from '@lucide/svelte/icons/waypoints';
-  import CodeIcon from '@lucide/svelte/icons/code';
-  import ShieldIcon from '@lucide/svelte/icons/shield-alert';
   import LayersIcon from '@lucide/svelte/icons/layers';
 
   let output;
@@ -29,10 +21,7 @@
   let scopes = $state([]);
   let availableCommands = $state([]);
   let autocomplete = $state(localStorage.getItem('hearth-autocomplete') === 'true');
-  let editingEntity = $state(null);
   let settingsOpen = $state(false);
-  let adminOpen = $state(false);
-  let panelFull = $state(false);
   let toolsOpen = $state(false);
   let ws;
   let reconnectTimer;
@@ -110,53 +99,14 @@
   }
 
   function sendCommand(cmd) { handleCommand(cmd); }
-  function openEditor(entity) { editingEntity = entity; adminOpen = false; }
-  function closeEditor() { editingEntity = null; }
-  function toggleAdmin() { adminOpen = !adminOpen; editingEntity = null; toolsOpen = false; }
   function toggleSidebar() { sidebarOpen = !sidebarOpen; }
   function setAutocomplete(val) { autocomplete = val; localStorage.setItem('hearth-autocomplete', val); }
 
   let isBuilder = $derived(scopes.includes('builder') || scopes.includes('admin'));
-  // Map writes are Admin-tier (a PUT writes files on the server), so the Map
-  // builder entry is admin-only — a plain builder would load it and then fail
-  // on save. Reads/Admin panel stay builder-gated.
-  let isAdmin = $derived(scopes.includes('admin'));
 
-  // Room builder is its own full-page route (/builder/rooms), lazy-loaded so
-  // the play client never pulls it (or the Svelte Flow canvas) into its bundle.
-  let onBuilderRoute = $derived(matches('/builder/rooms'));
-  let RoomBuilder = $state(null);
-  $effect(() => {
-    if (onBuilderRoute && !RoomBuilder) {
-      import('./components/RoomBuilder.svelte').then((m) => { RoomBuilder = m.default; });
-    }
-  });
-  function openRoomBuilder() { navigate('/builder/rooms'); toolsOpen = false; }
-
-  // Code editor — its own full-page route (/builder/code), also lazy-loaded so
-  // CodeMirror never touches the play bundle.
-  let onCodeRoute = $derived(matches('/builder/code'));
-  let CodeWorkspace = $state(null);
-  $effect(() => {
-    if (onCodeRoute && !CodeWorkspace) {
-      import('./components/CodeWorkspace.svelte').then((m) => { CodeWorkspace = m.default; });
-    }
-  });
-  function openCodeEditor() { navigate('/builder/code'); toolsOpen = false; }
-
-  // World check — the problems panel (/builder/problems).
-  let onProblemsRoute = $derived(matches('/builder/problems'));
-  let WorldCheck = $state(null);
-  $effect(() => {
-    if (onProblemsRoute && !WorldCheck) {
-      import('./components/WorldCheck.svelte').then((m) => { WorldCheck = m.default; });
-    }
-  });
-  function openWorldCheck() { navigate('/builder/problems'); toolsOpen = false; }
-
-  // Unified builder workspace (/builder/workspace) — the IDE prototype: one
-  // shell with a shared selection driving table/map + properties/hooks/dialogue.
-  // Lazy-loaded like the other builder routes.
+  // Unified builder workspace (/builder/workspace) — the IDE: one shell with a
+  // shared selection driving table/map + properties/hooks/dialogue. Lazy-loaded
+  // so its CodeMirror/Svelte Flow weight never touches the play bundle.
   let onWorkspaceRoute = $derived(matches('/builder/workspace'));
   let BuilderWorkspace = $state(null);
   $effect(() => {
@@ -167,12 +117,12 @@
   function openWorkspace() { navigate('/builder/workspace'); toolsOpen = false; }
 
   // Playtest console — a live game terminal riding on top of the builder
-  // routes, wired to the real command loop (handleCommand). `feed` mirrors the
+  // workspace, wired to the real command loop (handleCommand). `feed` mirrors the
   // game output. `jumpRef` teleports the test character to the room in focus.
   let feed = $state([]);
   let consoleOpen = $state(false);
   let PlaytestConsole = $state(null);
-  let onAnyBuilder = $derived(onBuilderRoute || onCodeRoute || onProblemsRoute || onWorkspaceRoute);
+  let onAnyBuilder = $derived(onWorkspaceRoute);
   let jumpRef = $derived(route.query.focus || route.query.ref || '');
   $effect(() => {
     if (consoleOpen && !PlaytestConsole) {
@@ -185,16 +135,9 @@
 
   function handleKeydown(e) {
     if (e.key === 'Escape') {
-      if (panelFull) { panelFull = false; return; }  // Esc leaves full screen first
-      if (editingEntity) closeEditor();
       inputBar?.focus();
     }
   }
-
-  // Auto-clear full screen when no panel is open.
-  $effect(() => {
-    if (!adminOpen && !editingEntity) panelFull = false;
-  });
 
   $effect(() => {
     connect();
@@ -227,28 +170,9 @@
               <button class="tools-item unified" role="menuitem" onclick={openWorkspace}>
                 <LayersIcon size={14} /> Builder <span class="tools-badge">unified</span>
               </button>
-              <button class="tools-item" role="menuitem" onclick={toggleAdmin}>
-                <DatabaseIcon size={14} /> World admin
-              </button>
-              {#if isAdmin}
-                <button class="tools-item" role="menuitem" onclick={openRoomBuilder}>
-                  <WaypointsIcon size={14} /> Room builder
-                </button>
-                <button class="tools-item" role="menuitem" onclick={openCodeEditor}>
-                  <CodeIcon size={14} /> Code editor
-                </button>
-                <button class="tools-item" role="menuitem" onclick={openWorldCheck}>
-                  <ShieldIcon size={14} /> World check
-                </button>
-              {/if}
             </div>
           {/if}
         </div>
-      {/if}
-      {#if adminOpen || editingEntity}
-        <IconButton ariaLabel={panelFull ? 'Exit full screen' : 'Full screen'} size="sm" onclick={() => panelFull = !panelFull}>
-          {#if panelFull}<Minimize2 size={14} />{:else}<Maximize2 size={14} />{/if}
-        </IconButton>
       {/if}
       <IconButton ariaLabel="Settings" size="sm" onclick={() => settingsOpen = true}>
         <SettingsIcon size={14} />
@@ -271,16 +195,8 @@
 
   <div class="main">
     <Output bind:this={output} oncommand={handleCommand} />
-    {#if adminOpen}
-      <div class="pane" class:full={panelFull}>
-        <Admin onclose={() => adminOpen = false} />
-      </div>
-    {:else if editingEntity}
-      <div class="pane" class:full={panelFull}>
-        <Editor entity={editingEntity} onclose={closeEditor} />
-      </div>
-    {:else if sidebarOpen}
-      <Sidebar {status} room={roomData} {sendCommand} {isBuilder} onedit={openEditor} {gamePanels} />
+    {#if sidebarOpen}
+      <Sidebar {status} room={roomData} {sendCommand} {isBuilder} {gamePanels} />
     {/if}
   </div>
 
@@ -288,18 +204,6 @@
 </div>
 
 <Settings open={settingsOpen} onclose={() => settingsOpen = false} {scopes} oncommand={handleCommand} {autocomplete} onautocomplete={setAutocomplete} />
-
-{#if onBuilderRoute && RoomBuilder}
-  <RoomBuilder onexit={() => navigate('/')} />
-{/if}
-
-{#if onCodeRoute && CodeWorkspace}
-  <CodeWorkspace onexit={() => navigate('/')} />
-{/if}
-
-{#if onProblemsRoute && WorldCheck}
-  <WorldCheck onexit={() => navigate('/')} />
-{/if}
 
 {#if onWorkspaceRoute && BuilderWorkspace}
   <BuilderWorkspace onexit={() => navigate('/')} />
@@ -379,18 +283,8 @@
   .tools-item.unified { color: var(--accent-amber, #c9956b); font-weight: 600; }
   .tools-badge { margin-left: auto; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; background: color-mix(in srgb, var(--accent-amber, #c9956b) 18%, transparent); color: var(--accent-amber, #c9956b); border-radius: 8px; padding: 1px 6px; }
 
-  /* a panel (admin or entity editor) that can go full screen */
-  .pane { display: flex; min-width: 0; }
-  /* full screen: fill the window below the top bar, so the exit toggle up
-     there stays reachable */
-  .pane.full { position: fixed; inset: 44px 0 0 0; z-index: 100; background: var(--bg-primary); }
-  .pane.full :global(.admin),
-  .pane.full :global(.editor) { width: 100%; max-width: 100%; min-width: 0; flex: 1; }
-
   @media (max-width: 700px) {
-    .main :global(.sidebar),
-    .main :global(.editor),
-    .main :global(.admin) {
+    .main :global(.sidebar) {
       position: absolute;
       right: 0;
       top: 44px;

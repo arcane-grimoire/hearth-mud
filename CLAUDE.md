@@ -137,11 +137,10 @@ web/                   Svelte 5 + Vite web client
                        MapBuilder, MapGrid, TerrainPalette, RoomInspector, AttrEditor,
                        Terrain/Schema/ImportExport modals; TOML via lib/mapwright-toml.js
       dialogue/        Ink dialogue authoring — InkEditor, InkCodeEditor, PlaytestPane
-      code/            CodeMirror wrapper (CodeEditor) + scripting HelpPanel
-      room-builder/    Svelte Flow room graph/table, RoomEditorModal, ObjectFinder (⌘K)
-      Editor.svelte, Admin.svelte, RoomBuilder.svelte, CodeWorkspace.svelte,
-      WorldCheck.svelte  Older standalone builder surfaces, superseded by the unified
-                       workspace but still reachable from the legacy tools menu
+      code/            CodeMirror wrapper (CodeEditor), shared by the workspace's
+                       CodeOverlay
+      room-builder/    Svelte Flow room graph (RoomGraph/RoomNode) + ObjectFinder
+                       (⌘K), consumed by the unified workspace
 docs/
   adr/                 6 architectural decision records (ADR 0001–0006)
   plans/               Pending/in-progress design docs (dbref migration, attribute schemas, client map integration)
