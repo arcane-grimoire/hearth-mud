@@ -333,9 +333,22 @@
         {#if !activeTab}
           <div class="welcome">
             <LayersIcon size={30} />
-            <p class="w-lead">Nothing open</p>
-            <p class="w-hint">Pick an object in the explorer to open its detail, or a hook to edit its code — each opens as a tab here.</p>
-            <p class="w-sub">Overviews: <b>Table</b> · <b>Map</b> (top right).</p>
+            <p class="w-lead">Build your world</p>
+            <p class="w-hint">Everything in your MUD — rooms, items, NPCs, exits — is an object you edit here. Open one from the explorer, or start something new.</p>
+            <div class="w-actions">
+              <button class="w-go" onclick={() => { sidebarOpen = true; newOpen = true; }}>
+                <PlusIcon size={15} /> New object
+              </button>
+              <button class="w-alt" onclick={() => openTab({ type: 'table' })}>
+                <TableIcon size={14} /> Browse everything
+              </button>
+              <button class="w-alt" onclick={() => openTab({ type: 'map' })}>
+                <MapIcon size={14} /> Room map
+              </button>
+            </div>
+            <p class="w-legend">
+              New here? An <b>object</b> is a room, item, or NPC · <b>hooks</b> are Luau scripts that react to events · <b>tags</b> and <b>attributes</b> describe an object.
+            </p>
           </div>
         {:else if activeTab.type === 'code'}
           {#key activeTab.id}
@@ -502,12 +515,18 @@
   .dl-open { margin-top: 8px; background: color-mix(in srgb, var(--accent-amber, #c9956b) 16%, transparent); border: 1px solid color-mix(in srgb, var(--accent-amber, #c9956b) 45%, transparent); color: var(--accent-amber, #c9956b); border-radius: 8px; padding: 7px 16px; cursor: pointer; font: inherit; font-size: 12.5px; font-weight: 600; }
   .dl-open:hover { background: color-mix(in srgb, var(--accent-amber, #c9956b) 26%, transparent); }
 
-  .welcome { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 24px; text-align: center; color: var(--text-muted, #8c8378); }
-  .welcome :global(svg) { color: color-mix(in srgb, var(--accent-amber, #c9956b) 55%, transparent); margin-bottom: 4px; }
-  .w-lead { margin: 0; font-size: 15px; font-weight: 600; color: var(--text-secondary, #b6a888); }
-  .w-hint { margin: 0; max-width: 420px; font-size: 12.5px; line-height: 1.5; }
-  .w-sub b { font-family: var(--font-mono, ui-monospace, monospace); color: var(--accent-amber, #c9956b); font-weight: 600; }
-  .w-sub { margin: 6px 0 0; font-size: 11.5px; }
+  .welcome { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 24px; text-align: center; color: var(--text-muted, #8c8378); }
+  .welcome > :global(svg) { color: color-mix(in srgb, var(--accent-amber, #c9956b) 55%, transparent); margin-bottom: 4px; }
+  .w-lead { margin: 0; font-size: 17px; font-weight: 700; color: var(--text-primary, #ece0c8); }
+  .w-hint { margin: 0; max-width: 440px; font-size: 12.5px; line-height: 1.55; }
+  .w-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 6px; }
+  .w-go, .w-alt { display: inline-flex; align-items: center; gap: 7px; font: inherit; font-size: 12.5px; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+  .w-go { background: var(--accent-amber, #c9956b); border: 1px solid var(--accent-amber, #c9956b); color: var(--bg-primary, #12100c); font-weight: 600; }
+  .w-go:hover { filter: brightness(1.06); }
+  .w-alt { background: var(--bg-surface, #17140f); border: 1px solid var(--border-default, #332c22); color: var(--text-secondary, #b6a888); }
+  .w-alt:hover { border-color: var(--accent-amber, #c9956b); color: var(--text-primary, #ece0c8); }
+  .w-legend { margin: 12px 0 0; max-width: 480px; font-size: 11.5px; line-height: 1.6; color: var(--text-muted, #8c8378); border-top: 1px solid var(--border-muted, #211d16); padding-top: 12px; }
+  .w-legend b { font-family: var(--font-mono, ui-monospace, monospace); color: var(--accent-amber, #c9956b); font-weight: 600; }
 
   @media (max-width: 900px) {
     .body { grid-template-columns: 180px 1fr; }

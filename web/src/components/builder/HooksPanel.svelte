@@ -42,7 +42,10 @@
 
 <div class="hp">
   <div class="add">
+    <label class="add-lbl" for="hook-add">Add a hook</label>
+    <p class="hint">Luau scripts that run on events (<code>on_enter</code>, <code>can_get</code>…) or as commands (<code>cmd_…</code>). Pick one or type a name.</p>
     <Typeahead
+      id="hook-add"
       options={hookOpts}
       fallbackLabel="new hook"
       placeholder="on_enter, cmd_talk…"
@@ -78,8 +81,11 @@
 
 <style>
   .hp { display: flex; flex-direction: column; gap: 10px; padding: 14px; }
-  .add { display: flex; gap: 6px; }
-  .add :global(.kit-typeahead) { flex: 1; }
+  .add { display: flex; flex-direction: column; gap: 5px; }
+  .add-lbl { font-size: var(--fs-label); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted, #8c8378); }
+  .hint { margin: 0; font-size: var(--fs-meta); line-height: 1.5; color: var(--text-muted, #8c8378); }
+  .hint code { font-family: var(--font-mono, ui-monospace, monospace); color: var(--text-secondary, #b6a888); }
+  .add :global(.kit-typeahead) { width: 100%; }
 
   /* The hook picker's default row layout lets the description (meta) hold its
      width and crush the hook NAME to an ellipsis. Flip it: the name keeps its

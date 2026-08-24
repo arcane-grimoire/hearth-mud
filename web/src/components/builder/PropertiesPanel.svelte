@@ -38,6 +38,11 @@
   const isRoom = $derived(obj?.kind === 'room');
 
   let sortedAttrs = $derived(obj ? Object.keys(obj.attrs || {}).sort() : []);
+  // Engine-managed attrs (_file_key, _rx/_ry, …) are noise for most editing and
+  // alarming to a newcomer, so they fold away under an Advanced disclosure while
+  // the object's own attributes stay in the open.
+  const userAttrs = $derived(sortedAttrs.filter((k) => !k.startsWith('_')));
+  const sysAttrs = $derived(sortedAttrs.filter((k) => k.startsWith('_')));
 
   async function setTitle(e) {
     const res = await api('set_title', { ref_id: obj.ref_id, title: e.target.value });
@@ -170,6 +175,7 @@
 
     <section>
       <h3>Tags</h3>
+      <p class="hint">A <code>category:key</code> label — used by locks, queries, and behavior (e.g. <code>system:hidden</code>).</p>
       <div class="tags">
         {#each obj.tags || [] as tag}
           <span class="tag">{tag}<Tooltip text="Remove tag"><button aria-label="Remove tag" onclick={() => removeTag(tag)}>×</button></Tooltip></span>
@@ -198,9 +204,10 @@
 
     <section>
       <h3>Attributes</h3>
+      <p class="hint">Freeform data stored on this object — read and written by softcode.</p>
       <table class="attrs">
         <tbody>
-          {#each sortedAttrs as key}
+          {#each userAttrs as key}
             {@const val = obj.attrs[key]}
             {@const disp = typeof val === 'object' ? JSON.stringify(val) : String(val)}
             <tr>
@@ -217,7 +224,7 @@
               {/if}
             </tr>
           {/each}
-          {#if !sortedAttrs.length}<tr><td colspan="3" class="none pad">No attributes</td></tr>{/if}
+          {#if !userAttrs.length}<tr><td colspan="3" class="none pad">No attributes</td></tr>{/if}
         </tbody>
       </table>
       <div class="row">
@@ -225,6 +232,34 @@
         <input class="mi" placeholder="value (JSON or string)" bind:value={newAttrValue} onkeydown={(e) => e.key === 'Enter' && addAttr()} />
         <Button size="sm" onclick={addAttr} label="Add" />
       </div>
+
+      {#if sysAttrs.length}
+        <details class="sys">
+          <summary>System attributes <span class="sys-n">{sysAttrs.length}</span></summary>
+          <p class="hint">Engine-managed — usually leave these alone. <code>_file_key</code> sets an object's area; <code>_rx</code>/<code>_ry</code> hold its map position.</p>
+          <table class="attrs">
+            <tbody>
+              {#each sysAttrs as key}
+                {@const val = obj.attrs[key]}
+                {@const disp = typeof val === 'object' ? JSON.stringify(val) : String(val)}
+                <tr>
+                  <td class="ak internal">{key}</td>
+                  {#if editingAttr === key}
+                    <td class="av"><textarea bind:value={editValue} onkeydown={(e) => attrKeydown(e, key)}></textarea></td>
+                    <td class="aa"><button onclick={() => saveAttr(key)}>Save</button></td>
+                  {:else}
+                    <td class="av" ondblclick={() => startEdit(key)} title="Double-click to edit">{disp}</td>
+                    <td class="aa">
+                      <button onclick={() => startEdit(key)}>Edit</button>
+                      <Tooltip text="Delete attribute"><button class="del" onclick={() => deleteAttr(key)}>Del</button></Tooltip>
+                    </td>
+                  {/if}
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </details>
+      {/if}
     </section>
 
     {#if Object.keys(obj.locks || {}).length}
@@ -284,6 +319,18 @@
   .aa button { background: none; border: none; color: var(--text-muted, #8c8378); cursor: pointer; font-size: var(--fs-meta); padding: 2px 4px; }
   .aa button:hover { color: var(--text-primary, #ece0c8); }
   .aa button.del:hover { color: var(--accent-red, #e06c75); }
+  .ak.internal { color: var(--text-muted, #8c8378); }
+  /* Point-of-use concept hints for the newcomer half of the audience. Muted and
+     small so they read as help, not chrome; power users glide past them. */
+  .hint { margin: -2px 0 2px; font-size: var(--fs-meta); line-height: 1.5; color: var(--text-muted, #8c8378); }
+  .hint code { font-family: var(--font-mono, ui-monospace, monospace); color: var(--text-secondary, #b6a888); }
+  details.sys { margin-top: 10px; border-top: 1px solid var(--border-muted, #211d16); padding-top: 8px; }
+  details.sys summary { cursor: pointer; font-size: var(--fs-label); font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted, #8c8378); list-style: none; display: flex; align-items: center; gap: 6px; }
+  details.sys summary::-webkit-details-marker { display: none; }
+  details.sys summary::before { content: '▸'; color: var(--accent-amber, #c9956b); font-size: 10px; }
+  details.sys[open] summary::before { content: '▾'; }
+  details.sys summary:hover { color: var(--text-secondary, #b6a888); }
+  .sys-n { font-family: var(--font-mono, ui-monospace, monospace); font-weight: 400; color: var(--text-muted, #8c8378); }
   .danger { flex-direction: row; align-items: center; gap: 8px; }
   .confirm { font-size: 12.5px; color: var(--accent-red, #e06c75); margin-right: auto; }
   .del-link { background: none; border: none; color: var(--text-muted, #8c8378); cursor: pointer; font: inherit; font-size: 12.5px; padding: 4px 2px; }
