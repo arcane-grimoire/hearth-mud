@@ -17,3 +17,7 @@ Thumbs.db
 # the committed critique snapshots and hook config are.
 .impeccable/config.local.json
 .impeccable/hook.cache.json
+
+# Claude Code scratch worktrees (ephemeral; project skills under .claude/skills
+# are still tracked).
+.claude/worktrees/
