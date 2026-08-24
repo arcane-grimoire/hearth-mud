@@ -1,6 +1,7 @@
 <script>
   import { Button, showFlash, Tooltip } from '@kenn-io/kit-ui';
   import { api } from '../../lib/api.js';
+  import { bbcodeToHtml } from '../../lib/bbcode.js';
   import StructurePanel from './StructurePanel.svelte';
 
   // Object properties: identity, tags, aliases, attributes, plus the
@@ -23,6 +24,7 @@
   let exitTarget = $state('');
   let moveDest = $state('');
   let confirmDelete = $state(false);
+  let descDraft = $state('');   // live description text, drives the player's-view preview
   let syncedFor = $state(null);
   $effect(() => {
     if (obj && obj.ref_id !== syncedFor) {
@@ -31,6 +33,7 @@
       exitTarget = obj.kind === 'exit' ? (obj.target_ref || '') : '';
       moveDest = '';
       confirmDelete = false;
+      descDraft = obj.description || '';
     }
   });
 
@@ -137,8 +140,25 @@
         <input type="text" class="fi" value={obj.title || ''} onchange={setTitle} />
       </label>
       <label class="fl">Description
-        <textarea class="ft" rows="4" onchange={setDescription}>{obj.description || ''}</textarea>
+        <textarea class="ft" rows="4" bind:value={descDraft} onchange={setDescription}></textarea>
       </label>
+
+      {#if !isExit}
+        <!-- The description is prose a player reads; show it as they will, live,
+             rendered through the same BBCode the game uses. This is the one
+             place the "text world" is the point, not a form field. -->
+        <div class="pview">
+          <div class="pv-cap">Player's view</div>
+          <div class="pv-screen">
+            <div class="pv-name">{obj.title || obj.key}</div>
+            {#if descDraft.trim()}
+              <div class="pv-desc">{@html bbcodeToHtml(descDraft)}</div>
+            {:else}
+              <div class="pv-none">No description yet — a player would see only the name.</div>
+            {/if}
+          </div>
+        </div>
+      {/if}
     </section>
 
     {#if isRoom}
@@ -301,6 +321,15 @@
     font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; outline: none; width: 100%;
   }
   .ft { resize: vertical; line-height: 1.5; }
+  /* Player's-view preview: a recessed "screen" (darker than the card, no
+     border) so it reads as the game window, not a nested card. Renders the
+     description through the same BBCode classes the live output uses. */
+  .pview { display: flex; flex-direction: column; gap: 5px; margin-top: 2px; }
+  .pv-cap { font-size: var(--fs-label); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted, #8c8378); }
+  .pv-screen { background: var(--bg-primary, #0e0c0a); border-radius: 8px; padding: 14px 16px; }
+  .pv-name { color: var(--accent-amber, #c9956b); font-weight: 700; font-size: 14px; margin-bottom: 7px; }
+  .pv-desc { color: var(--text-primary, #ece0c8); font-size: 13px; line-height: 1.65; max-width: 66ch; white-space: pre-wrap; }
+  .pv-none { color: var(--text-muted, #8c8378); font-style: italic; font-size: 12.5px; }
   .fi:focus, .ft:focus, .mi:focus { border-color: var(--accent-amber, #c9956b); }
   .row { display: flex; gap: 6px; align-items: center; }
   .kw { width: 110px; flex: none; }
