@@ -160,10 +160,7 @@ kind = "npc"
 title = "Aldric the Barkeep"
 description = "A heavyset man with a thick beard and kind eyes."
 location = "tavern"
-
-[objects.programs]
-cmd_talk = { file = "barkeep_talk.luau" }
-on_dialog_choice = { file = "barkeep_talk.luau" }
+script = "barkeep_talk.luau"   # one script defining cmd_talk + on_dialog_choice
 ```
 
 ### Luau hook file
@@ -180,7 +177,7 @@ function on_dialog_choice(this, actor, room, args)
 end
 ```
 
-That's it. The `dialog` module handles rendering, choice prompting, and the conversation loop. The NPC just needs `cmd_talk` to start and `on_dialog_choice` to handle replies.
+That's it — both hooks live in the NPC's one script, sharing the top-level `require("dialog")`. The `dialog` module handles rendering, choice prompting, and the conversation loop. The NPC just needs `cmd_talk` to start and `on_dialog_choice` to handle replies.
 
 ### The dialog module
 

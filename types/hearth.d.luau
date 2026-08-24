@@ -255,13 +255,19 @@ type CreateExitOpts = {
 --- Create an exit between two rooms. Returns the new exit's ref_id.
 declare function create_exit(opts: CreateExitOpts): string
 
---- Attach a program (Luau hook) to an object. Hook names: on_enter, on_leave,
---- cmd_<name>, etc.
-declare function set_program(ref: ObjectRef, hook: string, source: string): ()
+--- Set an object's whole behavior script — one Luau chunk that defines its
+--- hooks as top-level functions (on_enter, on_leave, cmd_<name>, ...) sharing
+--- one scope. Replaces any existing script on the object.
+declare function set_script(ref: ObjectRef, source: string): ()
 
---- Install several programs on an object at once, from a table mapping hook
---- name → Luau source. Queues one set_program intent per pair.
-declare function apply_template(ref: ObjectRef, template: { [string]: string }): ()
+--- Set a require()able library module on a Kind::Code object, by bare name
+--- (loaded elsewhere as require("<name>")).
+declare function set_lib(ref: ObjectRef, name: string, source: string): ()
+
+--- Set an object's script from a template: either the whole source string, or
+--- a table of source fragments (each defining hook functions) concatenated
+--- into one chunk.
+declare function apply_template(ref: ObjectRef, template: string | { [string]: string }): ()
 
 --- Generate a procedural dungeon from a seed string. Returns the entrance
 --- room's ref_id. Deterministic — same seed always produces the same dungeon.

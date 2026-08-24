@@ -152,6 +152,24 @@ function on_enter(this, actor, room)
     emit(actor, "")
     emit(actor, "Use: attack <hero> <target#>  |  endturn  |  status")
 end
+
+-- Dungeon cleanup: scheduled with `after(300, entrance, "on_expire")` when the
+-- dungeon is generated. Tears the whole dungeon down once no players remain.
+function on_expire(this, actor, room, args)
+    local seed = get_attr(this, "dungeon_seed")
+    if not seed then return end
+    local dungeon_rooms = find_by_tag("dungeon:room")
+    for _, dr in ipairs(dungeon_rooms) do
+        if get_attr(dr, "dungeon_seed") == seed then
+            local players = get_players_in_room(dr)
+            if #players > 0 then
+                after(300, this, "on_expire")
+                return
+            end
+        end
+    end
+    destroy_dungeon(seed)
+end
 "#;
 
 #[derive(Clone, Copy)]
@@ -485,9 +503,8 @@ pub fn generate(
                         });
                     }
 
-            intents.push(Intent::SetProgram {
+            intents.push(Intent::SetScript {
                 target: room_ref.clone(),
-                hook: "on_enter".into(),
                 source: ON_ENTER_SOURCE.to_string(),
             });
         }

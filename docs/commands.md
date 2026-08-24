@@ -48,24 +48,27 @@ Require the `builder` scope. Use `@` prefix (MUSH convention).
 
 | Command | Description |
 |---------|-------------|
-| `@program <ref>/<hook> = <luau>` | Attach a Luau program to a hook |
-| `@program <ref>/<hook> =` | With nothing after `=`, opens a multi-line editor (see below) |
-| `@programs [<ref>]` | List programs on an object (default: current room) |
-| `@rmprogram <ref>/<hook>` | Remove a program |
-| `@program/history <ref>/<hook>` | List a program's version history: number, timestamp, author |
-| `@program/restore <ref>/<hook> <n>` | Restore version `<n>`'s source as a **new** version |
-| `@program/diff <ref>/<hook> <n> [<m>]` | Diff version `<n>` against version `<m>`, or the current live source if `<m>` is omitted |
+| `@program <ref> = <luau>` | Set the object's **whole** script (hooks are functions defined in it) |
+| `@program <ref>` | With nothing after the ref, opens a multi-line editor seeded with the current script (see below) |
+| `@programs [<ref>]` | Show an object's script and the hooks derived from it (default: current room) |
+| `@rmprogram <ref>` | Remove the object's script entirely |
+| `@reload <ref>` | Re-validate and re-enable the object's script (e.g. after fixing a syntax error that disabled it) |
 
-`@program <ref>/<hook> =` with nothing after the `=` opens the same
-multi-line editor `@eval` uses: type source across as many lines as needed,
-then a bare `.` on its own line to install it, or `@abort` to cancel without
-writing anything. Needed because `@program` otherwise reads a single line, so
-without it no multi-line Luau could be authored from telnet at all — only the
-web Editor could write a real multi-line program.
+An object has one script — a single Luau chunk that defines its hooks as
+top-level functions (`function on_get(this, actor, room) ... end`,
+`function cmd_talk(...) ... end`), all sharing one file-level scope. `@program
+<ref> = <source>` sets that whole script, so it's one write, not one hook.
+The source is syntax-checked before install; a compile error rejects it and
+shows the error. `@programs <ref>` reports the script and the hooks the engine
+detected in it.
 
-Every `@program`/`@rmprogram` write is recorded as a version — see
-[Program version history](softcode-guide.md#program-version-history) in the
-softcode guide.
+`@program <ref>` with nothing after the ref opens the same multi-line editor
+`@eval` uses, seeded with the object's current script: type source across as
+many lines as needed, then a bare `.` on its own line to install it, or
+`@abort` to cancel without writing anything. Needed because `@program`
+otherwise reads a single line, so without it no multi-line Luau could be
+authored from telnet at all — only the web Editor could write a real
+multi-line script.
 
 ### Global scripts
 
@@ -78,17 +81,10 @@ softcode guide.
 
 A global script and a library are both backed by a `Kind::Code` object —
 code with no physical presence, never shown in room contents, `look`,
-inventory, `get`, or a container. `@script` is the `on_tick` half; `@lib`
-below is the `require()` half.
-
-Like `@program`/`@lib`, every `@script`/`@rmscript` write is versioned — a
-global script is exactly `@program <ref>/on_tick = ...` with friendlier
-ergonomics, so a human writing one is authoring the same as any other
-Program. Use `@program/history <ref>/on_tick` (the script's object ref, from
-`@scripts` or `examine`) to see its history — see
-[Program version history](softcode-guide.md#program-version-history).
-`@script-interval` only changes the `tick_interval` attr, not the program's
-source, so it does not create a version.
+inventory, `get`, or a container. `@script` sets a Code object's script (whose
+source defines `function on_tick(this, state, room) ... end`); `@lib` below
+sets a `require()`able lib module. `@script-interval` only changes the
+`tick_interval` attr, not the script's source.
 
 ### Libraries
 
@@ -103,8 +99,6 @@ source, so it does not create a version.
 library's source takes effect on the *next* `require()` call anywhere, not
 retroactively for callers that already required it. See
 [Modules (require)](softcode-guide.md#modules-require) in the softcode guide.
-Like `@program`, every `@lib`/`@rmlib` write is versioned — see
-[Program version history](softcode-guide.md#program-version-history).
 
 ### Locks
 
@@ -132,17 +126,18 @@ Require the `admin` scope.
 | `@eval <luau>` | Run a one-shot Luau script against the live world (see below) |
 | `@import <path> [--dry-run]` | Install a TOML+`.luau` bundle into the database (see below) |
 | `@export <path>` | Write DB-owned content back to files in the same format (see below) |
-| `@reload-world` | Hot-reload the game directory: re-read libs + ink, invalidate the bytecode cache, and re-run the same hash-reconciled world load as boot — changed `<area>`/program files update their `system:managed` objects (dbrefs preserved), unchanged files are skipped, player-created objects untouched (see below) |
-| `@reload <ref>/<hook>` | Re-validate and re-enable one program (e.g. after fixing a syntax error that disabled it) |
+| `@reload-world` | Hot-reload the game directory: re-read libs + ink, invalidate the bytecode cache, and re-run the same hash-reconciled world load as boot — changed `<area>`/script files update their `system:managed` objects (dbrefs preserved), unchanged files are skipped, player-created objects untouched (see below) |
+| `@reload <ref>` | Re-validate and re-enable an object's script (e.g. after fixing a syntax error that disabled it) |
 
 ### `@reload-world`
 
 `@reload-world` applies edits to the game directory *without a restart*. It runs
 the identical reconciliation the engine does at boot (`loader::load_game_dir`):
-each `<area>/*.toml` and its program `.luau` files are hashed (blake3) against
-the stored `file_hashes`, and only files whose content changed are re-applied.
-Changed managed objects get their title/description/tags/locks/attrs/programs
-refreshed from disk while keeping their `#N` dbref; new content is created;
+each `<area>/*.toml` and the `.luau` script files it references are hashed
+(blake3) against the stored `file_hashes`, and only files whose content changed
+are re-applied. Changed managed objects get their
+title/description/tags/locks/attrs/script refreshed from disk while keeping
+their `#N` dbref; new content is created;
 player-created (non-`system:managed`) objects are never touched. It also reloads
 `lib/*.luau` modules and `.ink` files and clears the compiled-bytecode cache.
 `spawn_room` is re-resolved afterward. Maps/terrain are DB-owned — use `@import`
@@ -169,14 +164,9 @@ survives a disconnect mid-edit.
 
 The script's top-level `return` value (if any) is echoed back, along with how
 many writes it applied. Every `@eval` run is logged (actor ref + source) via
-`tracing::info!` — the server log is the only audit trail for `@eval` itself.
-This is deliberate: `@eval` is a one-shot batch job against the world, not an
-authored Program attached to a hook, so it has nothing to keep a version
-history *of*. Note that this also covers `set_program()` called *from* an
-`@eval` script: that's the same softcode write path a hook uses, so — like
-any softcode `set_program()` call — it does **not** get a program version
-either. Only `@program`/`@lib` (and the loader's file installs) do. See
-[Program version history](softcode-guide.md#program-version-history) for why.
+`tracing::info!` — the server log is the audit trail for `@eval`. It has the
+full write API, including `set_script()` for attaching behavior to
+procedurally generated objects.
 
 ```
 @eval for _, ref in ipairs(all_objects()) do if has_tag(ref, "loot:weapon") then set_attr(ref, "durability", 100) end end
@@ -192,8 +182,7 @@ Boot only ever reads the database (see
 the `load_world_files` config option that controls file loading at boot).
 `@import` and `@export` are the explicit, admin-only crossing of that
 boundary in each direction — installing a TOML+`.luau` bundle into the
-database, and writing DB-owned content back out to the same format. See
-[Program version history](softcode-guide.md#program-version-history).
+database, and writing DB-owned content back out to the same format.
 
 ```
 @import <path> [--dry-run]
@@ -212,15 +201,14 @@ same bundle twice does not create duplicates — a second import is an
 *upgrade*, reconciled per object:
 
 - In the bundle, not in the DB — **created**.
-- In both, unchanged since the last import — **overwritten** with the
-  incoming source (a no-op if it's identical).
-- In both, edited locally since the last import *and* changed upstream too —
-  a genuine **conflict**: overwritten with the incoming source, but the local
-  edit is preserved as a version first and the import reports it loudly —
-  see `@program/history <ref>/<hook>` to recover it. Non-destructive by
-  construction, so import never has to block on a prompt.
-- In both, edited locally but upstream **hasn't** changed since the last
-  import — the local edit is **kept**, nothing is overwritten.
+- In both, and the object's script was **not** edited in-game since the last
+  import — **overwritten** with the incoming source (a no-op if it's
+  identical).
+- In both, but the object's script was **edited in-game** — the local edit is
+  **kept as-is** and the import declines to overwrite it, reporting it. Because
+  a script is a single database-owned unit, an in-game edit always wins over
+  the bundle; import is non-destructive by construction, so it never has to
+  block on a prompt.
 - In the DB (under one of the bundle's areas) but no longer in the bundle —
   **reported, never removed**. Auto-deleting on a file mismatch is exactly
   the bug this whole mechanism exists to prevent.
@@ -238,22 +226,20 @@ Import (dry run) of world:
     + town/well (item)
     ~ town/crossroads (room)
     ~ town/barkeep (npc)
-  1 local edit(s) kept as-is (upstream unchanged since the last import):
-    = #14/on_reply
-  WARNING: 1 local edit(s) were overwritten by this import. Nothing was lost — your edits are preserved in the version log:
-    ! #9/cmd_talk — see @program/history #9/cmd_talk
+  1 in-game script edit(s) kept as-is (import did not overwrite them):
+    = #9
   1 object(s) in the database but missing from this bundle (NOT removed):
     ? town/old_sign
 ```
 
 `--dry-run` computes and prints the exact same report without writing
-anything — to either the world or the version log — so "will this eat my
-work?" is always checkable before a real import.
+anything, so "will this eat my work?" is always checkable before a real
+import.
 
 `@export <path>` writes the database back to `<path>` as one
-`<area>/<area>.toml` per area plus sibling `.luau` files, one per Program —
-the same format `@import` reads and the same format game authors already
-hand-write. It covers **every object except `Kind::Player`** — player
+`<area>/<area>.toml` per area plus sibling `.luau` files, one per object
+script (and one per lib module) — the same format `@import` reads and the same
+format game authors already hand-write. It covers **every object except `Kind::Player`** — player
 characters are account-linked runtime state, not world content, and are
 never written regardless of anything else. Everything else is in scope,
 including objects that were never imported and have no file identity yet:
@@ -294,13 +280,11 @@ already up. `hearth import` from the shell is the primary dev loop: a CLI
 push, not a boot-time overwrite mode.
 
 ```sh
-hearth eval [FILE]                       # run one-shot Luau; stdin if FILE is '-' or omitted
-hearth program get <ref>/<hook>          # print current source to stdout
-hearth program set <ref>/<hook> [FILE]   # set source; stdin if FILE is '-' or omitted
-hearth program history <ref>/<hook>      # list version history
-hearth program restore <ref>/<hook> <n>  # restore version <n> as a new version
-hearth import <path> [--dry-run]         # install a bundle into the DB (path is on the SERVER)
-hearth export <path>                     # write DB-owned content back to files (path is on the SERVER)
+hearth eval [FILE]                # run one-shot Luau; stdin if FILE is '-' or omitted
+hearth program get <ref>          # print the object's whole script to stdout
+hearth program set <ref> [FILE]   # set the object's whole script; stdin if FILE is '-' or omitted
+hearth import <path> [--dry-run]  # install a bundle into the DB (path is on the SERVER)
+hearth export <path>              # write DB-owned content back to files (path is on the SERVER)
 ```
 
 `hearth import`/`export`'s `<path>` is resolved on the server's filesystem,
@@ -322,7 +306,7 @@ subcommand and may appear in any order:
 | `--config PATH` | Read the address from a `hearth.toml`-style config's `web_addr` (swapping an unspecified bind host like `0.0.0.0` for `localhost`) |
 | `--token TOKEN` | API token (default: the `HEARTH_TOKEN` environment variable) |
 
-Every one of these commands needs a token: `program get/set/history/restore`
+Every one of these commands needs a token: `program get/set`
 need at least builder scope, `eval`/`import`/`export` need admin — same
 gates as the telnet commands they wrap. With no token at all, or a rejected
 one, the CLI fails fast with an actionable message rather than a bare HTTP
@@ -343,20 +327,19 @@ CLI introduces — unrelated to `HEARTH_GAME_DIR`, which is test-only.
 
 ```sh
 # From an editor save hook: push the file straight to the live object.
-# The ref is the object's #N dbref (from `examine`) plus the hook name.
-hearth program set #5/on_look crossroads_look.luau --addr localhost:8000
+# The ref is the object's #N dbref (from `examine`); the file is its whole script.
+hearth program set #5 crossroads.luau --addr localhost:8000
 
-# Pull current source down to edit locally.
-hearth program get #5/on_look > crossroads_look.luau
+# Pull the current script down to edit locally.
+hearth program get #5 > crossroads.luau
 
 # One-shot data fixups, same job as @eval:
 hearth eval fixup.luau
 ```
 
-`hearth program get`/`set` go through the same `SetProgram`/`ListPrograms`
-REST actions `@program` and the web Editor use, so writes are versioned and
-syntax-checked identically — see
-[Program version history](softcode-guide.md#program-version-history).
+`hearth program get`/`set` go through the same `get_script`/`set_script`
+REST actions `@program` and the web Editor use, so writes are
+syntax-checked identically.
 
 ## Object refs
 

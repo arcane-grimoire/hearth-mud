@@ -1,0 +1,145 @@
+# Plan: Archetypes — prototype/instance objects (MOO-style)
+
+> **Model settled (design session).** Two axes, and only the first is
+> inheritance:
+> - **`is-a` — a single archetype parent (delegation up one chain, MOO/`__index`
+>   style).** No multiple inheritance, ever. The chain may be deep
+>   (`goblin_chief → goblin → monster`) — a per-hook walk up a *single* parent
+>   line is never ambiguous, so depth is safe.
+> - **`has-a` — traits/components (STAGE 2).** Additive behavior that
+>   *participates, never overrides* (`can_*` = AND, `on_*` = all react, `cmd_*`
+>   = additive + first-wins-with-a-warning). This is Hearth's existing
+>   tag/`system:global` mechanism with a theory attached, NOT a second
+>   inheritance axis. The load-bearing invariant: **a trait can decorate a
+>   hook, it can never *be* the hook's answer** — that's what keeps traits from
+>   collapsing back into the multiple inheritance we refused.
+>
+> Framing: Hearth is a Smalltalk-style live image (world in memory, edited in
+> place, checkpointed to the DB; `@import`/`@export` = fileIn/fileOut). So an
+> archetype is a **real, in-world object** you can `examine` and edit live, and
+> reparenting is allowed to happen live. **Build `is-a` first (Stage 1 below);
+> add traits only once a real case needs them.**
+
+## Goal
+
+Let a game define "a goblin looks like this" once (an **archetype**) and spawn
+many **instances** that share its behavior and defaults while carrying their
+own state. This is the blueprint/clone problem (LPMUD) or prototype/instance
+(MOO, Evennia). The object-script model (`docs/plans/object-scripts.md`) makes
+it urgent: a script lives *on the object*, so 50 goblins must not mean 50 copies
+of the goblin script to edit.
+
+Decided model: **delegate to parent (MOO `chparent` + `clear`-able
+properties)**, not copy-on-spawn. Editing an archetype updates every live
+instance; instances override per-field, copy-on-write.
+
+## The split
+
+| Lives on the **archetype** (resolved by instances) | Lives on the **instance** |
+| --- | --- |
+| the script (behavior) | `state` (this instance's memory) |
+| default title, description, base attrs, tags | position, HP, per-field overrides |
+
+This mirrors the object-script `source` (shared) vs `state` (per-object) split
+one layer up: **program shared, object-variables per-clone** (LP), **member
+vars per-node** (Godot). `state` is *never* resolved from the archetype — it is
+always the instance's own.
+
+## Decisions (locked)
+
+1. **`spawn` defaults to a reference (delegate), not a copy.** The instance
+   holds `archetype_ref` and no script of its own; behavior resolves from the
+   archetype. An explicit `clone`/`detach` makes divergence the loud choice.
+2. **Copy-on-write per field, uniformly** — title, description, attrs, script:
+   instance value if set, else the archetype's. One rule, no special cases.
+   `state` is always per-instance (not an exception — a different axis).
+3. **Refuse to delete an archetype while instances exist** (or offer
+   `--cascade`). Orphaned instances that silently lose behavior are a
+   three-sessions-later bug. Fail loud at delete time, matching the
+   `system:managed` reconciliation instinct.
+4. **Single parent, depth allowed.** One `archetype_ref` per object (never
+   multiple — no MI). The chain may be deep; a per-hook walk up a single parent
+   line is unambiguous, so `goblin_chief → goblin → monster` is fine. (This
+   reverses an earlier "one level only" caution — that fear was class-MRO
+   fragility, which single-parent prototype delegation doesn't have.) Cycles
+   are refused (an object can't be its own ancestor).
+
+## Where it plugs in (already prepared)
+
+`GameObject.archetype_ref: Option<String>` exists as a dormant field
+(`src/world/object.rs`), serialized and defaulted, resolved by nothing yet.
+
+Every hook-dispatch site already funnels through two accessors:
+`hooks::get_script(obj)` and `hooks::object_defines_hook(obj, hook)`. Archetype
+fallback slots in at exactly those two seams — they grow a `&World` param and a
+single "on miss, look up `obj.archetype_ref`" branch. That is the bulk of the
+runtime change; it is ~10 lines at two seams, not a scatter-hunt.
+
+## Stage 1 — the `is-a` chain (build this first)
+
+The smallest thing that lets The Last Stag's dungeon monsters be archetype-based
+end to end. Traits, `pass()`, `@export`, and the builder authoring surface are
+deliberately OUT of stage 1.
+
+**1. Resolution seams (the ~2-function core).** The two accessors grow a
+`&World` and walk the parent chain:
+- `resolve_script(world, obj, hook) -> Option<(&ObjectScript, resolving_ref)>`
+  — the object's own script if it defines `hook`, else walk `archetype_ref`
+  upward to the first ancestor whose script defines it.
+- `object_responds(world, obj, hook) -> bool` — same walk, boolean.
+`run_hook` runs the *resolving ancestor's* script but binds `this` to the
+**instance** — so `state`, attrs, and `ref_id` seen by the code are the
+instance's, only the *code* comes from the ancestor. Every current dispatch
+site (fire_hook, tick loop, lifecycle, cmd resolution, can_see/on_look/on_say
+fast-paths, globals index) routes through these, so this is the bulk of the
+change and it's localized.
+
+**2. Field delegation, copy-on-write.** Reading `title`, `description`, and any
+`attr` resolves instance-first, then up the chain; `state` never delegates
+(always the instance's own). Implement one resolver used by both the engine
+reads and the Lua `this`/object snapshot. (Option to evaluate: point the Lua
+object table's metatable `__index` up the chain so in-script `this.max_hp`
+delegates for free — the native Lua mechanism — rather than resolving in Rust.)
+Writing an attr on an instance sets it on the instance (the override); a future
+`clear_attr` reverts it to inheriting (MOO `clear_property`) — clear can be
+stage 1b.
+
+**3. Spawn + clone.**
+- `spawn({ archetype = "<ref-or-key>", ... })` → instance with `archetype_ref`
+  set; any explicit fields become overrides. Fire the archetype's `on_create`
+  on the new instance (the constructor seam — seeds instance state/attrs).
+- `clone(ref)` / `detach(ref)` → copy the *resolved* fields + script onto the
+  object and clear `archetype_ref`. This is the escape hatch named for the verb
+  the Luau/Roblox audience reaches for; delegation stays the default.
+
+**4. Guards.**
+- Refuse setting `archetype_ref` to self or any descendant (cycle prevention).
+- Refuse `destroy` of an object that has live instances, unless `--cascade`
+  (orphaned instances silently losing behavior is the three-sessions-later bug).
+
+**5. Proof.** Convert the dungeon monsters (goblin/skeleton/etc. in
+`src/dungeon.rs` / the encounter tables) from inline attr-stamping to
+`spawn({archetype=...})` against real archetype objects. If that reads nicer
+than today's inline stats, stage 1 earned its keep.
+
+## Stage 2+ (only once stage 1 proves out)
+
+- **Traits (`has-a`)** — additive components per the invariant above; unify with
+  tags/`system:global`.
+- **`pass()`** — single-chain `super`; call the inherited hook from an override.
+- **`clear_attr`** — revert an override to inheriting (MOO `clear_property`).
+- **Authoring surface** — `@archetype`, builder "N instances / which fields are
+  overridden", the "where does this hook come from" inspector view.
+- **`@export` / declared attrs** — ties into `docs/plans/attribute-schema.md`;
+  an archetype's declared attrs become an instance's typed inspector defaults.
+- **Live debugger** — hook error → inspect `this`/`actor` state → edit → re-fire
+  (the Smalltalk-image payoff; most valuable *because* layered behavior is where
+  "which script ran, and why did it break" gets murky).
+
+## Trade-offs / open questions
+
+- Attr resolution is now a chain walk per read. Cache per instance if it bites
+  (unlikely at MUD object counts).
+- `clone` copies the object only, not its contained inventory, by default.
+- Whether `spawn`'s `archetype` accepts a bare key (convenient) or requires a
+  dbref (unambiguous) — probably both, resolved like other refs.

@@ -9,6 +9,7 @@
   import PlusIcon from '@lucide/svelte/icons/plus';
   import PanelLeftIcon from '@lucide/svelte/icons/panel-left';
   import FileCodeIcon from '@lucide/svelte/icons/file-code';
+  import PackageIcon from '@lucide/svelte/icons/package';
   import BoxIcon from '@lucide/svelte/icons/box';
   import MessagesSquareIcon from '@lucide/svelte/icons/messages-square';
   import AlertTriangleIcon from '@lucide/svelte/icons/alert-triangle';
@@ -84,7 +85,10 @@
   function tabFromId(id) {
     if (['table', 'map', 'problems', 'tests', 'repl'].includes(id)) return { type: id };
     const [type, ...rest] = (id || '').split(':');
-    if (type === 'code' && rest[0] && rest[1]) return { type: 'code', ref: rest[0], hook: rest.slice(1).join(':') };
+    // Code tabs are keyed by object (one script per object); a focus hook is
+    // transient and not part of the id, so a deep link opens the whole script.
+    if (type === 'code' && rest[0]) return { type: 'code', ref: rest[0] };
+    if (type === 'lib' && rest[0] && rest[1]) return { type: 'lib', ref: rest[0], name: rest.slice(1).join(':') };
     if (type === 'ink' && rest[0]) return { type: 'ink', ref: rest[0] };
     if (type === 'obj' && rest[0]) return { type: 'object', ref: rest[0] };
     if (type === 'maps' && rest.length) return { type: 'maps', name: rest.join(':') };
@@ -184,21 +188,23 @@
     truncated = objRes?.ok ? !!objRes.data?.truncated : false;
     objects = list.map((o) => {
       const p = progById.get(o.ref_id);
-      return { ...o, hooks: p?.hooks || [] }; // area already on o, from _file_key
+      // area already on o, from _file_key; script/lib info from list_programs_all
+      return { ...o, hooks: p?.hooks || [], has_script: !!p?.has_script, libs: p?.libs || [] };
     });
     loading = false;
   }
 
+  const hasCode = (o) => o.has_script || o.hooks?.length || o.libs?.length;
   function countFor(key) {
     if (key === 'all') return objects.length;
-    if (key === 'code') return objects.filter((o) => o.hooks.length).length;
+    if (key === 'code') return objects.filter(hasCode).length;
     return objects.filter((o) => o.kind === key).length;
   }
 
   const filtered = $derived.by(() => {
     const q = search.trim().toLowerCase();
     return objects.filter((o) => {
-      if (kindFilter === 'code') { if (!o.hooks.length) return false; }
+      if (kindFilter === 'code') { if (!hasCode(o)) return false; }
       else if (kindFilter !== 'all' && o.kind !== kindFilter) return false;
       if (q && !`${o.title || ''} ${o.key || ''} ${o.ref_id}`.toLowerCase().includes(q)) return false;
       return true;
@@ -222,7 +228,8 @@
 
   // ── Tabs ──────────────────────────────────────────────────────────────
   function tabIdOf(t) {
-    if (t.type === 'code') return `code:${t.ref}:${t.hook}`;
+    if (t.type === 'code') return `code:${t.ref}`;       // one script per object
+    if (t.type === 'lib') return `lib:${t.ref}:${t.name}`;
     if (t.type === 'ink') return `ink:${t.ref}`;
     if (t.type === 'object') return `obj:${t.ref}`;
     if (t.type === 'maps') return `maps:${t.name || ''}`; // one tab per named map
@@ -266,7 +273,23 @@
     }
   }
   const openObject = (ref) => openTab({ type: 'object', ref });
-  const openHookTab = (ref, hook) => openTab({ type: 'code', ref, hook });
+  // Open an object's script editor, optionally focused on a hook (which seeds a
+  // stub if the script doesn't define it yet). The code tab is keyed by object,
+  // so `hook` rides as a transient focus: update it on an already-open tab and
+  // bump so the editor re-seeds. Problems/lib refs route to the right surface.
+  function openHookTab(ref, hook) {
+    if (hook === 'script') hook = null;
+    if (hook && hook.startsWith('lib_')) { openLibTab(ref, hook.slice(4)); return; }
+    const id = tabIdOf({ type: 'code', ref });
+    const existing = tabs.find((t) => t.id === id);
+    if (existing) {
+      tabs = tabs.map((t) => (t.id === id ? { ...t, hook } : t));
+      activate(id);
+    } else {
+      openTab({ type: 'code', ref, hook });
+    }
+  }
+  const openLibTab = (ref, name) => openTab({ type: 'lib', ref, name });
   const openInkTab = (ref) => openTab({ type: 'ink', ref });
 
   // A structural change (exit/content added or removed, hook removed) — re-examine
@@ -291,7 +314,8 @@
     if (t.type === 'tests') return 'Tests';
     if (t.type === 'repl') return 'REPL';
     if (t.type === 'maps') return t.name || 'Map builder';
-    if (t.type === 'code') return t.hook;
+    if (t.type === 'code') return `${nameOf(t.ref)} · script`;
+    if (t.type === 'lib') return `${t.name} · module`;
     if (t.type === 'ink') return `${nameOf(t.ref)} · dialogue`;
     return nameOf(t.ref);
   }
@@ -404,10 +428,10 @@
               tabindex={t.id === activeId ? 0 : -1}
               onclick={() => activate(t.id)} onkeydown={(e) => tabKeydown(e, t.id)}>
               <span class="ti">
-                {#if t.type === 'code'}<FileCodeIcon size={12} />{:else if t.type === 'ink'}<MessagesSquareIcon size={12} />{:else if t.type === 'object'}<BoxIcon size={12} />{:else if t.type === 'table'}<TableIcon size={12} />{:else if t.type === 'maps'}<Grid3x3Icon size={12} />{:else if t.type === 'problems'}<AlertTriangleIcon size={12} />{:else if t.type === 'tests'}<FlaskConicalIcon size={12} />{:else if t.type === 'repl'}<TerminalIcon size={12} />{:else}<MapIcon size={12} />{/if}
+                {#if t.type === 'code'}<FileCodeIcon size={12} />{:else if t.type === 'lib'}<PackageIcon size={12} />{:else if t.type === 'ink'}<MessagesSquareIcon size={12} />{:else if t.type === 'object'}<BoxIcon size={12} />{:else if t.type === 'table'}<TableIcon size={12} />{:else if t.type === 'maps'}<Grid3x3Icon size={12} />{:else if t.type === 'problems'}<AlertTriangleIcon size={12} />{:else if t.type === 'tests'}<FlaskConicalIcon size={12} />{:else if t.type === 'repl'}<TerminalIcon size={12} />{:else}<MapIcon size={12} />{/if}
               </span>
               <span class="tl">{tabLabel(t)}</span>
-              {#if t.type === 'code' || t.type === 'object' || t.type === 'ink'}<span class="tref">{t.ref}</span>{/if}
+              {#if t.type === 'code' || t.type === 'object' || t.type === 'ink' || t.type === 'lib'}<span class="tref">{t.ref}</span>{/if}
               <Tooltip text="Close tab"><button class="tc-x" aria-label="Close tab" onclick={(e) => closeTab(t.id, e)}><XIcon size={12} /></button></Tooltip>
             </div>
           {/each}
@@ -436,13 +460,23 @@
             </p>
           </div>
         {:else if activeTab.type === 'code'}
-          {#key activeTab.id}
+          {#key activeTab.id + ':' + (activeTab.hook || '')}
             <CodeOverlay
               refId={activeTab.ref}
               hook={activeTab.hook}
               objName={nameOf(activeTab.ref)}
               onclose={() => closeTab(activeTab.id)}
-              onsaved={refresh}
+              onsaved={structureChanged}
+            />
+          {/key}
+        {:else if activeTab.type === 'lib'}
+          {#key activeTab.id}
+            <CodeOverlay
+              refId={activeTab.ref}
+              libName={activeTab.name}
+              objName={nameOf(activeTab.ref)}
+              onclose={() => closeTab(activeTab.id)}
+              onsaved={structureChanged}
             />
           {/key}
         {:else if activeTab.type === 'ink'}
@@ -481,7 +515,7 @@
               </div>
               <div class="subtabs">
                 <button class:on={subtab === 'props'} onclick={() => (subtab = 'props')}>Properties</button>
-                <button class:on={subtab === 'hooks'} onclick={() => (subtab = 'hooks')}>Hooks{#if obj.programs?.length} <span class="sc">{obj.programs.length}</span>{/if}</button>
+                <button class:on={subtab === 'hooks'} onclick={() => (subtab = 'hooks')}>Hooks{#if obj.hooks?.length} <span class="sc">{obj.hooks.length}</span>{/if}</button>
                 {#if objSubtabs.includes('dialogue')}
                   <button class:on={subtab === 'dialogue'} onclick={() => (subtab = 'dialogue')}>Dialogue</button>
                 {/if}
@@ -490,7 +524,10 @@
                 {#if subtab === 'props'}
                   <PropertiesPanel {obj} {rooms} onchanged={structureChanged} ondeleted={onObjectDeleted} onedit={openObject} />
                 {:else if subtab === 'hooks'}
-                  <HooksPanel {obj} activeHook={null} onopen={(h) => openHookTab(obj.ref_id, h)} onchanged={structureChanged} />
+                  <HooksPanel {obj} activeHook={null}
+                    onopen={(h) => openHookTab(obj.ref_id, h)}
+                    onopenlib={(name) => openLibTab(obj.ref_id, name)}
+                    onchanged={structureChanged} />
                 {:else}
                   <div class="dlg-launch">
                     <MessagesSquareIcon size={26} />

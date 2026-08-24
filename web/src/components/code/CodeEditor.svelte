@@ -12,7 +12,7 @@
   import { loadHooks } from '../../lib/hooks.js';
   import { API_FUNCTIONS, API_GLOBALS, OBJECT_MEMBERS } from './hearth-api.js';
 
-  let { value = $bindable(''), onsave = () => {}, onchange = () => {}, onlookup = null, hook = '' } = $props();
+  let { value = $bindable(''), onsave = () => {}, onchange = () => {}, onlookup = null, oncursor = null, hook = '' } = $props();
 
   let host;
   let view;
@@ -67,6 +67,49 @@
     return '(this, actor, room)';
   }
 
+  // Hook vocabulary (on_* events, can_* guards, cmd_* commands) with the
+  // engine's own descriptions, loaded from the live `list_hooks` vocabulary.
+  // Feeds hover tooltips and right-click lookup so the hook *functions* a
+  // script defines are documented, not just the API calls inside them. Mutated
+  // in place after the async load; the hover/contextmenu handlers read it at
+  // event time, so a populated map is visible by the time anyone hovers.
+  const HOOK_INDEX = new Map();
+  loadHooks()
+    .then(({ known }) => {
+      for (const h of known || []) {
+        HOOK_INDEX.set(h.name, {
+          sig: `function ${h.name}${hookSignature(h.name)}`,
+          doc: h.describes || '',
+        });
+      }
+    })
+    .catch(() => {});
+
+  // A known symbol's reference entry: an API function/global/member, or a hook.
+  function symbolInfo(word) {
+    return API_INDEX.get(word) || HOOK_INDEX.get(word) || null;
+  }
+
+  // The hook function whose body `pos` sits in, or null. Scans upward for the
+  // nearest top-level `function <name>(`; a top-level `end` above the cursor
+  // (before any function) means we've left the enclosing scope. Reports a name
+  // only when it reads as a hook (known, or an on_/cmd_ prefix) so a plain
+  // top-level helper doesn't masquerade as the "current" hook.
+  function enclosingHook(state, pos) {
+    const cur = state.doc.lineAt(pos).number;
+    for (let n = cur; n >= 1; n--) {
+      const text = state.doc.line(n).text;
+      if (n < cur && /^end\b/.test(text)) return null;
+      const m = /^function\s+([A-Za-z_]\w*)\s*\(/.exec(text);
+      if (m) {
+        const name = m[1];
+        const isHook = HOOK_INDEX.has(name) || name.startsWith('on_') || name.startsWith('cmd_');
+        return isHook ? name : null;
+      }
+    }
+    return null;
+  }
+
   // --- Hearth API autocomplete ---
   async function hearthComplete(context) {
     // Member access: only offer object fields when the receiver is known to be
@@ -117,7 +160,7 @@
   // --- hover tooltips: signature + doc for a known API symbol ---
   const hearthHover = hoverTooltip((view, pos) => {
     const w = wordAt(view.state, pos);
-    const entry = w && API_INDEX.get(w.word);
+    const entry = w && symbolInfo(w.word);
     if (!entry) return null;
     return {
       pos: w.from,
@@ -156,7 +199,7 @@
       const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
       if (pos == null) return false;
       const w = wordAt(view.state, pos);
-      if (!w || !API_INDEX.has(w.word)) return false;
+      if (!w || !symbolInfo(w.word)) return false;
       e.preventDefault();
       onlookup(w.word);
       return true;
@@ -236,8 +279,13 @@
           saveKeymap,
           hearthTheme,
           EditorView.updateListener.of((u) => {
-            // Skip changes we pushed in ourselves (loading a hook) — only user
-            // edits mark dirty.
+            // Report the hook function the cursor sits in, so the Help panel's
+            // "current" card follows the caret through a multi-hook script.
+            if ((u.selectionSet || u.docChanged) && oncursor) {
+              oncursor(enclosingHook(u.state, u.state.selection.main.head));
+            }
+            // Skip doc changes we pushed in ourselves (loading a hook) — only
+            // user edits mark dirty.
             if (!u.docChanged || syncing) return;
             syncing = true;
             value = u.state.doc.toString();

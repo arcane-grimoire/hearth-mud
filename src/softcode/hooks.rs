@@ -1,10 +1,17 @@
-//! Hook names and Program storage.
+//! Hook names and per-object script storage.
 //!
-//! A Program is a Luau script attached to an Object via a named Hook.
-//! `can_` hooks gate permission for an action (return `false` to veto).
-//! `on_` hooks run after an action has already happened, for reactive flavor.
-//! `cmd_` hooks define player-typeable commands that dispatch resolves to
-//! when nothing builtin matches (see ADR 0004).
+//! Each Object carries at most one [`ObjectScript`] — a single Luau chunk that
+//! runs once and *defines* its hooks as top-level functions sharing one scope
+//! (helpers, constants, `require`d modules). This is the Godot model: the
+//! object is the unit, hooks are its methods, and the file-level scope is the
+//! shared "class body." `can_` hooks gate an action (return `false` to veto),
+//! `on_` hooks react after it happened, and `cmd_` hooks define player-typeable
+//! commands (see ADR 0004).
+//!
+//! `lib_<name>` modules are a *separate* concern: a lib is a standalone chunk
+//! that `return`s a value and is loaded via `require("<name>")`, so it cannot
+//! be a function in the shared script scope. Those live in [`GameObject::libs`]
+//! as [`LibModule`]s, one per name.
 
 use std::collections::HashMap;
 
@@ -49,18 +56,22 @@ pub const KNOWN_HOOKS: &[&str] = &[
     "on_create",
 ];
 
-/// Whether `name` is a hook the engine will accept on `@program`.
+/// Whether `name` is a hook an object script may define.
 ///
-/// Any `can_` hook must be one of [`KNOWN_HOOKS`]. `on_`, `cmd_`, and
-/// `lib_`-prefixed names are open-ended — `on_reply`, `on_buy`, `cmd_talk`,
-/// `lib_inventory` are all valid. `lib_<name>` is how a `Kind::Code` object
-/// (see `crate::world::Kind`) exposes a module `require("<name>")` can load
-/// — see `crate::softcode::mod::install_require`.
+/// Any `can_` hook must be one of [`KNOWN_HOOKS`]. `on_` and `cmd_`-prefixed
+/// names are open-ended — `on_reply`, `on_buy`, `cmd_talk` are all valid.
+/// `lib_<name>` is *not* a hook — it is a [`LibModule`] (see this module's
+/// docs) — so it is deliberately excluded here.
 pub fn is_valid_hook_name(name: &str) -> bool {
     KNOWN_HOOKS.contains(&name)
         || (name.starts_with("cmd_") && name.len() > 4)
         || (name.starts_with("on_") && name.len() > 3)
-        || (name.starts_with("lib_") && name.len() > 4)
+}
+
+/// Whether `name` names a library module (`lib_<name>`), authored on a
+/// `Kind::Code` object and loaded via `require("<name>")`.
+pub fn is_valid_lib_name(name: &str) -> bool {
+    name.starts_with("lib_") && name.len() > 4
 }
 
 /// A short human-readable description of a hook, for `@programs` output and
@@ -99,135 +110,262 @@ pub fn describe_hook(name: &str) -> &'static str {
         "on_reload" => "runs after @reload-world completes",
         "on_save" => "runs before each world save (autosave or manual)",
         "on_create" => "runs when this object is first created at runtime",
-        _ if name.starts_with("lib_") => "a library module, loaded via require(\"<name>\")",
         _ => "a custom player command (cmd_<name>)",
     }
 }
 
-/// Where a Program's source came from — which authority owns it.
+/// Where a script's source came from — which authority owns it.
 ///
-/// The loader reconciles only [`ProgramOrigin::File`] programs against the
-/// game files. [`ProgramOrigin::InGame`] programs are database-owned: they
-/// survive `@reload-world` and restarts, and a file load never deletes or
-/// overwrites one.
+/// The loader reconciles only [`ProgramOrigin::File`] scripts against the game
+/// files. [`ProgramOrigin::InGame`] scripts are database-owned: they survive
+/// `@reload-world` and restarts, and a file load never deletes or overwrites
+/// one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProgramOrigin {
     /// Installed from a TOML definition or `.luau` file under `game_dir`.
-    ///
-    /// This is the *deserialization* default so that programs stored before
-    /// provenance existed stay under loader management — on a managed object
-    /// they can only have come from files, because every startup reconciled
-    /// them away otherwise. Records written since always set the field.
     #[default]
     File,
     /// Written at runtime — `@program`, the REST API, or softcode's
-    /// `set_program`.
+    /// `set_script`.
     InGame,
 }
 
-/// A Program stored on an Object under a Hook name.
+/// The single Luau script attached to an Object.
+///
+/// `source` is one chunk that, when run, defines each hook as a top-level
+/// function (`function on_get(this, actor, room) ... end`). The engine runs
+/// the body once, then looks up whichever hook is firing by name. `hooks` is a
+/// derived index of the hook functions the source defines (see
+/// [`derive_hooks`]) so the engine can answer "does this object respond to X?"
+/// without running the script. `state` is the object's persistent state,
+/// shared across all its hooks (Godot member vars).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramRecord {
-    pub hook: String,
+pub struct ObjectScript {
     pub source: String,
     pub enabled: bool,
     #[serde(default)]
     pub state: HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub origin: ProgramOrigin,
+    /// Derived at set-time: the hook names this source defines as functions.
+    #[serde(default)]
+    pub hooks: Vec<String>,
 }
 
-impl ProgramRecord {
-    /// A new in-game Program. File-loaded programs come from
-    /// [`ProgramRecord::from_file`].
-    pub fn new(hook: impl Into<String>, source: impl Into<String>) -> Self {
-        Self {
-            hook: hook.into(),
-            source: source.into(),
-            enabled: true,
-            state: HashMap::new(),
-            origin: ProgramOrigin::InGame,
+impl ObjectScript {
+    /// Whether this (enabled) script defines `hook`.
+    pub fn defines(&self, hook: &str) -> bool {
+        self.enabled && self.hooks.iter().any(|h| h == hook)
+    }
+}
+
+/// A `require`able library module authored on a `Kind::Code` object.
+///
+/// Unlike a hook, a lib is a standalone chunk that `return`s a value; it is
+/// registered under its bare `<name>` (no `lib_` prefix) and loaded via
+/// `require("<name>")`. See `crate::softcode::mod::install_require`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibModule {
+    pub source: String,
+    #[serde(default)]
+    pub origin: ProgramOrigin,
+}
+
+/// The top-level hook functions a script's `source` defines.
+///
+/// Parses `source` as Luau (via `full_moon`) and collects the names of
+/// **global** function definitions declared at the top level of the chunk —
+/// both `function <name>(...)` declarations and `<name> = function(...)`
+/// assignments. Because it works on the parsed AST rather than raw text, a
+/// `function on_get(...)` that appears *inside a string literal or comment*
+/// (e.g. a template `set_script`'d onto another object) is correctly ignored.
+///
+/// `local function` and table methods (`function t.m()` / `t:m()`) are
+/// excluded — they aren't dispatchable hooks. Only names accepted by
+/// [`is_valid_hook_name`] are returned, in first-seen order without
+/// duplicates. Hooks installed by metaprogramming (assigning into the
+/// environment dynamically) are not detected — the authoring contract is
+/// "define each hook as a named top-level function." Source that doesn't
+/// parse yields no hooks (a broken script has no working hooks anyway).
+pub fn derive_hooks(source: &str) -> Vec<String> {
+    // `full_moon` is a recursive-descent parser and can use deep stack on
+    // large/nested scripts — enough to overflow a default 2 MiB thread stack
+    // (the engine runs on tokio worker threads of that size, and a runtime
+    // `set_script` parses on that thread). Run the parse on a dedicated thread
+    // with a large stack so parsing a script can never crash the server.
+    // Parsing only happens on writes/boot, never per-tick, so the thread cost
+    // is irrelevant.
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn_scoped(scope, || derive_hooks_inner(source))
+            .expect("spawn hook-derivation thread")
+            .join()
+            .unwrap_or_default()
+    })
+}
+
+fn derive_hooks_inner(source: &str) -> Vec<String> {
+    use full_moon::ast::{Stmt, Var};
+
+    let Ok(ast) = full_moon::parse(source) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |name: String| {
+        if is_valid_hook_name(&name) && !out.iter().any(|h| *h == name) {
+            out.push(name);
+        }
+    };
+    for stmt in ast.nodes().stmts() {
+        match stmt {
+            // `function <name>(...) ... end` — a global function declaration.
+            // Skip anything with dotted names or a `:method` (not a hook).
+            Stmt::FunctionDeclaration(decl) => {
+                let fname = decl.name();
+                let names: Vec<_> = fname.names().iter().collect();
+                if fname.method_name().is_none()
+                    && names.len() == 1
+                {
+                    push(names[0].token().to_string());
+                }
+            }
+            // `<name> = function(...) ... end` — a global assignment whose
+            // value is a function expression.
+            Stmt::Assignment(assign) => {
+                let vars: Vec<_> = assign.variables().iter().collect();
+                let exprs: Vec<_> = assign.expressions().iter().collect();
+                if vars.len() == 1
+                    && exprs.len() == 1
+                    && matches!(exprs[0], full_moon::ast::Expression::Function(_))
+                    && let Var::Name(name) = vars[0]
+                {
+                    push(name.token().to_string());
+                }
+            }
+            _ => {}
         }
     }
-
-    /// A new Program owned by the game files, subject to loader reconciliation.
-    pub fn from_file(hook: impl Into<String>, source: impl Into<String>) -> Self {
-        Self {
-            origin: ProgramOrigin::File,
-            ..Self::new(hook, source)
-        }
-    }
+    out
 }
 
-/// Attach (or replace) a Program on `obj` at `hook`.
-///
-/// Returns an error if `hook` isn't a recognized hook name. Does not
-/// validate the Luau source — callers should run it through
-/// [`crate::softcode::SoftcodeRuntime::check_syntax`] first so builders get a
-/// syntax error instead of a silently broken program.
-pub fn set_program(obj: &mut GameObject, hook: &str, source: String) -> Result<(), String> {
-    set_program_with_origin(obj, hook, source, ProgramOrigin::InGame)
+/// Attach (or replace) `obj`'s script from in-game authoring.
+pub fn set_script(obj: &mut GameObject, source: String) {
+    set_script_with_origin(obj, source, ProgramOrigin::InGame)
 }
 
-/// Attach (or replace) a Program on `obj` at `hook`, recording where the
-/// source came from.
+/// Attach (or replace) `obj`'s script, recording where the source came from.
 ///
-/// Replacing a Program preserves the accumulated per-program `state` map —
-/// rewriting the source of an `on_tick` hook shouldn't reset what it has been
-/// remembering, and the loader reinstalls file programs on every startup.
-pub fn set_program_with_origin(
-    obj: &mut GameObject,
-    hook: &str,
-    source: String,
-    origin: ProgramOrigin,
-) -> Result<(), String> {
-    if !is_valid_hook_name(hook) {
-        return Err(format!(
-            "Unknown hook '{}'. Known hooks: {}, or cmd_<name>.",
-            hook,
-            KNOWN_HOOKS.join(", ")
-        ));
-    }
+/// Replacing the script preserves the object's accumulated `state` — rewriting
+/// behavior shouldn't reset what an `on_tick` has been remembering, and the
+/// loader reinstalls file scripts on every startup. The hook index is
+/// re-derived from the new source.
+pub fn set_script_with_origin(obj: &mut GameObject, source: String, origin: ProgramOrigin) {
     let state = obj
-        .programs
-        .get(hook)
+        .script
+        .as_ref()
         .map(|prev| prev.state.clone())
         .unwrap_or_default();
-    let mut record = ProgramRecord::new(hook, source);
-    record.origin = origin;
-    record.state = state;
-    obj.programs.insert(hook.to_string(), record);
-    Ok(())
+    let hooks = derive_hooks(&source);
+    obj.script = Some(ObjectScript {
+        source,
+        enabled: true,
+        state,
+        origin,
+        hooks,
+    });
 }
 
-/// Remove the Program at `hook` on `obj`, if any. Returns whether one was
+/// Remove `obj`'s script, if any. Returns whether one was removed.
+pub fn clear_script(obj: &mut GameObject) -> bool {
+    obj.script.take().is_some()
+}
+
+/// `obj`'s script, if it has an enabled one.
+pub fn get_script(obj: &GameObject) -> Option<&ObjectScript> {
+    obj.script.as_ref().filter(|s| s.enabled)
+}
+
+/// Whether `obj` has an enabled script defining `hook`.
+pub fn object_defines_hook(obj: &GameObject, hook: &str) -> bool {
+    obj.script.as_ref().is_some_and(|s| s.defines(hook))
+}
+
+/// Attach (or replace) a `require`able lib module on `obj`, keyed by its bare
+/// `<name>` (no `lib_` prefix).
+pub fn set_lib(obj: &mut GameObject, name: &str, source: String, origin: ProgramOrigin) {
+    obj.libs
+        .insert(name.to_string(), LibModule { source, origin });
+}
+
+/// Remove the lib module `<name>` on `obj`, if any. Returns whether one was
 /// removed.
-pub fn remove_program(obj: &mut GameObject, hook: &str) -> bool {
-    obj.programs.remove(hook).is_some()
+pub fn remove_lib(obj: &mut GameObject, name: &str) -> bool {
+    obj.libs.remove(name).is_some()
 }
 
-/// Look up an enabled Program at `hook` on `obj`.
-pub fn get_program<'a>(obj: &'a GameObject, hook: &str) -> Option<&'a ProgramRecord> {
-    obj.programs.get(hook).filter(|p| p.enabled)
-}
-
-/// All Programs on `obj`, sorted by hook name for stable display.
-pub fn list_programs(obj: &GameObject) -> Vec<&ProgramRecord> {
-    let mut programs: Vec<&ProgramRecord> = obj.programs.values().collect();
-    programs.sort_by(|a, b| a.hook.cmp(&b.hook));
-    programs
-}
-
-/// Find the first object among `candidates` carrying an enabled `cmd_<name>`
-/// hook, per the command-resolution order in ADR 0004 (room contents first,
-/// then inventory — callers control that order via `candidates`).
+/// Find the first object among `candidates` whose script defines an enabled
+/// `cmd_<command>` hook, per the command-resolution order in ADR 0004 (callers
+/// control the order via `candidates`).
 pub fn find_cmd_hook<'a>(
     candidates: impl IntoIterator<Item = &'a GameObject>,
     command: &str,
-) -> Option<(&'a GameObject, &'a ProgramRecord)> {
+) -> Option<(&'a GameObject, &'a ObjectScript)> {
     let hook = format!("cmd_{}", command);
-    candidates
-        .into_iter()
-        .find_map(|obj| get_program(obj, &hook).map(|p| (obj, p)))
+    candidates.into_iter().find_map(|obj| {
+        obj.script
+            .as_ref()
+            .filter(|s| s.defines(&hook))
+            .map(|s| (obj, s))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derive_hooks_finds_top_level_functions() {
+        let src = "local x = 1\nfunction on_get(this, actor, room) end\nfunction cmd_talk(this, actor, room, args) end\non_look = function(this, actor, room) end";
+        let hooks = derive_hooks(src);
+        assert!(hooks.contains(&"on_get".to_string()));
+        assert!(hooks.contains(&"cmd_talk".to_string()));
+        assert!(hooks.contains(&"on_look".to_string()));
+    }
+
+    #[test]
+    fn derive_hooks_ignores_functions_inside_string_literals() {
+        // A template `set_script`'d onto another object at runtime — the
+        // `function cmd_talk` here is a string value, not a hook on THIS
+        // object. A text scanner would wrongly report it; the parser must not.
+        let src = r#"
+local GUIDE_TALK = [[
+function cmd_talk(this, actor, room, args)
+  emit(actor, "hi")
+end
+]]
+function on_enter(this, actor, room)
+  set_script(get_attr(this, "guide"), GUIDE_TALK)
+end
+"#;
+        let hooks = derive_hooks(src);
+        assert_eq!(hooks, vec!["on_enter".to_string()]);
+        assert!(!hooks.contains(&"cmd_talk".to_string()));
+    }
+
+    #[test]
+    fn derive_hooks_excludes_local_functions_and_methods() {
+        let src = "local function helper() end\nfunction M.method() end\nfunction on_use(this, actor, room) end";
+        let hooks = derive_hooks(src);
+        assert_eq!(hooks, vec!["on_use".to_string()]);
+    }
+
+    #[test]
+    fn derive_hooks_ignores_non_hook_names() {
+        // `can_*` must be a KNOWN hook; a bare word is not a hook at all.
+        let src = "function frobnicate() end\nfunction can_frobnicate(this, actor) end\nfunction can_get(this, actor) end";
+        let hooks = derive_hooks(src);
+        assert_eq!(hooks, vec!["can_get".to_string()]);
+    }
 }

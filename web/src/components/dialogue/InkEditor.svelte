@@ -78,33 +78,44 @@
 
   // Give the NPC the two hooks that play this dialogue, following the project's
   // blessed convention (the `dialog` lib module drives rendering + the choice
-  // loop; the script itself is the NPC's saved _ink_source). Never clobbers a
-  // hook that already exists.
+  // loop; the script itself is the NPC's saved _ink_source). One script per
+  // object, so both hooks live in one chunk sharing the `dialog` require — the
+  // shape barkeep_talk.luau uses. Appends missing hooks to any existing script;
+  // never clobbers hooks already defined.
   const WIRE = {
     cmd_talk:
-      'local dialog = require("dialog")\n\n-- Start this NPC\'s dialogue (its saved Ink source).\nfunction cmd_talk(this, actor, room, args)\n    dialog.start(actor, this)\nend\n',
+      '-- Start this NPC\'s dialogue (its saved Ink source).\nfunction cmd_talk(this, actor, room, args)\n    dialog.start(actor, this)\nend\n',
     on_dialog_choice:
-      'local dialog = require("dialog")\n\n-- Handle the player\'s reply during a conversation.\nfunction on_dialog_choice(this, actor, room, args)\n    dialog.on_choice(this, actor, room, args)\nend\n',
+      '-- Handle the player\'s reply during a conversation.\nfunction on_dialog_choice(this, actor, room, args)\n    dialog.on_choice(this, actor, room, args)\nend\n',
   };
 
   async function wireUp() {
     wiring = true;
-    const existing = await api('list_programs', { ref_id: refId });
-    const have = new Set((existing.ok ? existing.data?.hooks || existing.data || [] : []).map((h) => (typeof h === 'string' ? h : h.hook)));
+    const res = await api('get_script', { ref_id: refId });
+    const script = res?.ok ? res.data : null;
+    const have = new Set(script?.hooks || []);
+    const existing = (script?.source || '').trimEnd();
     const todo = Object.keys(WIRE).filter((h) => !have.has(h));
     if (!todo.length) {
       wiring = false;
       showFlash('Already wired up (cmd_talk + on_dialog_choice exist)', { tone: 'default' });
       return;
     }
-    let ok = 0;
-    for (const hook of todo) {
-      const r = await api('set_program', { ref_id: refId, hook, source: WIRE[hook] });
-      if (r.ok) ok++;
-    }
+    // Build the new script: keep what's there, ensure the dialog require is
+    // present once, then append the missing hook functions.
+    const parts = [];
+    if (existing) parts.push(existing);
+    if (!/require\(["']dialog["']\)/.test(existing)) parts.push('local dialog = require("dialog")');
+    for (const h of todo) parts.push(WIRE[h].trimEnd());
+    const source = parts.join('\n\n') + '\n';
+    const r = await api('set_script', { ref_id: refId, source });
     wiring = false;
-    showFlash(`Added ${ok} hook${ok === 1 ? '' : 's'} (${todo.join(', ')})`, { tone: ok ? 'success' : 'danger' });
-    if (ok) onsaved();
+    if (r?.ok) {
+      showFlash(`Added ${todo.join(' + ')}`, { tone: 'success' });
+      onsaved();
+    } else {
+      showFlash(r?.error || 'Failed to wire up', { tone: 'danger' });
+    }
   }
 </script>
 

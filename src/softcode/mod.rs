@@ -20,7 +20,7 @@ use mlua::{Lua, LuaSerdeExt, Value as LuaValue, VmState};
 
 use crate::theme::Theme;
 use crate::world::{GameObject, Kind, Tag, World};
-use hooks::ProgramRecord;
+use hooks::ObjectScript;
 
 pub const MAX_CONTAINER_DEPTH: u32 = 3;
 
@@ -94,9 +94,13 @@ pub enum Intent {
         target: String,
         aliases: Vec<String>,
     },
-    SetProgram {
+    SetScript {
         target: String,
-        hook: String,
+        source: String,
+    },
+    SetLib {
+        target: String,
+        name: String,
         source: String,
     },
     Trigger {
@@ -659,15 +663,28 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                     data: None,
                 });
             }
-            Intent::SetProgram { target, hook, source } => {
+            Intent::SetScript { target, source } => {
                 if !may_modify(world, authority, target) {
-                    return Err(refuse("set_program", target));
+                    return Err(refuse("set_script", target));
                 }
                 let obj = world
                     .get_mut(target)
-                    .ok_or_else(|| format!("set_program: no object '{}'", target))?;
-                crate::softcode::hooks::set_program(obj, hook, source.clone())
-                    .map_err(|e| format!("set_program: {}", e))?;
+                    .ok_or_else(|| format!("set_script: no object '{}'", target))?;
+                crate::softcode::hooks::set_script(obj, source.clone());
+            }
+            Intent::SetLib { target, name, source } => {
+                if !may_modify(world, authority, target) {
+                    return Err(refuse("set_lib", target));
+                }
+                let obj = world
+                    .get_mut(target)
+                    .ok_or_else(|| format!("set_lib: no object '{}'", target))?;
+                crate::softcode::hooks::set_lib(
+                    obj,
+                    name,
+                    source.clone(),
+                    crate::softcode::hooks::ProgramOrigin::InGame,
+                );
             }
             Intent::Trigger { target, hook, data } => {
                 if world.get(target).is_none() {
@@ -1101,8 +1118,8 @@ impl SoftcodeRuntime {
         sources.contains_key(name).unwrap_or(false)
     }
 
-    /// Refresh the user-library source table from `world` — every enabled
-    /// `lib_<name>` Program on a `Kind::Code` object, keyed by `<name>`.
+    /// Refresh the user-library source table from `world` — every lib module
+    /// on any object, keyed by its bare `<name>`.
     /// Flag the user-lib sources table as stale so the next Program
     /// execution re-syncs it from `World`. Every program-mutation path in
     /// the engine already funnels through `invalidate_module_cache` /
@@ -1126,17 +1143,13 @@ impl SoftcodeRuntime {
             .named_registry_value(USER_LIB_SOURCES_KEY)
             .expect("user lib sources table");
         clear_table(&table);
+        // Any object may host `require`able lib modules (a `Kind::Code` object
+        // is the usual home, but rooms/objects can carry them too — the TOML
+        // `[*.libs]` tables are accepted on rooms and objects alike, so a
+        // kind filter here would silently make advertised libs un-requireable).
         for obj in world.objects.values() {
-            if obj.kind != Kind::Code {
-                continue;
-            }
-            for program in obj.programs.values() {
-                if !program.enabled {
-                    continue;
-                }
-                if let Some(name) = program.hook.strip_prefix("lib_") {
-                    let _ = table.set(name, program.source.clone());
-                }
+            for (name, lib) in &obj.libs {
+                let _ = table.set(name.clone(), lib.source.clone());
             }
         }
     }
@@ -1205,16 +1218,20 @@ impl SoftcodeRuntime {
         });
     }
 
-    /// Run `program`'s Luau source, calling its `program.hook`-named
-    /// function with `(this, actor, room[, args])`.
+    /// Run `script`'s Luau source, then call its `hook`-named function with
+    /// `(this, actor, room[, args])`.
     ///
-    /// For `on_tick` hooks, the signature is `(this, state, room)` — state
-    /// is a mutable table persisted between runs.
+    /// The whole object script runs first (defining every hook into a shared
+    /// env — helpers and constants at the top are visible to all of them),
+    /// then the `hook`-named function is looked up and invoked. For `on_tick`
+    /// hooks the signature is `(this, state, room)` — `state` is the object's
+    /// mutable state table, persisted between runs and shared by all hooks.
     #[allow(clippy::too_many_arguments)]
     pub fn run_hook(
         &self,
         world: &World,
-        program: &ProgramRecord,
+        script: &ObjectScript,
+        hook: &str,
         this_ref: &str,
         actor_ref: &str,
         room_ref: Option<&str>,
@@ -1243,7 +1260,7 @@ impl SoftcodeRuntime {
                 .get(actor_ref)
                 .and_then(|a| a.location_ref.clone())
         });
-        let is_tick = program.hook == "on_tick";
+        let is_tick = hook == "on_tick";
         let state_capture: Rc<RefCell<HashMap<String, serde_json::Value>>> =
             Rc::new(RefCell::new(HashMap::new()));
         let state_writer = Rc::clone(&state_capture);
@@ -1266,12 +1283,12 @@ impl SoftcodeRuntime {
                 &self.ink,
             )?;
 
-            let compiled = self.get_or_compile(&program.source, &program.hook)
+            let compiled = self.get_or_compile(&script.source, hook)
                 .map_err(|e| e.clone())?;
             compiled.set_environment(env.clone())?;
             compiled.call::<()>(())?;
 
-            let func: Option<mlua::Function> = env.get(program.hook.as_str())?;
+            let func: Option<mlua::Function> = env.get(hook)?;
             let func = match func {
                 Some(f) => f,
                 None => return Ok(LuaValue::Nil),
@@ -1282,7 +1299,7 @@ impl SoftcodeRuntime {
 
             if is_tick {
                 let state_tbl = self.lua.create_table()?;
-                for (k, v) in &program.state {
+                for (k, v) in &script.state {
                     state_tbl.set(k.clone(), self.lua.to_value(v)?)?;
                 }
                 let room_val = match room_ref.or(default_location.as_deref()) {
@@ -1847,6 +1864,89 @@ mod tests {
         HashMap::new()
     }
 
+    /// Test-only stand-in for the removed per-hook `ProgramRecord`: a single
+    /// hook function plus its source. With one script per object, `run_hook`
+    /// takes the whole `ObjectScript` and the hook name; this shim lets the
+    /// existing tests keep the "one hook, one source" shape by wrapping the
+    /// source in a one-hook `ObjectScript` at call time.
+    struct TestProgram {
+        hook: String,
+        source: String,
+    }
+
+    impl TestProgram {
+        fn new(hook: impl Into<String>, source: impl Into<String>) -> Self {
+            Self {
+                hook: hook.into(),
+                source: source.into(),
+            }
+        }
+    }
+
+    /// `run_hook_rec` — a test-only wrapper matching the pre-refactor
+    /// `run_hook` call shape (a program record instead of script + hook), so
+    /// call sites need only rename `run_hook` → `run_hook_rec`.
+    trait RunHookCompat {
+        #[allow(clippy::too_many_arguments)]
+        fn run_hook_rec(
+            &self,
+            world: &World,
+            program: &TestProgram,
+            this_ref: &str,
+            actor_ref: &str,
+            room_ref: Option<&str>,
+            args: Option<&str>,
+            budget: Budget,
+            dbref_counter: Rc<Cell<u64>>,
+            themes: &HashMap<String, Theme>,
+            map_templates: &HashMap<String, crate::map_template::MapTemplateFile>,
+            scheduled_hooks: &[ScheduledHook],
+            tick_count: u64,
+        ) -> Result<ProgramResult, SoftcodeError>;
+    }
+
+    impl RunHookCompat for SoftcodeRuntime {
+        fn run_hook_rec(
+            &self,
+            world: &World,
+            program: &TestProgram,
+            this_ref: &str,
+            actor_ref: &str,
+            room_ref: Option<&str>,
+            args: Option<&str>,
+            budget: Budget,
+            dbref_counter: Rc<Cell<u64>>,
+            themes: &HashMap<String, Theme>,
+            map_templates: &HashMap<String, crate::map_template::MapTemplateFile>,
+            scheduled_hooks: &[ScheduledHook],
+            tick_count: u64,
+        ) -> Result<ProgramResult, SoftcodeError> {
+            let script = hooks::ObjectScript {
+                source: program.source.clone(),
+                enabled: true,
+                state: Default::default(),
+                origin: Default::default(),
+                hooks: vec![program.hook.clone()],
+            };
+            SoftcodeRuntime::run_hook(
+                self,
+                world,
+                &script,
+                &program.hook,
+                this_ref,
+                actor_ref,
+                room_ref,
+                args,
+                budget,
+                dbref_counter,
+                themes,
+                map_templates,
+                scheduled_hooks,
+                tick_count,
+            )
+        }
+    }
+
     // test_world() creates objects in this fixed order, so dbrefs are
     // predictable: room "#1", room2 "#2", alice "#3", bob "#4", sword "#5",
     // shield "#6", guard "#7", exit "#8".
@@ -1909,7 +2009,7 @@ mod tests {
     fn on_get_queues_emit_and_set_attr_intents() {
         let world = test_world();
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_get",
             r#"
                 function on_get(this, actor, room)
@@ -1921,7 +2021,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program,
                 "#5",
@@ -1950,7 +2050,7 @@ mod tests {
     fn can_get_denies_only_on_explicit_false() {
         let world = test_world();
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "can_get",
             r#"
                 function can_get(this, actor, room)
@@ -1964,7 +2064,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program,
                 "#5",
@@ -1985,7 +2085,7 @@ mod tests {
     fn cmd_hook_receives_trailing_args() {
         let world = test_world();
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "cmd_push",
             r#"
                 function cmd_push(this, actor, room, args)
@@ -1996,7 +2096,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program,
                 "#5",
@@ -2022,7 +2122,7 @@ mod tests {
     fn runaway_script_hits_budget() {
         let world = test_world();
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_get",
             r#"
                 function on_get(this, actor, room)
@@ -2035,7 +2135,7 @@ mod tests {
         );
 
         let err = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program,
                 "#5",
@@ -2059,17 +2159,17 @@ mod tests {
         let world = test_world();
         let runtime = SoftcodeRuntime::new();
 
-        let program_a = ProgramRecord::new(
+        let program_a = TestProgram::new(
             "on_get",
             r#"function on_get(this, actor, room) set_attr(this, "who", "a") end"#,
         );
-        let program_b = ProgramRecord::new(
+        let program_b = TestProgram::new(
             "on_get",
             r#"function on_get(this, actor, room) set_attr(this, "who", "b") end"#,
         );
 
         let result_a = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program_a,
                 "#5",
@@ -2082,7 +2182,7 @@ mod tests {
             )
             .unwrap();
         let result_b = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program_b,
                 "#5",
@@ -2263,7 +2363,7 @@ mod tests {
     fn spawn_intent_can_be_referenced_by_later_intents_in_batch() {
         let mut world = test_world();
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "cmd_summon",
             r#"
                 function cmd_summon(this, actor, room, args)
@@ -2275,7 +2375,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program,
                 "#5",
@@ -2303,9 +2403,9 @@ mod tests {
 
     fn run_script(world: &World, source: &str) -> ProgramResult {
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new("on_get", source);
+        let program = TestProgram::new("on_get", source);
         runtime
-            .run_hook(world, &program, "#5", "#3", Some("#1"), None, Budget::default(), counter(world), &test_themes(), &test_map_templates(), &[], 0)
+            .run_hook_rec(world, &program, "#5", "#3", Some("#1"), None, Budget::default(), counter(world), &test_themes(), &test_map_templates(), &[], 0)
             .expect("script should run")
     }
 
@@ -2555,28 +2655,16 @@ mod tests {
     }
 
     #[test]
-    fn set_program_attaches_a_program() {
+    fn set_script_attaches_a_script() {
         let world = test_world();
         let result = run_script(&world, r##"
             function on_get(this, actor, room)
-                set_program("#2", "on_look", "function on_look(this, actor, room) end")
+                set_script("#2", "function on_look(this, actor, room) end")
             end
         "##);
         let mut w = world.clone();
         apply_batch(&mut w, &result.batch).unwrap();
-        assert!(w.get("#2").unwrap().programs.contains_key("on_look"));
-    }
-
-    #[test]
-    fn set_program_rejects_unknown_hook() {
-        let world = test_world();
-        let result = run_script(&world, r##"
-            function on_get(this, actor, room)
-                set_program("#2", "not_a_real_hook", "return true")
-            end
-        "##);
-        let mut w = world.clone();
-        assert!(apply_batch(&mut w, &result.batch).is_err());
+        assert!(hooks::object_defines_hook(w.get("#2").unwrap(), "on_look"));
     }
 
     fn sample_dungeon_themes() -> HashMap<String, Theme> {
@@ -2619,7 +2707,7 @@ mod tests {
         let runtime = SoftcodeRuntime::new();
         let themes = sample_dungeon_themes();
 
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "cmd_delve",
             r#"
                 function cmd_delve(this, actor, room, args)
@@ -2632,7 +2720,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program,
                 "#5",
@@ -2666,7 +2754,7 @@ mod tests {
             .collect();
         assert!(dungeon_rooms.len() >= 2);
 
-        let destroy_program = ProgramRecord::new(
+        let destroy_program = TestProgram::new(
             "cmd_leave",
             r#"
                 function cmd_leave(this, actor, room, args)
@@ -2675,7 +2763,7 @@ mod tests {
             "#,
         );
         let destroy_result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &w,
                 &destroy_program,
                 "#5",
@@ -2724,7 +2812,7 @@ mod tests {
         let mut map_templates = HashMap::new();
         map_templates.insert("iron_hills".to_string(), template);
 
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "cmd_explore",
             r#"
                 function cmd_explore(this, actor, room, args)
@@ -2736,7 +2824,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program,
                 "#5",
@@ -2780,7 +2868,7 @@ mod tests {
         let runtime = SoftcodeRuntime::new();
         let mut world = World::new();
         let mut obj = GameObject::new("#1", "lib", Kind::Code);
-        hooks::set_program(&mut obj, "lib_m", "return 1".into()).unwrap();
+        hooks::set_lib(&mut obj, "m", "return 1".into(), hooks::ProgramOrigin::InGame);
         world.add_object(obj);
 
         let table: mlua::Table = runtime
@@ -2796,8 +2884,8 @@ mod tests {
         world
             .get_mut("#1")
             .unwrap()
-            .programs
-            .get_mut("lib_m")
+            .libs
+            .get_mut("m")
             .unwrap()
             .source = "return 2".into();
         runtime.sync_user_lib_sources(&world);
@@ -2826,7 +2914,7 @@ mod tests {
         );
         runtime.load_modules(modules);
 
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_get",
             r#"
                 function on_get(this, actor, room)
@@ -2837,7 +2925,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program,
                 "#5",
@@ -2863,7 +2951,7 @@ mod tests {
         let world = test_world();
         let runtime = SoftcodeRuntime::new();
 
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_get",
             r#"
                 function on_get(this, actor, room)
@@ -2873,7 +2961,7 @@ mod tests {
         );
 
         let err = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program,
                 "#5",
@@ -2898,7 +2986,7 @@ mod tests {
         modules.insert("b".into(), r#"local a = require("a") return {}"#.into());
         runtime.load_modules(modules);
 
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_get",
             r#"
                 function on_get(this, actor, room)
@@ -2908,7 +2996,7 @@ mod tests {
         );
 
         let err = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program,
                 "#5",
@@ -2941,7 +3029,7 @@ mod tests {
         modules.insert("solo".into(), r#"return require("solo")"#.into());
         runtime.load_modules(modules);
 
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_get",
             r#"
                 function on_get(this, actor, room)
@@ -2951,7 +3039,7 @@ mod tests {
         );
 
         let err = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program,
                 "#5",
@@ -2982,7 +3070,7 @@ mod tests {
         modules.insert("boom".into(), r#"error("kaboom")"#.into());
         runtime.load_modules(modules);
 
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_get",
             r#"
                 function on_get(this, actor, room)
@@ -2994,7 +3082,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program,
                 "#5",
@@ -3037,7 +3125,7 @@ mod tests {
         );
         runtime.load_modules(modules);
 
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_tick",
             r#"
                 function on_tick(this, state, room)
@@ -3048,7 +3136,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program,
                 "#1",
@@ -3076,21 +3164,21 @@ mod tests {
         let mut world = test_world();
         let lib_ref = world.next_dbref();
         let mut lib_obj = GameObject::new(&lib_ref, "greet", Kind::Code);
-        hooks::set_program(
+        hooks::set_lib(
             &mut lib_obj,
-            "lib_greet",
+            "greet",
             r#"
                 local M = {}
                 function M.hello() return "hi" end
                 return M
             "#
             .into(),
-        )
-        .unwrap();
+            hooks::ProgramOrigin::InGame,
+        );
         world.add_object(lib_obj);
 
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_tick",
             r#"
                 function on_tick(this, state, room)
@@ -3101,7 +3189,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program,
                 "#1",
@@ -3128,11 +3216,11 @@ mod tests {
         let mut world = test_world();
         let lib_ref = world.next_dbref();
         let mut lib_obj = GameObject::new(&lib_ref, "greet", Kind::Code);
-        hooks::set_program(&mut lib_obj, "lib_greet", "return { version = 1 }".into()).unwrap();
+        hooks::set_lib(&mut lib_obj, "greet", "return { version = 1 }".into(), hooks::ProgramOrigin::InGame);
         world.add_object(lib_obj);
 
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_tick",
             r#"
                 function on_tick(this, state, room)
@@ -3141,9 +3229,9 @@ mod tests {
             "#,
         );
 
-        fn run(runtime: &SoftcodeRuntime, world: &World, program: &ProgramRecord) -> ProgramResult {
+        fn run(runtime: &SoftcodeRuntime, world: &World, program: &TestProgram) -> ProgramResult {
             runtime
-                .run_hook(
+                .run_hook_rec(
                     world,
                     program,
                     "#1",
@@ -3163,7 +3251,7 @@ mod tests {
         // Edit the library's source without invalidating — require() should
         // keep returning the cached (stale) module.
         let obj = world.get_mut(&lib_ref).unwrap();
-        hooks::set_program(obj, "lib_greet", "return { version = 2 }".into()).unwrap();
+        hooks::set_lib(obj, "greet", "return { version = 2 }".into(), hooks::ProgramOrigin::InGame);
         let stale = run(&runtime, &world, &program);
         assert_eq!(
             stale.state.get("version").unwrap(),
@@ -3181,27 +3269,27 @@ mod tests {
         );
     }
 
-    /// Authoring a `lib_<name>` Program whose name collides with a shipped
-    /// module is refused at write time, from softcode's own `set_program`.
+    /// Authoring a lib module whose name collides with a shipped module is
+    /// refused at write time, from softcode's own `set_lib`.
     #[test]
-    fn set_program_refuses_lib_name_colliding_with_shipped_module() {
+    fn set_lib_refuses_lib_name_colliding_with_shipped_module() {
         let world = test_world();
         let runtime = SoftcodeRuntime::new();
         let mut modules = HashMap::new();
         modules.insert("str".into(), "return {}".into());
         runtime.load_modules(modules);
 
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "cmd_shadow",
             r#"
                 function cmd_shadow(this, actor, room)
-                    set_program(this, "lib_str", "return {}")
+                    set_lib(this, "str", "return {}")
                 end
             "#,
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program,
                 "#1",
@@ -3212,7 +3300,7 @@ mod tests {
                 counter(&world),
                 &test_themes(), &test_map_templates(), &[], 0,
             )
-            .expect_err("set_program should refuse a shipped-module-colliding lib name");
+            .expect_err("set_lib should refuse a shipped-module-colliding lib name");
         let message = result.to_string();
         assert!(
             message.contains("shipped module"),
@@ -3249,7 +3337,7 @@ mod tests {
         );
         runtime.load_modules(modules);
 
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_get",
             r#"
                 function on_get(this, actor, room)
@@ -3260,7 +3348,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program,
                 "#5",
@@ -3289,7 +3377,7 @@ mod tests {
         modules.insert("v1".into(), "return 1".into());
         runtime.load_modules(modules);
 
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_get",
             r#"
                 function on_get(this, actor, room)
@@ -3299,7 +3387,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program,
                 "#5",
@@ -3322,7 +3410,7 @@ mod tests {
         runtime.load_modules(modules);
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program,
                 "#5",
@@ -3344,7 +3432,7 @@ mod tests {
     fn grid_new_get_set_roundtrip() {
         let world = test_world();
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_get",
             r#"
                 function on_get(this, actor, room)
@@ -3361,7 +3449,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world, &program, "#5", "#3", Some("#1"), None,
                 Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[], 0,
             )
@@ -3381,7 +3469,7 @@ mod tests {
     fn grid_to_value_from_value_roundtrip() {
         let world = test_world();
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_get",
             r#"
                 function on_get(this, actor, room)
@@ -3393,7 +3481,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world, &program, "#5", "#3", Some("#1"), None,
                 Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[], 0,
             )
@@ -3402,7 +3490,7 @@ mod tests {
         let mut w = world.clone();
         apply_batch(&mut w, &result.batch).unwrap();
 
-        let restore_program = ProgramRecord::new(
+        let restore_program = TestProgram::new(
             "on_get",
             r#"
                 function on_get(this, actor, room)
@@ -3415,7 +3503,7 @@ mod tests {
         );
 
         let result2 = runtime
-            .run_hook(
+            .run_hook_rec(
                 &w, &restore_program, "#5", "#3", Some("#1"), None,
                 Budget::default(), counter(&w), &test_themes(), &test_map_templates(), &[], 0,
             )
@@ -3431,7 +3519,7 @@ mod tests {
     fn grid_pathfind() {
         let world = test_world();
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_get",
             r#"
                 function on_get(this, actor, room)
@@ -3452,7 +3540,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world, &program, "#5", "#3", Some("#1"), None,
                 Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[], 0,
             )
@@ -3471,7 +3559,7 @@ mod tests {
     fn grid_fill_and_find() {
         let world = test_world();
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_get",
             r#"
                 function on_get(this, actor, room)
@@ -3489,7 +3577,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world, &program, "#5", "#3", Some("#1"), None,
                 Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[], 0,
             )
@@ -3508,7 +3596,7 @@ mod tests {
     fn noise_functions_return_deterministic_values() {
         let world = test_world();
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_get",
             r#"
                 function on_get(this, actor, room)
@@ -3536,7 +3624,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world, &program, "#5", "#3", Some("#1"), None,
                 Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[], 0,
             )
@@ -3558,7 +3646,7 @@ mod tests {
     fn seeded_rng_is_deterministic() {
         let world = test_world();
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_get",
             r#"
                 function on_get(this, actor, room)
@@ -3583,7 +3671,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world, &program, "#5", "#3", Some("#1"), None,
                 Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[], 0,
             )
@@ -3605,7 +3693,7 @@ mod tests {
     fn distance_and_coordinate_math() {
         let world = test_world();
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_get",
             r#"
                 function on_get(this, actor, room)
@@ -3622,7 +3710,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world, &program, "#5", "#3", Some("#1"), None,
                 Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[], 0,
             )
@@ -3645,7 +3733,7 @@ mod tests {
     fn after_schedules_a_hook() {
         let world = test_world();
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_get",
             r#"
                 function on_get(this, actor, room)
@@ -3655,7 +3743,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world, &program, "#5", "#3", Some("#1"), None,
                 Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[], 0,
             )
@@ -3678,7 +3766,7 @@ mod tests {
     fn after_rejects_zero_ticks() {
         let world = test_world();
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_get",
             r#"
                 function on_get(this, actor, room)
@@ -3688,7 +3776,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world, &program, "#5", "#3", Some("#1"), None,
                 Budget::default(), counter(&world), &test_themes(), &test_map_templates(), &[], 0,
             )
@@ -4074,10 +4162,9 @@ mod tests {
                 target: t.into(),
                 description: "pwned".into(),
             }),
-            ("set_program", |t| Intent::SetProgram {
+            ("set_script", |t| Intent::SetScript {
                 target: t.into(),
-                hook: "on_use".into(),
-                source: "return true".into(),
+                source: "function on_use(this, actor, room) return true end".into(),
             }),
             ("set_lock", |t| Intent::SetLock {
                 target: t.into(),
@@ -4114,7 +4201,7 @@ mod tests {
         world.add_object(GameObject::new(&victim, "chest", Kind::Item).with_owner(&bob));
 
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
+        let program = TestProgram::new(
             "on_use",
             format!(
                 r#"
@@ -4127,7 +4214,7 @@ mod tests {
         );
 
         let result = runtime
-            .run_hook(
+            .run_hook_rec(
                 &world,
                 &program,
                 &host,
@@ -4441,8 +4528,8 @@ mod tests {
         budget: Budget,
     ) -> Result<ProgramResult, SoftcodeError> {
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new("on_get", source);
-        runtime.run_hook(
+        let program = TestProgram::new("on_get", source);
+        runtime.run_hook_rec(
             world,
             &program,
             "#5",

@@ -18,7 +18,7 @@ are built on. The game (The Last Stag) lives in `../the-last-stag-mud/`.
 ```sh
 cargo run                                    # default config (hearth.toml)
 cargo run -- ../the-last-stag-mud/hearth.toml  # game-specific config
-cargo test                                   # 276 tests
+cargo test                                   # 282 tests
 
 # Web client (Svelte)
 cd web && npm install                        # first time
@@ -106,7 +106,7 @@ src/
   softcode/
     mod.rs             Intent enum, IntentBatch, Budget, SoftcodeRuntime, bytecode cache
     api.rs             Luau-facing functions (read, write, predicates, utility, noise, rng, math, scheduling, emit_data, ink)
-    hooks.rs           32 known hooks, ProgramRecord with persistent state
+    hooks.rs           32 known hooks; ObjectScript (one script per object, hooks as functions) + LibModule; derive_hooks (full_moon parser)
     ink.rs             Ink narrative runtime (bladeink), compile cache, conversation state
   world/
     mod.rs             World struct (objects HashMap, queries)
@@ -154,7 +154,8 @@ docs/
 
 - **Everything is an object** — rooms, items, NPCs, players, exits all share `GameObject`
 - **32 hooks** — can_get, on_get, can_drop, on_drop, can_put, on_put, can_use, on_use, can_traverse, can_enter, on_enter, on_leave, can_look, on_look, can_say, on_say, can_see, on_move, on_destroy, on_connect, on_disconnect, on_whisper, on_emote, on_receive, on_damage, on_death, on_tick, on_startup, on_shutdown, on_reload, on_save, on_create
-- **78 Luau API functions** — read (21, incl. all_objects), predicates (9), write (20 incl. emit_data), spatial (4), utility (5), noise (5), seeded RNG (4), coordinate math (6), grid (1), ink (7)
+- **Object scripts** — one Luau script per object (the Godot/LPMUD model): a single chunk defines the object's hooks as top-level functions sharing one scope (helpers, constants, `require`d modules). The engine derives which hooks a script defines by parsing it with `full_moon` (`derive_hooks`), so a `function on_get(...)` inside a string literal is correctly ignored. `require`able `lib_<name>` modules are a separate concern, stored per-object in `libs` (they `return` a value, so they can't be functions in the shared script scope).
+- **~79 Luau API functions** — read (21, incl. all_objects), predicates (9), write (incl. `set_script`, `set_lib`, emit_data), spatial (4), utility (5), noise (5), seeded RNG (4), coordinate math (6), grid (1), ink (7)
 - **Luau modules** — `require()` loads shared .luau files from `<game_dir>/lib/`
 - **Grid2D userdata** — Rust-backed spatial grid: get/set, A* pathfinding, LOS, FOV, Dijkstra, flood fill
 - **Ownership** — `owner_ref` on every object, auto-set on creation, `@chown` admin command, builder permission enforcement
@@ -173,7 +174,7 @@ docs/
 - **Structured data channel** — `ClientMessage` enum (Text, Prompt, Room, Inventory, Game) sent as JSON to web clients
 - **Auto room data** — engine sends structured Room messages (exits, contents) on look/movement, powers sidebar panels
 - **emit_data()** — softcode can push structured JSON to web clients: `emit_data(player_ref, "channel", data_table)`
-- **REST API** — POST /api with ~40 actions (list/examine, create room/object/exit, set title/desc/attr/tags, program CRUD + history, world_check, ink compile/save/load, maps + terrain, eval, import/export)
+- **REST API** — POST /api with ~40 actions (list/examine, create room/object/exit, set title/desc/attr/tags, script get/set/clear + lib get/set/remove, world_check, ink compile/save/load, maps + terrain, eval, import/export)
 - **Web client** — Svelte 5 + Vite, multi-panel layout: scrolling output, structured sidebar, command input with history
 - **Unified builder IDE** — one web workspace (`/builder/workspace`) replacing the scatter of tools: a VS Code-style explorer tree (objects → hooks as files, plus a Maps folder) and a tabbed editor where objects (Properties/Hooks/Dialogue), hooks (CodeMirror), and Table/Map overviews all open as tabs; shared selection, New-object creator, ⌘K find, ⌘B sidebar toggle
 - **Native map builder** — Svelte grid painter, terrain palette, per-tile room inspector, and terrain/schema/import-export modals, sharing map TOML parse/serialize (`lib/mapwright-toml.js`); a real tab in the builder (the old standalone Mapwright `src/net/mapwright.html` + `GET /builder` route were removed)
@@ -260,9 +261,10 @@ See `docs/adr/` (6 ADRs). See `CONTEXT.md` for domain glossary.
 
 ## Testing
 
-276 tests across: softcode (74), engine (62), import/export (24), loader (19),
-db (19), grid (16), accounts (12), map templates (11), cli (10), ink (9),
-locks (9), markup (6), dungeon (4), world (1).
+282 tests across: softcode (78, incl. derive_hooks), engine (62),
+import/export (24), loader (19), db (19), grid (16), accounts (12),
+map templates (11), cli (10), ink (9), locks (9), markup (6), dungeon (4),
+world (1), game_smoke (1, loads the real Last Stag world).
 
 Softcode tests also discover and run `*.test.luau` files from the game
 directory (21 Luau tests across str and collections modules).

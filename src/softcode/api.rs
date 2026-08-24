@@ -99,18 +99,14 @@ fn parse_tag(spec: &str) -> mlua::Result<Tag> {
     Tag::parse(spec).map_err(mlua::Error::RuntimeError)
 }
 
-/// Refuse writing a `lib_<name>` Program whose `<name>` collides with a
-/// shipped module (embedded stdlib or `<game_dir>/lib`) — loud and early
-/// beats a library silently shadowing `str` server-wide. See
-/// docs/plans/program-authoring.md Stage 2, "`require` resolution".
-fn refuse_if_shipped_lib(lua: &Lua, hook: &str) -> mlua::Result<()> {
-    let Some(name) = hook.strip_prefix("lib_") else {
-        return Ok(());
-    };
+/// Refuse writing a lib module whose `<name>` collides with a shipped module
+/// (embedded stdlib or `<game_dir>/lib`) — loud and early beats a library
+/// silently shadowing `str` server-wide.
+fn refuse_if_shipped_lib(lua: &Lua, name: &str) -> mlua::Result<()> {
     let sources: Table = lua.named_registry_value(crate::softcode::MODULE_SOURCES_KEY)?;
     if sources.contains_key(name)? {
         return Err(mlua::Error::RuntimeError(format!(
-            "set_program: '{}' is a shipped module — choose a different library name",
+            "set_lib: '{}' is a shipped module — choose a different library name",
             name
         )));
     }
@@ -1456,11 +1452,21 @@ pub fn install<'scope, 'env>(
 
     let b = Rc::clone(&batch);
     env.set(
-        "set_program",
-        scope.create_function(move |lua, (r, hook, source): (Value, String, String)| {
+        "set_script",
+        scope.create_function(move |_, (r, source): (Value, String)| {
             let target = ref_of(&r)?;
-            refuse_if_shipped_lib(lua, &hook)?;
-            b.borrow_mut().push(Intent::SetProgram { target, hook, source });
+            b.borrow_mut().push(Intent::SetScript { target, source });
+            Ok(())
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
+        "set_lib",
+        scope.create_function(move |lua, (r, name, source): (Value, String, String)| {
+            let target = ref_of(&r)?;
+            refuse_if_shipped_lib(lua, &name)?;
+            b.borrow_mut().push(Intent::SetLib { target, name, source });
             Ok(())
         })?,
     )?;
@@ -1802,16 +1808,31 @@ pub fn install<'scope, 'env>(
     let b = Rc::clone(&batch);
     env.set(
         "apply_template",
-        scope.create_function(move |lua, (r, template): (Value, Table)| {
+        scope.create_function(move |_, (r, template): (Value, Value)| {
             let target = ref_of(&r)?;
-            for (hook, source) in template.pairs::<String, String>().flatten() {
-                refuse_if_shipped_lib(lua, &hook)?;
-                b.borrow_mut().push(Intent::SetProgram {
-                    target: target.clone(),
-                    hook,
-                    source,
-                });
-            }
+            // A template is behavior for an object. In the object-script model
+            // that is a single Luau chunk defining the hook functions. Accept
+            // either the whole source directly, or a table of source fragments
+            // (each defining one or more hook functions) that are concatenated
+            // — order is irrelevant since they are all top-level definitions.
+            let source = match template {
+                Value::String(s) => s.to_str()?.to_string(),
+                Value::Table(t) => {
+                    let mut parts: Vec<String> = Vec::new();
+                    for pair in t.pairs::<Value, String>() {
+                        let (_, src) = pair?;
+                        parts.push(src);
+                    }
+                    parts.join("\n\n")
+                }
+                other => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "apply_template: expected a source string or table, got {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            b.borrow_mut().push(Intent::SetScript { target, source });
             Ok(())
         })?,
     )?;

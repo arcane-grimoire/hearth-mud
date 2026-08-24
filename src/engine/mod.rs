@@ -10,7 +10,7 @@ use crate::accounts::{AccountStore, Scope};
 use crate::config::Config;
 use crate::db::Database;
 use crate::locks::{self, AccessContext};
-use crate::softcode::hooks::{self, ProgramRecord};
+use crate::softcode::hooks::{self};
 use crate::softcode::{self, Budget, Effect, SoftcodeRuntime};
 use crate::world::{GameObject, Kind, Tag, World};
 
@@ -104,9 +104,20 @@ pub enum ApiRequest {
     AddTag { ref_id: String, tag: String },
     RemoveTag { ref_id: String, tag: String },
     DeleteObject { ref_id: String },
-    SetProgram { ref_id: String, hook: String, source: String },
-    RemoveProgram { ref_id: String, hook: String },
-    ListPrograms { ref_id: String },
+    /// Set an object's whole behavior script (hooks as functions in one shared
+    /// scope). Replaces the object's existing script.
+    SetScript { ref_id: String, source: String },
+    /// Remove an object's script entirely.
+    ClearScript { ref_id: String },
+    /// An object's script: `{ source, hooks: [..], enabled }` (or null).
+    GetScript { ref_id: String },
+    /// Set a `require`able lib module on a `Kind::Code` object, keyed by bare
+    /// `<name>` (loaded as `require("<name>")`).
+    SetLib { ref_id: String, name: String, source: String },
+    /// Remove a lib module by bare `<name>`.
+    RemoveLib { ref_id: String, name: String },
+    /// An object's lib modules: `[{ name, source }]`.
+    ListLibs { ref_id: String },
     /// Compile-check Luau without running or saving it — the linter backend
     /// for the code editor. Wraps `Softcode::check_syntax`; returns
     /// `{valid, error?}`. Builder-gated (authoring surface), like the other
@@ -152,15 +163,6 @@ pub enum ApiRequest {
     /// so it rides in the public `is_read` set, and the client never has to
     /// hard-code (and drift from) the list.
     ListHooks,
-    /// Version history for one `(ref_id, hook)` — the REST counterpart of
-    /// `@program/history`. Requires auth like any other write-tier action
-    /// (see `is_read` below): it serves full historical Program source,
-    /// same as `ListPrograms`.
-    ProgramHistory { ref_id: String, hook: String },
-    /// Restore version `version` (1-based, oldest first) of `(ref_id,
-    /// hook)` as a *new* version — the REST counterpart of
-    /// `@program/restore`. Non-destructive, same as the telnet command.
-    ProgramRestore { ref_id: String, hook: String, version: usize },
     ListExits { room_ref: String },
     /// Distinct room areas (derived from each room's `FILE_KEY_ATTR` prefix)
     /// with counts — the picker feed for the room builder's scope bar.
@@ -435,9 +437,7 @@ impl DerivedIndexes {
             troupes: HashMap::new(),
         };
         for obj in world.objects.values() {
-            if let Some(program) = hooks::get_program(obj, "on_tick")
-                && program.enabled
-            {
+            if hooks::object_defines_hook(obj, "on_tick") {
                 let interval = obj
                     .attrs
                     .get("tick_interval")
@@ -446,8 +446,8 @@ impl DerivedIndexes {
                 idx.tickables.push((obj.ref_id.clone(), interval));
             }
             if obj.tags.iter().any(|t| t.category == "system" && t.key == "global") {
-                for hook in obj.programs.keys() {
-                    if obj.programs.get(hook).is_some_and(|p| p.enabled) {
+                if let Some(script) = hooks::get_script(obj) {
+                    for hook in &script.hooks {
                         idx.globals_by_hook.entry(hook.clone()).or_default().push(obj.ref_id.clone());
                     }
                 }
@@ -517,18 +517,6 @@ impl Engine {
                         file_hashes = result.file_hashes;
                         if let Err(e) = db.save_file_hashes(&file_hashes) {
                             tracing::warn!(error = %e, "Failed to persist file hashes");
-                        }
-                        // File installs are an authoring path too (see
-                        // docs/plans/program-authoring.md Stage 3) — record a
-                        // version for each. Content-addressed dedupe means an
-                        // unchanged file across restarts costs a lookup, not a
-                        // new row. No `actor_ref` exists this early (there is
-                        // no session), so the author is `None`, same as ticks
-                        // and timers.
-                        for (obj_ref, hook, source) in &result.installed_programs {
-                            if let Err(e) = db.record_program_version(obj_ref, hook, source, None) {
-                                tracing::warn!(error = %e, obj_ref, hook, "Failed to record program version for file install");
-                            }
                         }
                     }
                     Err(e) => tracing::error!(error = %e, "Failed to load game content"),
@@ -786,9 +774,10 @@ impl Engine {
     /// source instead of returning a stale cached module — see
     /// docs/plans/program-authoring.md Stage 2.
     fn invalidate_libs_touched_by(&self, batch: &softcode::IntentBatch) {
-        let touched_lib = batch.intents.iter().any(|intent| {
-            matches!(intent, softcode::Intent::SetProgram { hook, .. } if hook.starts_with("lib_"))
-        });
+        let touched_lib = batch
+            .intents
+            .iter()
+            .any(|intent| matches!(intent, softcode::Intent::SetLib { .. }));
         if touched_lib {
             self.softcode.invalidate_module_cache();
         }
@@ -799,7 +788,7 @@ impl Engine {
             .world
             .objects
             .values()
-            .filter(|obj| hooks::get_program(obj, hook_name).is_some())
+            .filter(|obj| hooks::object_defines_hook(obj, hook_name))
             .map(|obj| obj.ref_id.clone())
             .collect();
         let mut ran = 0u32;
@@ -817,11 +806,10 @@ impl Engine {
     }
 
     fn fire_on_create(&mut self, ref_id: &str) {
-        if self
+        if !self
             .world
             .get(ref_id)
-            .and_then(|o| hooks::get_program(o, "on_create"))
-            .is_none()
+            .is_some_and(|o| hooks::object_defines_hook(o, "on_create"))
         {
             return;
         }
@@ -836,12 +824,12 @@ impl Engine {
         hook_name: &str,
         args: Option<&str>,
     ) -> Result<(), String> {
-        let program = match self
+        let script = match self
             .world
             .get(this_ref)
-            .and_then(|o| hooks::get_program(o, hook_name))
+            .and_then(|o| hooks::get_script(o).filter(|s| s.defines(hook_name)))
         {
-            Some(p) => p.clone(),
+            Some(s) => s.clone(),
             None => return Ok(()),
         };
 
@@ -855,7 +843,8 @@ impl Engine {
             .softcode
             .run_hook(
                 &self.world,
-                &program,
+                &script,
+                hook_name,
                 this_ref,
                 this_ref,
                 room_ref.as_deref(),
@@ -874,61 +863,30 @@ impl Engine {
         self.invalidate_libs_touched_by(&result.batch);
         self.deliver_effects(&effects, this_ref);
 
-        if !result.state.is_empty()
-            && let Some(obj) = self.world.get_mut(this_ref)
-                && let Some(prog) = obj.programs.get_mut(hook_name) {
-                    prog.state = result.state;
-                }
+        self.write_back_script_state(this_ref, hook_name, result.state);
 
         Ok(())
     }
 
     fn fire_tick_hook_named(&mut self, this_ref: &str, hook_name: &str) -> Result<(), String> {
-        let program = match self
-            .world
-            .get(this_ref)
-            .and_then(|o| hooks::get_program(o, hook_name))
-        {
-            Some(p) => p.clone(),
-            None => return Ok(()),
-        };
+        self.fire_tick_hook_with_args(this_ref, hook_name, None)
+    }
 
-        let room_ref = self
-            .world
-            .get(this_ref)
-            .and_then(|o| o.location_ref.clone());
-
-        let dbref_counter = Rc::new(Cell::new(self.world.next_id));
-        let result = self
-            .softcode
-            .run_hook(
-                &self.world,
-                &program,
-                this_ref,
-                this_ref,
-                room_ref.as_deref(),
-                None,
-                Budget::default(),
-                Rc::clone(&dbref_counter),
-                &self.themes,
-                &self.map_templates,
-                &self.scheduled_hooks,
-                self.tick_count,
-            )
-            .map_err(|e| e.to_string())?;
-
-        let effects = softcode::apply_batch(&mut self.world, &result.batch)?;
-        self.world.next_id = dbref_counter.get();
-        self.invalidate_libs_touched_by(&result.batch);
-        self.deliver_effects(&effects, this_ref);
-
-        if !result.state.is_empty()
+    /// Persist the object's `state` table after a hook run. Only `on_tick`
+    /// hooks read/write `state` (see [`SoftcodeRuntime::run_hook`]), so other
+    /// hooks return an empty map — don't clobber the stored state with it.
+    fn write_back_script_state(
+        &mut self,
+        this_ref: &str,
+        hook_name: &str,
+        state: HashMap<String, serde_json::Value>,
+    ) {
+        if hook_name == "on_tick"
             && let Some(obj) = self.world.get_mut(this_ref)
-                && let Some(prog) = obj.programs.get_mut(hook_name) {
-                    prog.state = result.state;
-                }
-
-        Ok(())
+            && let Some(script) = obj.script.as_mut()
+        {
+            script.state = state;
+        }
     }
 
     fn do_save(&mut self) {
@@ -1189,7 +1147,7 @@ impl Engine {
                 // accepted even when it isn't in `known`.
                 ApiResponse::success(serde_json::json!({
                     "known": known,
-                    "open_prefixes": ["on_", "cmd_", "lib_"],
+                    "open_prefixes": ["on_", "cmd_"],
                 }))
             }
             ApiRequest::CreateRoom { area, key, title, description } => {
@@ -1262,7 +1220,12 @@ impl Engine {
                 match self.world.get(&ref_id) {
                     Some(obj) => {
                         let tags: Vec<String> = obj.tags.iter().map(|t| t.as_spec()).collect();
-                        let programs: Vec<String> = obj.programs.keys().cloned().collect();
+                        let hook_names: Vec<String> = obj
+                            .script
+                            .as_ref()
+                            .map(|s| s.hooks.clone())
+                            .unwrap_or_default();
+                        let lib_names: Vec<String> = obj.libs.keys().cloned().collect();
                         let locks: &HashMap<String, String> = &obj.locks;
                         ApiResponse::success(serde_json::json!({
                             "ref_id": obj.ref_id,
@@ -1274,7 +1237,9 @@ impl Engine {
                             "target_ref": obj.target_ref,
                             "attrs": obj.attrs,
                             "tags": tags,
-                            "programs": programs,
+                            "has_script": obj.script.is_some(),
+                            "hooks": hook_names,
+                            "libs": lib_names,
                             "locks": locks,
                             "aliases": obj.aliases.iter().collect::<Vec<_>>(),
                         }))
@@ -1417,120 +1382,83 @@ impl Engine {
                     ApiResponse::error(format!("No object with ref '{}'", ref_id))
                 }
             }
-            ApiRequest::SetProgram { ref_id, hook, source } => {
-                if let Some(lib_name) = hook.strip_prefix("lib_")
-                    && self.softcode.is_shipped_module(lib_name) {
-                        return ApiResponse::error(format!(
-                            "'{}' is a shipped module — choose a different name for your library",
-                            lib_name
-                        ));
-                    }
+            ApiRequest::SetScript { ref_id, source } => {
                 if let Err(e) = self.softcode.check_syntax(&source) {
                     return ApiResponse::error(format!("Syntax error: {}", e));
                 }
                 match self.world.get_mut(&ref_id) {
-                    Some(obj) => match hooks::set_program(obj, &hook, source.clone()) {
-                        Ok(()) => {
-                            if hook.starts_with("lib_") {
-                                self.softcode.invalidate_module_cache();
-                            }
-                            self.record_program_version(&ref_id, &hook, &source, acting_account.as_deref());
-                            ApiResponse::ok()
-                        }
-                        Err(e) => ApiResponse::error(e),
-                    },
+                    Some(obj) => {
+                        hooks::set_script(obj, source);
+                        ApiResponse::ok()
+                    }
                     None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
                 }
             }
-            ApiRequest::RemoveProgram { ref_id, hook } => {
+            ApiRequest::ClearScript { ref_id } => {
                 match self.world.get_mut(&ref_id) {
                     Some(obj) => {
-                        if hooks::remove_program(obj, &hook) {
-                            if hook.starts_with("lib_") {
-                                self.softcode.invalidate_module_cache();
-                            }
-                            self.record_program_tombstone(&ref_id, &hook, acting_account.as_deref());
+                        hooks::clear_script(obj);
+                        ApiResponse::ok()
+                    }
+                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
+            ApiRequest::GetScript { ref_id } => {
+                match self.world.get(&ref_id) {
+                    Some(obj) => {
+                        let script = obj.script.as_ref().map(|s| serde_json::json!({
+                            "source": s.source,
+                            "hooks": s.hooks,
+                            "enabled": s.enabled,
+                        }));
+                        ApiResponse::success(serde_json::json!(script))
+                    }
+                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
+            ApiRequest::SetLib { ref_id, name, source } => {
+                if self.softcode.is_shipped_module(&name) {
+                    return ApiResponse::error(format!(
+                        "'{}' is a shipped module — choose a different name for your library",
+                        name
+                    ));
+                }
+                if let Err(e) = self.softcode.check_syntax(&source) {
+                    return ApiResponse::error(format!("Syntax error: {}", e));
+                }
+                match self.world.get_mut(&ref_id) {
+                    Some(obj) => {
+                        hooks::set_lib(obj, &name, source, hooks::ProgramOrigin::InGame);
+                        self.softcode.invalidate_module_cache();
+                        ApiResponse::ok()
+                    }
+                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
+            ApiRequest::RemoveLib { ref_id, name } => {
+                match self.world.get_mut(&ref_id) {
+                    Some(obj) => {
+                        if hooks::remove_lib(obj, &name) {
+                            self.softcode.invalidate_module_cache();
                         }
                         ApiResponse::ok()
                     }
                     None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
                 }
             }
-            ApiRequest::ListPrograms { ref_id } => {
+            ApiRequest::ListLibs { ref_id } => {
                 match self.world.get(&ref_id) {
                     Some(obj) => {
-                        let programs: Vec<serde_json::Value> = hooks::list_programs(obj)
+                        let mut libs: Vec<serde_json::Value> = obj.libs
                             .iter()
-                            .map(|p| serde_json::json!({
-                                "hook": p.hook,
-                                "enabled": p.enabled,
-                                "source": p.source,
+                            .map(|(name, m)| serde_json::json!({
+                                "name": name,
+                                "source": m.source,
                             }))
                             .collect();
-                        ApiResponse::success(serde_json::json!(programs))
+                        libs.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+                        ApiResponse::success(serde_json::json!(libs))
                     }
-                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
-                }
-            }
-            ApiRequest::ProgramHistory { ref_id, hook } => {
-                let versions = match self.db.list_program_versions(&ref_id, &hook) {
-                    Ok(v) => v,
-                    Err(e) => return ApiResponse::error(format!("Failed to read history: {}", e)),
-                };
-                let items: Vec<serde_json::Value> = versions
-                    .iter()
-                    .enumerate()
-                    .map(|(i, v)| {
-                        serde_json::json!({
-                            "version": i + 1,
-                            "created_at": v.created_at,
-                            "author": self.display_author(v.author.as_deref()),
-                            "deleted": v.deleted,
-                            "source": v.source,
-                        })
-                    })
-                    .collect();
-                ApiResponse::success(serde_json::json!(items))
-            }
-            ApiRequest::ProgramRestore { ref_id, hook, version } => {
-                let ver = match self.db.get_program_version(&ref_id, &hook, version) {
-                    Ok(Some(v)) => v,
-                    Ok(None) => {
-                        return ApiResponse::error(format!(
-                            "{}/{} has no version {}",
-                            ref_id, hook, version
-                        ));
-                    }
-                    Err(e) => return ApiResponse::error(format!("Failed to read history: {}", e)),
-                };
-                // Non-destructive, same as `@program/restore`: always
-                // appends a new version (or a new tombstone) rather than
-                // rewinding — see docs/plans/program-authoring.md Stage 3's
-                // "Restore is non-destructive".
-                if ver.deleted {
-                    if let Some(obj) = self.world.get_mut(&ref_id) {
-                        hooks::remove_program(obj, &hook);
-                    }
-                    if hook.starts_with("lib_") {
-                        self.softcode.invalidate_module_cache();
-                    }
-                    self.record_program_tombstone(&ref_id, &hook, acting_account.as_deref());
-                    return ApiResponse::success(serde_json::json!({ "restored_deleted": true }));
-                }
-                if let Err(e) = self.softcode.check_syntax(&ver.source) {
-                    return ApiResponse::error(format!("Syntax error: {}", e));
-                }
-                match self.world.get_mut(&ref_id) {
-                    Some(obj) => match hooks::set_program(obj, &hook, ver.source.clone()) {
-                        Ok(()) => {
-                            if hook.starts_with("lib_") {
-                                self.softcode.invalidate_module_cache();
-                            }
-                            self.record_program_version(&ref_id, &hook, &ver.source, acting_account.as_deref());
-                            ApiResponse::ok()
-                        }
-                        Err(e) => ApiResponse::error(e),
-                    },
                     None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
                 }
             }
@@ -1713,17 +1641,25 @@ impl Engine {
                     .world
                     .objects
                     .values()
-                    .filter(|o| !o.programs.is_empty())
+                    .filter(|o| o.script.is_some() || !o.libs.is_empty())
                     .map(|o| {
-                        let mut hooks: Vec<String> = o.programs.keys().cloned().collect();
+                        let mut hooks: Vec<String> = o
+                            .script
+                            .as_ref()
+                            .map(|s| s.hooks.clone())
+                            .unwrap_or_default();
                         hooks.sort();
+                        let mut libs: Vec<String> = o.libs.keys().cloned().collect();
+                        libs.sort();
                         serde_json::json!({
                             "ref_id": o.ref_id,
                             "key": o.key,
                             "title": o.title,
                             "kind": o.kind.to_string(),
                             "area": Self::room_area(o),
+                            "has_script": o.script.is_some(),
                             "hooks": hooks,
+                            "libs": libs,
                         })
                     })
                     .collect();
@@ -1788,13 +1724,22 @@ impl Engine {
                     }
                 }
 
-                // Compile every hook program; report the ones that don't parse.
-                for o in self.world.objects.values().filter(|o| !o.programs.is_empty()) {
-                    for p in hooks::list_programs(o) {
-                        if let Err(err) = self.softcode.check_syntax(&p.source) {
+                // Compile every object script and lib module; report the ones
+                // that don't parse.
+                for o in self.world.objects.values() {
+                    if let Some(script) = o.script.as_ref()
+                        && let Err(err) = self.softcode.check_syntax(&script.source)
+                    {
+                        problems.push(serde_json::json!({
+                            "kind": "syntax_error", "severity": "high",
+                            "ref": o.ref_id, "key": o.key, "hook": "script", "message": err,
+                        }));
+                    }
+                    for (name, lib) in &o.libs {
+                        if let Err(err) = self.softcode.check_syntax(&lib.source) {
                             problems.push(serde_json::json!({
                                 "kind": "syntax_error", "severity": "high",
-                                "ref": o.ref_id, "key": o.key, "hook": p.hook, "message": err,
+                                "ref": o.ref_id, "key": o.key, "hook": format!("lib_{}", name), "message": err,
                             }));
                         }
                     }
@@ -1956,13 +1901,13 @@ impl Engine {
             }
             ApiRequest::PreviewHook { ref_id, hook, source, actor_ref, room_ref } => {
                 // The source to fire: the unsaved buffer if given, else the
-                // object's saved program for this hook.
+                // object's saved script (the hook function lives inside it).
                 let src = match source {
                     Some(s) => s,
-                    None => match self.world.get(&ref_id).and_then(|o| o.programs.get(&hook)) {
-                        Some(p) => p.source.clone(),
+                    None => match self.world.get(&ref_id).and_then(|o| o.script.as_ref()) {
+                        Some(s) => s.source.clone(),
                         None => {
-                            return ApiResponse::error(format!("{} has no '{}' program", ref_id, hook));
+                            return ApiResponse::error(format!("{} has no script", ref_id));
                         }
                     },
                 };
@@ -1986,17 +1931,18 @@ impl Engine {
                             .filter(|o| o.kind == Kind::Room)
                             .map(|_| ref_id.clone())
                     });
-                let program = hooks::ProgramRecord {
-                    hook: hook.clone(),
+                let script = hooks::ObjectScript {
                     source: src,
                     enabled: true,
                     state: std::collections::HashMap::new(),
                     origin: Default::default(),
+                    hooks: vec![hook.clone()],
                 };
                 let dbref_counter = Rc::new(Cell::new(self.world.next_id));
                 let result = self.softcode.run_hook(
                     &self.world,
-                    &program,
+                    &script,
+                    &hook,            // hook to fire
                     &ref_id,          // this
                     &actor,           // actor
                     room.as_deref(),  // room
@@ -2910,9 +2856,6 @@ impl Engine {
             "@program" => self.cmd_program(session_id, &actor_ref, &args),
             "@programs" => self.cmd_programs(session_id, &actor_ref, &args),
             "@rmprogram" => self.cmd_rmprogram(session_id, &actor_ref, &args),
-            "@program/history" => self.cmd_program_history(session_id, &actor_ref, &args),
-            "@program/restore" => self.cmd_program_restore(session_id, &actor_ref, &args),
-            "@program/diff" => self.cmd_program_diff(session_id, &actor_ref, &args),
             "@tag" => self.cmd_tag(session_id, &actor_ref, &args),
             "@untag" => self.cmd_untag(session_id, &actor_ref, &args),
             "@script" => self.cmd_script(session_id, &actor_ref, &args),
@@ -3251,36 +3194,8 @@ impl Engine {
         Ok((resolved, hook.to_string()))
     }
 
-    /// Record a version of `(obj_ref, hook)`'s source. Called from the
-    /// *authoring* write paths only (`@program`, `@lib`, REST `SetProgram`, and
-    /// the loader's file installs). Never called for softcode's
-    /// `Intent::SetProgram` — that path is instantiation (attaching
-    /// behaviour to a procedurally generated object from a source that's
-    /// already a string constant under git), not authoring: instantiation is
-    /// not authoring, so it gets no version history.
-    ///
-    /// A DB write on every call site, but small, rare (author-driven, not
-    /// per-tick), and off the hot request-handling path — the engine loop
-    /// is otherwise blocking here anyway for `save_world`/`save_accounts`,
-    /// so this is consistent with the rest of `Engine`'s persistence, not a
-    /// new category of risk.
-    fn record_program_version(&self, obj_ref: &str, hook: &str, source: &str, author: Option<&str>) {
-        if let Err(e) = self.db.record_program_version(obj_ref, hook, source, author) {
-            tracing::warn!(error = %e, obj_ref, hook, "Failed to record program version");
-        }
-    }
-
-    /// Record a tombstone version marking `(obj_ref, hook)` as deleted — see
-    /// the plan's "record deletions as tombstone versions" note.
-    fn record_program_tombstone(&self, obj_ref: &str, hook: &str, author: Option<&str>) {
-        if let Err(e) = self.db.record_program_tombstone(obj_ref, hook, author) {
-            tracing::warn!(error = %e, obj_ref, hook, "Failed to record program deletion tombstone");
-        }
-    }
-
-    /// Validate everything about a program write except the source itself:
-    /// the target exists, the actor may modify it, the hook name is known,
-    /// and (for `lib_*`) the name doesn't collide with a shipped module.
+    /// Validate everything about a script write except the source itself:
+    /// the target exists and the actor may modify it.
     /// Shared between the single-line and multi-line `@program` paths so
     /// entering the multi-line editor fails fast on a bad target instead of
     /// only discovering it after the user has typed a whole program.
@@ -3289,7 +3204,6 @@ impl Engine {
         session_id: &str,
         actor_ref: &str,
         target_ref: &str,
-        hook: &str,
     ) -> Option<String> {
         if self.world.get(target_ref).is_none() {
             return Some(format!("No object with ref '{}'.\r\n", target_ref));
@@ -3297,27 +3211,12 @@ impl Engine {
         if !self.can_modify_object(session_id, actor_ref, target_ref) {
             return Some("Permission denied (not owner).\r\n".to_string());
         }
-        if !hooks::is_valid_hook_name(hook) {
-            return Some(format!(
-                "Unknown hook '{}'. Known hooks: {}, or cmd_<name>.\r\n",
-                hook,
-                hooks::KNOWN_HOOKS.join(", ")
-            ));
-        }
-        if let Some(lib_name) = hook.strip_prefix("lib_")
-            && self.softcode.is_shipped_module(lib_name)
-        {
-            return Some(format!(
-                "'{}' is a shipped module — choose a different name for your library.\r\n",
-                lib_name
-            ));
-        }
         None
     }
 
-    /// Check syntax, write the Program, and record a version — the shared
-    /// tail of both the single-line and multi-line `@program` paths.
-    fn install_program(&mut self, actor_ref: &str, target_ref: &str, hook: &str, source: &str) -> String {
+    /// Check syntax and write the object's whole script — the shared tail of
+    /// both the single-line and multi-line `@program` paths.
+    fn install_program(&mut self, _actor_ref: &str, target_ref: &str, source: &str) -> String {
         if let Err(e) = self.softcode.check_syntax(source) {
             return format!("Syntax error in program: {}\r\n", e);
         }
@@ -3325,18 +3224,16 @@ impl Engine {
             Some(o) => o,
             None => return format!("No object with ref '{}'.\r\n", target_ref),
         };
-        if let Err(e) = hooks::set_program(obj, hook, source.to_string()) {
-            return format!("{}\r\n", e);
-        }
-        if hook.starts_with("lib_") {
-            self.softcode.invalidate_module_cache();
-        }
-        self.record_program_version(target_ref, hook, source, Some(actor_ref));
+        hooks::set_script(obj, source.to_string());
+        let hooks_list = obj
+            .script
+            .as_ref()
+            .map(|s| s.hooks.join(", "))
+            .unwrap_or_default();
         format!(
-            "Program installed: {}/{} ({})\r\n",
+            "Script installed on {} (hooks: {})\r\n",
             target_ref,
-            hook,
-            hooks::describe_hook(hook)
+            if hooks_list.is_empty() { "none detected".into() } else { hooks_list }
         )
     }
 
@@ -3355,31 +3252,51 @@ impl Engine {
         // multi-line authoring".
         let (path, source) = match args.split_once('=') {
             Some((p, s)) => (p.trim(), s.trim()),
-            None => return "Usage: @program <ref>/<hook> = <luau source>\r\n".to_string(),
+            None => (args.trim(), ""),
         };
-        let (target_ref, hook) = match self.resolve_ref_hook_path(actor_ref, path) {
-            Ok(v) => v,
-            Err(e) => return format!("{}\r\n", e),
-        };
-        if let Some(err) = self.check_program_write(session_id, actor_ref, &target_ref, &hook) {
+        if path.is_empty() {
+            return "Usage: @program <ref> [= <luau source>]  (defines the object's whole script; hooks are functions in it)\r\n".to_string();
+        }
+        let target_ref = self.resolve_object_ref(actor_ref, path);
+        if let Some(err) = self.check_program_write(session_id, actor_ref, &target_ref) {
             return err;
         }
         if source.is_empty() {
+            // Seed the multi-line editor with the current script so an edit is
+            // a real edit, not a blank-slate rewrite.
+            let current = self
+                .world
+                .get(&target_ref)
+                .and_then(|o| o.script.as_ref())
+                .map(|s| s.source.clone())
+                .unwrap_or_default();
             if let Some(actor) = self.world.get_mut(actor_ref) {
                 actor.attrs.insert("_program_editing".into(), serde_json::json!(true));
-                actor.attrs.insert("_program_buffer".into(), serde_json::json!(""));
+                actor.attrs.insert("_program_buffer".into(), serde_json::json!(current));
                 actor.attrs.insert("_program_target".into(), serde_json::json!(target_ref));
-                actor.attrs.insert("_program_hook".into(), serde_json::json!(hook));
             }
-            return "Enter Luau source. Type '.' on a line by itself to install it, '@abort' to cancel:\r\n"
+            return "Enter Luau source (define hooks as functions). Type '.' on a line by itself to install it, '@abort' to cancel:\r\n"
                 .to_string();
         }
-        self.install_program(actor_ref, &target_ref, &hook, source)
+        self.install_program(actor_ref, &target_ref, source)
+    }
+
+    /// Resolve a bare object-ref argument (a `#N` ref, or `here` for the
+    /// actor's room) for the script commands.
+    fn resolve_object_ref(&self, actor_ref: &str, arg: &str) -> String {
+        if arg == "here" {
+            self.world
+                .get(actor_ref)
+                .and_then(|a| a.location_ref.clone())
+                .unwrap_or_else(|| arg.to_string())
+        } else {
+            arg.to_string()
+        }
     }
 
     fn handle_program_editor_input(&mut self, session_id: &str, actor_ref: &str, input: &str) {
         if input == "." {
-            let (buffer, target_ref, hook) = {
+            let (buffer, target_ref) = {
                 let actor = match self.world.get(actor_ref) {
                     Some(a) => a,
                     None => return,
@@ -3396,32 +3313,24 @@ impl Engine {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let hook = actor
-                    .attrs
-                    .get("_program_hook")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                (buffer, target_ref, hook)
+                (buffer, target_ref)
             };
             if let Some(actor) = self.world.get_mut(actor_ref) {
                 actor.attrs.remove("_program_editing");
                 actor.attrs.remove("_program_buffer");
                 actor.attrs.remove("_program_target");
-                actor.attrs.remove("_program_hook");
             }
             if buffer.is_empty() {
                 self.send(session_id, "Empty source, nothing installed.\r\n");
                 return;
             }
-            let output = self.install_program(actor_ref, &target_ref, &hook, &buffer);
+            let output = self.install_program(actor_ref, &target_ref, &buffer);
             self.send(session_id, &output);
         } else if input == "@abort" {
             if let Some(actor) = self.world.get_mut(actor_ref) {
                 actor.attrs.remove("_program_editing");
                 actor.attrs.remove("_program_buffer");
                 actor.attrs.remove("_program_target");
-                actor.attrs.remove("_program_hook");
             }
             self.send(session_id, "Program edit cancelled.\r\n");
         } else if let Some(actor) = self.world.get_mut(actor_ref) {
@@ -3464,23 +3373,23 @@ impl Engine {
             Some(o) => o,
             None => return format!("No object with ref '{}'.\r\n", target_ref),
         };
-        let programs = hooks::list_programs(obj);
-        if programs.is_empty() {
-            return format!("{} has no programs.\r\n", target_ref);
+        let Some(script) = obj.script.as_ref() else {
+            return format!("{} has no script.\r\n", target_ref);
+        };
+        let mut out = format!(
+            "Script on {}{}:\r\n",
+            target_ref,
+            if script.enabled { "" } else { " (disabled)" }
+        );
+        if script.hooks.is_empty() {
+            out.push_str("  (no hook functions detected)\r\n");
+        } else {
+            out.push_str("  hooks: ");
+            out.push_str(&script.hooks.join(", "));
+            out.push_str("\r\n");
         }
-        let mut out = format!("Programs on {}:\r\n", target_ref);
-        for p in programs {
-            let preview: String = p.source.chars().take(40).collect();
-            let ellipsis = if p.source.chars().count() > 40 { "..." } else { "" };
-            out.push_str(&format!(
-                "  {}{}  {}\r\n      {}{}\r\n",
-                p.hook,
-                if p.enabled { "" } else { " (disabled)" },
-                hooks::describe_hook(&p.hook),
-                preview.replace('\n', " "),
-                ellipsis
-            ));
-        }
+        let lines = script.source.lines().count();
+        out.push_str(&format!("  {} line(s). Use @program {} to edit.\r\n", lines, target_ref));
         out
     }
 
@@ -3488,190 +3397,24 @@ impl Engine {
         if !self.session_has_scope(session_id, Scope::Builder) {
             return "Permission denied.\r\n".to_string();
         }
-        // @rmprogram <ref>/<hook>
+        // @rmprogram <ref> — removes the object's whole script
         if args.trim().is_empty() {
-            return "Usage: @rmprogram <ref>/<hook>\r\n".to_string();
+            return "Usage: @rmprogram <ref>\r\n".to_string();
         }
-        let (target_ref, hook) = match self.resolve_ref_hook_path(actor_ref, args.trim()) {
-            Ok(v) => v,
-            Err(e) => return format!("{}\r\n", e),
-        };
+        let target_ref = self.resolve_object_ref(actor_ref, args.trim());
+        if let Some(err) = self.check_program_write(session_id, actor_ref, &target_ref) {
+            return err;
+        }
         match self.world.get_mut(&target_ref) {
             Some(obj) => {
-                if hooks::remove_program(obj, &hook) {
-                    if hook.starts_with("lib_") {
-                        self.softcode.invalidate_module_cache();
-                    }
-                    self.record_program_tombstone(&target_ref, &hook, Some(actor_ref));
-                    format!("Removed program {}/{}.\r\n", target_ref, hook)
+                if hooks::clear_script(obj) {
+                    format!("Removed script on {}.\r\n", target_ref)
                 } else {
-                    format!("{} has no '{}' program.\r\n", target_ref, hook)
+                    format!("{} has no script.\r\n", target_ref)
                 }
             }
             None => format!("No object with ref '{}'.\r\n", target_ref),
         }
-    }
-
-    /// Resolve an `author` column value (an object ref or, for the REST
-    /// path, an account id — see `record_program_version`'s doc comment)
-    /// to a display name at read time. Per the plan's "Author" note: store
-    /// the ref, not a display name, because names change and a stale name
-    /// in a history listing is worse than none — so history rows carry the
-    /// ref and this only runs when someone actually looks at the list.
-    fn display_author(&self, author: Option<&str>) -> String {
-        match author {
-            None => "(system)".to_string(),
-            Some(a) => {
-                if let Some(obj) = self.world.get(a) {
-                    return obj.title.clone().unwrap_or_else(|| obj.key.clone());
-                }
-                if let Some(acct) = self.accounts.get(a) {
-                    return acct.username.clone();
-                }
-                a.to_string()
-            }
-        }
-    }
-
-    fn cmd_program_history(&self, session_id: &str, actor_ref: &str, args: &str) -> String {
-        if !self.session_has_scope(session_id, Scope::Builder) {
-            return "Permission denied.\r\n".to_string();
-        }
-        let path = args.trim();
-        if path.is_empty() {
-            return "Usage: @program/history <ref>/<hook>\r\n".to_string();
-        }
-        let (target_ref, hook) = match self.resolve_ref_hook_path(actor_ref, path) {
-            Ok(v) => v,
-            Err(e) => return format!("{}\r\n", e),
-        };
-        let versions = match self.db.list_program_versions(&target_ref, &hook) {
-            Ok(v) => v,
-            Err(e) => return format!("Failed to read history: {}\r\n", e),
-        };
-        if versions.is_empty() {
-            return format!("No version history for {}/{}.\r\n", target_ref, hook);
-        }
-        let mut out = format!("History for {}/{}:\r\n", target_ref, hook);
-        for (i, v) in versions.iter().enumerate() {
-            let n = i + 1;
-            let when = format_epoch_secs(v.created_at);
-            let author = self.display_author(v.author.as_deref());
-            let marker = if v.deleted { "  (deleted)" } else { "" };
-            out.push_str(&format!("  {:>3}  {}  {}{}\r\n", n, when, author, marker));
-        }
-        out.push_str("Use @program/diff or @program/restore with one of the numbers above.\r\n");
-        out
-    }
-
-    fn cmd_program_restore(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
-        if !self.session_has_scope(session_id, Scope::Builder) {
-            return "Permission denied.\r\n".to_string();
-        }
-        // @program/restore <ref>/<hook> <n>
-        let (path, n_str) = match args.trim().rsplit_once(' ') {
-            Some((p, n)) => (p.trim(), n.trim()),
-            None => return "Usage: @program/restore <ref>/<hook> <n>\r\n".to_string(),
-        };
-        let n: usize = match n_str.parse() {
-            Ok(v) if v > 0 => v,
-            _ => return "Version number must be a positive integer.\r\n".to_string(),
-        };
-        let (target_ref, hook) = match self.resolve_ref_hook_path(actor_ref, path) {
-            Ok(v) => v,
-            Err(e) => return format!("{}\r\n", e),
-        };
-        if let Some(err) = self.check_program_write(session_id, actor_ref, &target_ref, &hook) {
-            return err;
-        }
-        let version = match self.db.get_program_version(&target_ref, &hook, n) {
-            Ok(Some(v)) => v,
-            Ok(None) => return format!("{}/{} has no version {}.\r\n", target_ref, hook, n),
-            Err(e) => return format!("Failed to read history: {}\r\n", e),
-        };
-        // Non-destructive: restoring always *appends* a new version rather
-        // than rewinding, so history can never be made worse by using it —
-        // see docs/plans/program-authoring.md Stage 3's "Restore is
-        // non-destructive".
-        if version.deleted {
-            if let Some(obj) = self.world.get_mut(&target_ref) {
-                hooks::remove_program(obj, &hook);
-            }
-            if hook.starts_with("lib_") {
-                self.softcode.invalidate_module_cache();
-            }
-            self.record_program_tombstone(&target_ref, &hook, Some(actor_ref));
-            return format!(
-                "Version {} of {}/{} was a deletion — restored as a new deletion.\r\n",
-                n, target_ref, hook
-            );
-        }
-        let result = self.install_program(actor_ref, &target_ref, &hook, &version.source);
-        format!("Restored version {} as a new version. {}", n, result)
-    }
-
-    fn cmd_program_diff(&self, session_id: &str, actor_ref: &str, args: &str) -> String {
-        if !self.session_has_scope(session_id, Scope::Builder) {
-            return "Permission denied.\r\n".to_string();
-        }
-        // @program/diff <ref>/<hook> <n> [<m>] — diffs version <n> against
-        // version <m>, or against the object's current live source if <m>
-        // is omitted.
-        let mut parts = args.split_whitespace();
-        let (path, n_str) = match (parts.next(), parts.next()) {
-            (Some(p), Some(n)) => (p, n),
-            _ => return "Usage: @program/diff <ref>/<hook> <n> [<m>]\r\n".to_string(),
-        };
-        let m_str = parts.next();
-        let n: usize = match n_str.parse() {
-            Ok(v) if v > 0 => v,
-            _ => return "Version number must be a positive integer.\r\n".to_string(),
-        };
-        let (target_ref, hook) = match self.resolve_ref_hook_path(actor_ref, path) {
-            Ok(v) => v,
-            Err(e) => return format!("{}\r\n", e),
-        };
-        let from = match self.db.get_program_version(&target_ref, &hook, n) {
-            Ok(Some(v)) => v,
-            Ok(None) => return format!("{}/{} has no version {}.\r\n", target_ref, hook, n),
-            Err(e) => return format!("Failed to read history: {}\r\n", e),
-        };
-        let (to_source, to_label) = match m_str {
-            Some(m_str) => {
-                let m: usize = match m_str.parse() {
-                    Ok(v) if v > 0 => v,
-                    _ => return "Version number must be a positive integer.\r\n".to_string(),
-                };
-                match self.db.get_program_version(&target_ref, &hook, m) {
-                    Ok(Some(v)) => (v.source, format!("v{}", m)),
-                    Ok(None) => return format!("{}/{} has no version {}.\r\n", target_ref, hook, m),
-                    Err(e) => return format!("Failed to read history: {}\r\n", e),
-                }
-            }
-            None => match self.world.get(&target_ref).and_then(|o| o.programs.get(&hook)) {
-                Some(p) => (p.source.clone(), "current".to_string()),
-                None => (String::new(), "current (no program)".to_string()),
-            },
-        };
-        let diff = similar::TextDiff::from_lines(&from.source, &to_source);
-        let mut out = format!("Diff {}/{} v{} -> {}:\r\n", target_ref, hook, n, to_label);
-        let mut any = false;
-        for change in diff.iter_all_changes() {
-            let sign = match change.tag() {
-                similar::ChangeTag::Delete => '-',
-                similar::ChangeTag::Insert => '+',
-                similar::ChangeTag::Equal => ' ',
-            };
-            if change.tag() != similar::ChangeTag::Equal {
-                any = true;
-            }
-            let line = change.value().trim_end_matches('\n');
-            out.push_str(&format!("{}{}\r\n", sign, line));
-        }
-        if !any {
-            out.push_str("(no differences)\r\n");
-        }
-        out
     }
 
     // -- Softcode hook execution --
@@ -3686,12 +3429,12 @@ impl Engine {
         room_ref: Option<&str>,
         args: Option<&str>,
     ) -> Result<HookRun, String> {
-        let program: &ProgramRecord = match self
+        let script = match self
             .world
             .get(this_ref)
-            .and_then(|o| hooks::get_program(o, hook_name))
+            .and_then(|o| hooks::get_script(o).filter(|s| s.defines(hook_name)))
         {
-            Some(p) => p,
+            Some(s) => s.clone(),
             None => {
                 return Ok(HookRun {
                     denied: false,
@@ -3705,7 +3448,8 @@ impl Engine {
             .softcode
             .run_hook(
                 &self.world,
-                program,
+                &script,
+                hook_name,
                 this_ref,
                 actor_ref,
                 room_ref,
@@ -3723,6 +3467,7 @@ impl Engine {
         let effects = softcode::apply_batch(&mut self.world, &result.batch)?;
         self.world.next_id = dbref_counter.get();
         self.invalidate_libs_touched_by(&result.batch);
+        self.write_back_script_state(this_ref, hook_name, result.state);
         let emitted_to_actor = effects
             .iter()
             .any(|e| matches!(e, Effect::ToActor { target, .. } if target == actor_ref));
@@ -4543,7 +4288,7 @@ impl Engine {
             .objects_in(&room_ref)
             .iter()
             .filter(|o| o.tags.contains(&hidden_tag) && o.ref_id != actor_ref)
-            .map(|o| (o.ref_id.clone(), o.programs.contains_key("can_see")))
+            .map(|o| (o.ref_id.clone(), hooks::object_defines_hook(o, "can_see")))
             .collect();
         let mut hidden_refs: Vec<String> = Vec::new();
         for (ref_id, has_can_see) in hidden_candidates {
@@ -4624,7 +4369,6 @@ impl Engine {
             cmds.extend([
                 "@dig", "@open", "@describe", "@create", "@destroy", "@set",
                 "@teleport", "@name", "@program", "@programs", "@rmprogram",
-                "@program/history", "@program/restore", "@program/diff",
                 "@tag", "@untag", "@script", "@scripts", "@rmscript",
                 "@script-interval", "@lib", "@libs", "@rmlib",
                 "@lock", "@unlock", "@locks",
@@ -4657,9 +4401,11 @@ impl Engine {
                 .filter(|o| o.tags.contains(&global_tag));
 
             for obj in room_itself.chain(room_objs).chain(inv_objs).chain(global_objs) {
-                for (hook, prog) in &obj.programs {
-                    if hook.starts_with("cmd_") && prog.enabled {
-                        cmds.push(hook[4..].to_string());
+                if let Some(script) = hooks::get_script(obj) {
+                    for hook in &script.hooks {
+                        if let Some(cmd) = hook.strip_prefix("cmd_") {
+                            cmds.push(cmd.to_string());
+                        }
                     }
                 }
             }
@@ -4770,17 +4516,31 @@ impl Engine {
     // these commands only ever look among `Kind::Code` objects, so a builder
     // reusing a script's name for something else can't collide with it.
 
-    /// Find the ref of the `Kind::Code` object named `name` that carries an
-    /// enabled-or-not Program at `hook`, if any.
-    fn find_code_object_ref(&self, name: &str, hook: &str) -> Option<String> {
+    /// Find the ref of the `Kind::Code` object named `name` whose script
+    /// defines `on_tick` (a global tick script), if any.
+    fn find_script_object_ref(&self, name: &str) -> Option<String> {
         self.world
             .objects
             .values()
-            .find(|o| o.kind == Kind::Code && o.key == name && o.programs.contains_key(hook))
+            .find(|o| {
+                o.kind == Kind::Code
+                    && o.key == name
+                    && o.script.as_ref().is_some_and(|s| s.hooks.iter().any(|h| h == "on_tick"))
+            })
             .map(|o| o.ref_id.clone())
     }
 
-    fn cmd_script(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
+    /// Find the ref of the `Kind::Code` object named `name` that hosts the lib
+    /// module `<name>`, if any.
+    fn find_lib_object_ref(&self, name: &str) -> Option<String> {
+        self.world
+            .objects
+            .values()
+            .find(|o| o.kind == Kind::Code && o.key == name && o.libs.contains_key(name))
+            .map(|o| o.ref_id.clone())
+    }
+
+    fn cmd_script(&mut self, session_id: &str, _actor_ref: &str, args: &str) -> String {
         if !self.session_has_scope(session_id, Scope::Builder) {
             return "Permission denied.\r\n".to_string();
         }
@@ -4795,7 +4555,7 @@ impl Engine {
         if let Err(e) = self.softcode.check_syntax(source) {
             return format!("Syntax error: {}\r\n", e);
         }
-        let existing_ref = self.find_code_object_ref(name, "on_tick");
+        let existing_ref = self.find_script_object_ref(name);
         let is_new = existing_ref.is_none();
         let ref_id = existing_ref.unwrap_or_else(|| {
             let ref_id = self.world.next_dbref();
@@ -4806,13 +4566,7 @@ impl Engine {
         if is_new {
             obj.attrs.insert("tick_interval".into(), serde_json::json!(1));
         }
-        if let Err(e) = hooks::set_program(obj, "on_tick", source.to_string()) {
-            return format!("{}\r\n", e);
-        }
-        // A global script is exactly `@program <ref>/on_tick = ...` with
-        // friendlier ergonomics (see Stage 2) — a human writing one is
-        // authoring, same as `@program`/`@lib`, so it gets a version too.
-        self.record_program_version(&ref_id, "on_tick", source, Some(actor_ref));
+        hooks::set_script(obj, source.to_string());
         if is_new {
             format!("Script '{}' created (ticks every 1s).\r\n", name)
         } else {
@@ -4828,7 +4582,10 @@ impl Engine {
             .world
             .objects
             .values()
-            .filter(|o| o.kind == Kind::Code && o.programs.contains_key("on_tick"))
+            .filter(|o| {
+                o.kind == Kind::Code
+                    && o.script.as_ref().is_some_and(|s| s.hooks.iter().any(|h| h == "on_tick"))
+            })
             .collect();
         if scripts.is_empty() {
             return "No global scripts.\r\n".to_string();
@@ -4836,14 +4593,14 @@ impl Engine {
         scripts.sort_by(|a, b| a.key.cmp(&b.key));
         let mut out = "\r\nGlobal scripts:\r\n".to_string();
         for obj in scripts {
-            let program = &obj.programs["on_tick"];
-            let status = if program.enabled { "on" } else { "off" };
+            let script = obj.script.as_ref().unwrap();
+            let status = if script.enabled { "on" } else { "off" };
             let interval = obj
                 .attrs
                 .get("tick_interval")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1);
-            let state_keys = program.state.len();
+            let state_keys = script.state.len();
             out.push_str(&format!(
                 "  {} [{}] interval={}  state_keys={}\r\n",
                 obj.key, status, interval, state_keys
@@ -4852,7 +4609,7 @@ impl Engine {
         out
     }
 
-    fn cmd_rmscript(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
+    fn cmd_rmscript(&mut self, session_id: &str, _actor_ref: &str, args: &str) -> String {
         if !self.session_has_scope(session_id, Scope::Builder) {
             return "Permission denied.\r\n".to_string();
         }
@@ -4860,14 +4617,13 @@ impl Engine {
         if name.is_empty() {
             return "Usage: @rmscript <name>\r\n".to_string();
         }
-        match self.find_code_object_ref(name, "on_tick") {
+        match self.find_script_object_ref(name) {
             Some(ref_id) => {
                 let obj = self.world.get_mut(&ref_id).unwrap();
-                hooks::remove_program(obj, "on_tick");
-                if obj.programs.is_empty() {
+                hooks::clear_script(obj);
+                if obj.script.is_none() && obj.libs.is_empty() {
                     self.world.remove_object(&ref_id);
                 }
-                self.record_program_tombstone(&ref_id, "on_tick", Some(actor_ref));
                 format!("Script '{}' removed.\r\n", name)
             }
             None => format!("No script named '{}'.\r\n", name),
@@ -4890,7 +4646,7 @@ impl Engine {
         if interval == 0 {
             return "Interval must be at least 1.\r\n".to_string();
         }
-        match self.find_code_object_ref(name, "on_tick") {
+        match self.find_script_object_ref(name) {
             Some(ref_id) => {
                 let obj = self.world.get_mut(&ref_id).unwrap();
                 obj.attrs.insert("tick_interval".into(), serde_json::json!(interval));
@@ -4907,7 +4663,7 @@ impl Engine {
     // `crate::softcode::mod::install_require` and
     // docs/plans/program-authoring.md Stage 2.
 
-    fn cmd_lib(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
+    fn cmd_lib(&mut self, session_id: &str, _actor_ref: &str, args: &str) -> String {
         if !self.session_has_scope(session_id, Scope::Builder) {
             return "Permission denied.\r\n".to_string();
         }
@@ -4928,8 +4684,7 @@ impl Engine {
         if let Err(e) = self.softcode.check_syntax(source) {
             return format!("Syntax error: {}\r\n", e);
         }
-        let hook = format!("lib_{}", name);
-        let existing_ref = self.find_code_object_ref(name, &hook);
+        let existing_ref = self.find_lib_object_ref(name);
         let is_new = existing_ref.is_none();
         let ref_id = existing_ref.unwrap_or_else(|| {
             let ref_id = self.world.next_dbref();
@@ -4937,11 +4692,8 @@ impl Engine {
             ref_id
         });
         let obj = self.world.get_mut(&ref_id).unwrap();
-        if let Err(e) = hooks::set_program(obj, &hook, source.to_string()) {
-            return format!("{}\r\n", e);
-        }
+        hooks::set_lib(obj, name, source.to_string(), hooks::ProgramOrigin::InGame);
         self.softcode.invalidate_module_cache();
-        self.record_program_version(&ref_id, &hook, source, Some(actor_ref));
         if is_new {
             format!("Library '{}' created — require(\"{}\").\r\n", name, name)
         } else {
@@ -4953,28 +4705,25 @@ impl Engine {
         if !self.session_has_scope(session_id, Scope::Builder) {
             return "Permission denied.\r\n".to_string();
         }
-        let mut libs: Vec<(&str, &ProgramRecord)> = self
+        let mut libs: Vec<(&str, &str)> = self
             .world
             .objects
             .values()
             .filter(|o| o.kind == Kind::Code)
-            .flat_map(|o| o.programs.values().map(move |p| (o.key.as_str(), p)))
-            .filter(|(_, p)| p.hook.starts_with("lib_"))
+            .flat_map(|o| o.libs.keys().map(move |name| (name.as_str(), o.key.as_str())))
             .collect();
         if libs.is_empty() {
             return "No libraries.\r\n".to_string();
         }
-        libs.sort_by_key(|(key, _)| *key);
+        libs.sort_by_key(|(name, _)| *name);
         let mut out = "\r\nLibraries:\r\n".to_string();
-        for (key, program) in libs {
-            let name = program.hook.strip_prefix("lib_").unwrap_or(&program.hook);
-            let status = if program.enabled { "on" } else { "off" };
-            out.push_str(&format!("  {} [{}] (object key: {})\r\n", name, status, key));
+        for (name, key) in libs {
+            out.push_str(&format!("  {} (object key: {})\r\n", name, key));
         }
         out
     }
 
-    fn cmd_rmlib(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
+    fn cmd_rmlib(&mut self, session_id: &str, _actor_ref: &str, args: &str) -> String {
         if !self.session_has_scope(session_id, Scope::Builder) {
             return "Permission denied.\r\n".to_string();
         }
@@ -4982,16 +4731,14 @@ impl Engine {
         if name.is_empty() {
             return "Usage: @rmlib <name>\r\n".to_string();
         }
-        let hook = format!("lib_{}", name);
-        match self.find_code_object_ref(name, &hook) {
+        match self.find_lib_object_ref(name) {
             Some(ref_id) => {
                 let obj = self.world.get_mut(&ref_id).unwrap();
-                hooks::remove_program(obj, &hook);
-                if obj.programs.is_empty() {
+                hooks::remove_lib(obj, name);
+                if obj.script.is_none() && obj.libs.is_empty() {
                     self.world.remove_object(&ref_id);
                 }
                 self.softcode.invalidate_module_cache();
-                self.record_program_tombstone(&ref_id, &hook, Some(actor_ref));
                 format!("Library '{}' removed.\r\n", name)
             }
             None => format!("No library named '{}'.\r\n", name),
@@ -5102,9 +4849,6 @@ impl Engine {
                 // saw, rather than re-reading the whole directory.
                 if let Err(e) = self.db.save_file_hashes(&self.file_hashes) {
                     tracing::warn!(error = %e, "Failed to persist file hashes");
-                }
-                for (obj_ref, hook, source) in &result.installed_programs {
-                    self.record_program_version(obj_ref, hook, source, None);
                 }
                 self.fire_lifecycle_hook("on_reload");
 
@@ -5536,24 +5280,24 @@ impl Engine {
         if !self.session_has_scope(session_id, Scope::Builder) {
             return "Permission denied.\r\n".to_string();
         }
-        // @reload <ref>/<hook>  — re-validate and re-enable a program
-        let (target_ref, hook) = match self.resolve_ref_hook_path(actor_ref, args.trim()) {
-            Ok(v) => v,
-            Err(e) => return format!("{}\r\n", e),
+        // @reload <ref>  — re-validate and re-enable an object's script
+        if args.trim().is_empty() {
+            return "Usage: @reload <ref>\r\n".to_string();
+        }
+        let target_ref = self.resolve_object_ref(actor_ref, args.trim());
+        let source = match self.world.get(&target_ref).and_then(|o| o.script.as_ref()) {
+            Some(s) => s.source.clone(),
+            None => return format!("{} has no script.\r\n", target_ref),
         };
-        let obj = match self.world.get_mut(&target_ref) {
-            Some(o) => o,
-            None => return format!("No object with ref '{}'.\r\n", target_ref),
-        };
-        let program = match obj.programs.get_mut(&hook) {
-            Some(p) => p,
-            None => return format!("{} has no '{}' program.\r\n", target_ref, hook),
-        };
-        if let Err(e) = self.softcode.check_syntax(&program.source) {
+        if let Err(e) = self.softcode.check_syntax(&source) {
             return format!("Syntax error: {}\r\n", e);
         }
-        program.enabled = true;
-        format!("Program {}/{} reloaded and enabled.\r\n", target_ref, hook)
+        if let Some(obj) = self.world.get_mut(&target_ref)
+            && let Some(script) = obj.script.as_mut()
+        {
+            script.enabled = true;
+        }
+        format!("Script on {} reloaded and enabled.\r\n", target_ref)
     }
 
     fn cmd_display(&mut self, actor_ref: &str, args: &str) -> String {
@@ -5644,7 +5388,7 @@ impl Engine {
         let room_has_on_look = self
             .world
             .get(&room_ref)
-            .is_some_and(|o| o.programs.contains_key("on_look"));
+            .is_some_and(|o| hooks::object_defines_hook(o, "on_look"));
         if room_has_on_look {
             let _ = self.fire_hook(&room_ref, "on_look", actor_ref, Some(&room_ref), None);
             return String::new();
@@ -5661,7 +5405,7 @@ impl Engine {
             .objects_in(&room_ref)
             .iter()
             .filter(|o| o.tags.contains(&hidden_tag) && o.ref_id != actor_ref)
-            .map(|o| (o.ref_id.clone(), o.programs.contains_key("can_see")))
+            .map(|o| (o.ref_id.clone(), hooks::object_defines_hook(o, "can_see")))
             .collect();
 
         for (ref_id, has_can_see) in candidates {
@@ -6001,7 +5745,7 @@ impl Engine {
         let room_has_on_say = self
             .world
             .get(&room_ref)
-            .is_some_and(|o| o.programs.contains_key("on_say"));
+            .is_some_and(|o| hooks::object_defines_hook(o, "on_say"));
         if room_has_on_say {
             // Store the message as an attr so the hook can read it
             if let Some(room_obj) = self.world.get_mut(&room_ref) {
@@ -6574,7 +6318,8 @@ fn describe_intent(intent: &softcode::Intent, world: &World) -> String {
         Intent::CreateExit { source, direction, target, .. } => {
             format!("exit '{}' from {} → {}", direction, label(source), label(target))
         }
-        Intent::SetProgram { target, hook, .. } => format!("set program {}/{}", label(target), hook),
+        Intent::SetScript { target, .. } => format!("set script on {}", label(target)),
+        Intent::SetLib { target, name, .. } => format!("set lib {}/{}", label(target), name),
         Intent::Trigger { target, hook, .. } => format!("trigger {}/{}", label(target), hook),
         Intent::EmitNearby { room, x, y, radius, .. } => {
             format!("emit near ({}, {}) r{} in {}", x, y, radius, label(room))
@@ -6836,32 +6581,28 @@ mod tests {
         let (tx, handle) = test_engine().await;
         let item_ref = create_test_item(&tx).await;
 
-        let resp = api_call(&tx, ApiRequest::SetProgram {
+        let resp = api_call(&tx, ApiRequest::SetScript {
             ref_id: item_ref.clone(),
-            hook: "on_get".into(),
             source: "function on_get(this, actor, room) emit(actor, \"Hum!\") end".into(),
         }).await;
         assert!(resp.ok);
 
-        let resp = api_call(&tx, ApiRequest::ListPrograms {
+        let resp = api_call(&tx, ApiRequest::GetScript {
             ref_id: item_ref.clone(),
         }).await;
         assert!(resp.ok);
-        let programs = resp.data.unwrap().as_array().unwrap().clone();
-        assert_eq!(programs.len(), 1);
-        assert_eq!(programs[0]["hook"], "on_get");
+        let script = resp.data.unwrap();
+        assert_eq!(script["hooks"], serde_json::json!(["on_get"]));
 
-        let resp = api_call(&tx, ApiRequest::RemoveProgram {
+        let resp = api_call(&tx, ApiRequest::ClearScript {
             ref_id: item_ref.clone(),
-            hook: "on_get".into(),
         }).await;
         assert!(resp.ok);
 
-        let resp = api_call(&tx, ApiRequest::ListPrograms {
+        let resp = api_call(&tx, ApiRequest::GetScript {
             ref_id: item_ref.clone(),
         }).await;
-        let programs = resp.data.unwrap().as_array().unwrap().clone();
-        assert_eq!(programs.len(), 0);
+        assert!(resp.data.unwrap().is_null());
 
         drop(tx);
         let _ = handle.await;
@@ -6891,9 +6632,8 @@ mod tests {
         let (tx, handle) = test_engine().await;
         let item_ref = create_test_item(&tx).await;
 
-        let resp = api_call(&tx, ApiRequest::SetProgram {
+        let resp = api_call(&tx, ApiRequest::SetScript {
             ref_id: item_ref,
-            hook: "on_get".into(),
             source: "function on_get(this actor room) end".into(),
         }).await;
         assert!(!resp.ok);
@@ -7128,18 +6868,16 @@ mod tests {
         let ref_id = engine.world.next_dbref();
         let mut obj = GameObject::new(&ref_id, "weather", Kind::Code);
         obj.attrs.insert("tick_interval".into(), serde_json::json!(1));
-        hooks::set_program(
+        hooks::set_script(
             &mut obj,
-            "on_tick",
             "function on_tick(this, state, room) state.ticks = (state.ticks or 0) + 1 end".into(),
-        )
-        .unwrap();
+        );
         engine.world.add_object(obj);
 
         engine.do_tick();
         engine.do_tick();
 
-        let ticks = engine.world.get(&ref_id).unwrap().programs["on_tick"]
+        let ticks = engine.world.get(&ref_id).unwrap().script.as_ref().unwrap()
             .state
             .get("ticks")
             .cloned();
@@ -7167,7 +6905,7 @@ mod tests {
 
         engine.do_tick();
         assert_eq!(
-            engine.world.get(&ref_id).unwrap().programs["on_tick"].state.get("ticks"),
+            engine.world.get(&ref_id).unwrap().script.as_ref().unwrap().state.get("ticks"),
             Some(&serde_json::json!(1))
         );
     }
@@ -7206,351 +6944,22 @@ mod tests {
 
     // -- Stage 3: Program versions (docs/plans/program-authoring.md) --
 
-    #[test]
-    fn program_command_records_a_version_with_author() {
-        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
-        let room_ref = engine.world.get(&actor_ref).and_then(|a| a.location_ref.clone()).unwrap();
 
-        let out = engine.cmd_program(&session_id, &actor_ref, &format!("{}/on_look = return 1", room_ref));
-        assert!(out.contains("installed"), "unexpected output: {}", out);
 
-        let versions = engine.db.list_program_versions(&room_ref, "on_look").unwrap();
-        assert_eq!(versions.len(), 1);
-        assert_eq!(versions[0].author.as_deref(), Some(actor_ref.as_str()));
-        assert!(versions[0].source.contains("return 1"));
-        assert!(!versions[0].deleted);
-    }
 
-    #[test]
-    fn program_command_resaving_identical_source_dedupes() {
-        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
-        let room_ref = engine.world.get(&actor_ref).and_then(|a| a.location_ref.clone()).unwrap();
 
-        engine.cmd_program(&session_id, &actor_ref, &format!("{}/on_look = return 1", room_ref));
-        engine.cmd_program(&session_id, &actor_ref, &format!("{}/on_look = return 1", room_ref));
 
-        let versions = engine.db.list_program_versions(&room_ref, "on_look").unwrap();
-        assert_eq!(versions.len(), 1, "identical resave should not create a second version");
-    }
 
-    #[test]
-    fn program_command_changed_source_creates_a_new_version() {
-        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
-        let room_ref = engine.world.get(&actor_ref).and_then(|a| a.location_ref.clone()).unwrap();
 
-        engine.cmd_program(&session_id, &actor_ref, &format!("{}/on_look = return 1", room_ref));
-        engine.cmd_program(&session_id, &actor_ref, &format!("{}/on_look = return 2", room_ref));
 
-        let versions = engine.db.list_program_versions(&room_ref, "on_look").unwrap();
-        assert_eq!(versions.len(), 2);
-        assert!(versions[0].source.contains("return 1"));
-        assert!(versions[1].source.contains("return 2"));
-    }
 
-    #[test]
-    fn rmprogram_records_a_tombstone() {
-        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
-        let room_ref = engine.world.get(&actor_ref).and_then(|a| a.location_ref.clone()).unwrap();
 
-        engine.cmd_program(&session_id, &actor_ref, &format!("{}/on_look = return 1", room_ref));
-        let out = engine.cmd_rmprogram(&session_id, &actor_ref, &format!("{}/on_look", room_ref));
-        assert!(out.contains("Removed"), "unexpected output: {}", out);
 
-        let versions = engine.db.list_program_versions(&room_ref, "on_look").unwrap();
-        assert_eq!(versions.len(), 2, "deletion should append a tombstone, not erase history");
-        assert!(versions[1].deleted);
-        assert_eq!(versions[1].author.as_deref(), Some(actor_ref.as_str()));
-    }
 
-    #[test]
-    fn program_restore_writes_a_new_version_not_a_rewind() {
-        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
-        let room_ref = engine.world.get(&actor_ref).and_then(|a| a.location_ref.clone()).unwrap();
 
-        engine.cmd_program(&session_id, &actor_ref, &format!("{}/on_look = return 1", room_ref));
-        engine.cmd_program(&session_id, &actor_ref, &format!("{}/on_look = return 2", room_ref));
 
-        let out = engine.cmd_program_restore(&session_id, &actor_ref, &format!("{}/on_look 1", room_ref));
-        assert!(out.contains("Restored"), "unexpected output: {}", out);
 
-        let versions = engine.db.list_program_versions(&room_ref, "on_look").unwrap();
-        assert_eq!(versions.len(), 3, "restore must append a new version, never rewind history");
-        assert!(versions[0].source.contains("return 1"));
-        assert!(versions[1].source.contains("return 2"));
-        assert!(versions[2].source.contains("return 1"));
-        assert_eq!(versions[2].author.as_deref(), Some(actor_ref.as_str()));
 
-        // The live program now runs the restored source.
-        assert!(engine.world.get(&room_ref).unwrap().programs["on_look"].source.contains("return 1"));
-    }
-
-    #[test]
-    fn program_history_lists_versions_with_numbers() {
-        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
-        let room_ref = engine.world.get(&actor_ref).and_then(|a| a.location_ref.clone()).unwrap();
-        engine.cmd_program(&session_id, &actor_ref, &format!("{}/on_look = return 1", room_ref));
-        engine.cmd_program(&session_id, &actor_ref, &format!("{}/on_look = return 2", room_ref));
-
-        let out = engine.cmd_program_history(&session_id, &actor_ref, &format!("{}/on_look", room_ref));
-        assert!(out.contains("History for"), "unexpected output: {}", out);
-        assert!(out.contains("1  "), "expected version 1 listed: {}", out);
-        assert!(out.contains("2  "), "expected version 2 listed: {}", out);
-    }
-
-    #[test]
-    fn program_diff_reports_line_differences() {
-        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
-        let room_ref = engine.world.get(&actor_ref).and_then(|a| a.location_ref.clone()).unwrap();
-        engine.cmd_program(&session_id, &actor_ref, &format!("{}/on_look = return 1", room_ref));
-        engine.cmd_program(&session_id, &actor_ref, &format!("{}/on_look = return 2", room_ref));
-
-        let out = engine.cmd_program_diff(&session_id, &actor_ref, &format!("{}/on_look 1 2", room_ref));
-        assert!(out.contains("-return 1"), "unexpected output: {}", out);
-        assert!(out.contains("+return 2"), "unexpected output: {}", out);
-    }
-
-    /// `@script` is `@program <ref>/on_tick = ...` with friendlier
-    /// ergonomics (Stage 2 collapsed global scripts into `Kind::Code`
-    /// objects) — a human writing one is authoring, same as `@program`/
-    /// `@lib`, so it must record a version too.
-    #[test]
-    fn script_command_records_a_version_with_author() {
-        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
-        engine.cmd_script(&session_id, &actor_ref, "weather = function on_tick(this, state, room) end");
-
-        let ref_id = engine
-            .world
-            .objects
-            .values()
-            .find(|o| o.kind == Kind::Code && o.key == "weather")
-            .unwrap()
-            .ref_id
-            .clone();
-        let versions = engine.db.list_program_versions(&ref_id, "on_tick").unwrap();
-        assert_eq!(versions.len(), 1);
-        assert_eq!(versions[0].author.as_deref(), Some(actor_ref.as_str()));
-        assert!(!versions[0].deleted);
-    }
-
-    #[test]
-    fn script_command_editing_creates_a_second_version() {
-        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
-        engine.cmd_script(&session_id, &actor_ref, "weather = function on_tick(this, state, room) end");
-        engine.cmd_script(
-            &session_id,
-            &actor_ref,
-            "weather = function on_tick(this, state, room) state.x = 1 end",
-        );
-
-        let ref_id = engine
-            .world
-            .objects
-            .values()
-            .find(|o| o.kind == Kind::Code && o.key == "weather")
-            .unwrap()
-            .ref_id
-            .clone();
-        let versions = engine.db.list_program_versions(&ref_id, "on_tick").unwrap();
-        assert_eq!(versions.len(), 2);
-        assert!(versions[1].source.contains("state.x"));
-    }
-
-    #[test]
-    fn rmscript_records_a_tombstone() {
-        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
-        engine.cmd_script(&session_id, &actor_ref, "weather = function on_tick(this, state, room) end");
-        let ref_id = engine
-            .world
-            .objects
-            .values()
-            .find(|o| o.kind == Kind::Code && o.key == "weather")
-            .unwrap()
-            .ref_id
-            .clone();
-
-        let out = engine.cmd_rmscript(&session_id, &actor_ref, "weather");
-        assert!(out.contains("removed"), "unexpected output: {}", out);
-
-        let versions = engine.db.list_program_versions(&ref_id, "on_tick").unwrap();
-        assert_eq!(versions.len(), 2, "deletion should append a tombstone, not erase history");
-        assert!(versions[1].deleted);
-        assert_eq!(versions[1].author.as_deref(), Some(actor_ref.as_str()));
-    }
-
-    /// `@script-interval` changes an attr (`tick_interval`), not the
-    /// program's source — it must not create a version.
-    #[test]
-    fn script_interval_does_not_record_a_version() {
-        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
-        engine.cmd_script(&session_id, &actor_ref, "weather = function on_tick(this, state, room) end");
-        let ref_id = engine
-            .world
-            .objects
-            .values()
-            .find(|o| o.kind == Kind::Code && o.key == "weather")
-            .unwrap()
-            .ref_id
-            .clone();
-
-        engine.cmd_script_interval(&session_id, "weather = 5");
-
-        let versions = engine.db.list_program_versions(&ref_id, "on_tick").unwrap();
-        assert_eq!(versions.len(), 1, "@script-interval must not create a new version");
-    }
-
-    /// `@program/history` and `@program/restore` must work against a
-    /// `Kind::Code` object created through `@script`, not just an object
-    /// built directly in a test — this exercises the same ref resolution
-    /// (`resolve_ref_hook_path`) and dbref a real user would hit, not just
-    /// the storage layer underneath.
-    #[test]
-    fn program_history_and_restore_work_on_a_script_created_object() {
-        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
-        engine.cmd_script(&session_id, &actor_ref, "weather = function on_tick(this, state, room) end");
-        engine.cmd_script(
-            &session_id,
-            &actor_ref,
-            "weather = function on_tick(this, state, room) state.x = 1 end",
-        );
-
-        let ref_id = engine
-            .world
-            .objects
-            .values()
-            .find(|o| o.kind == Kind::Code && o.key == "weather")
-            .unwrap()
-            .ref_id
-            .clone();
-
-        let history = engine.cmd_program_history(&session_id, &actor_ref, &format!("{}/on_tick", ref_id));
-        assert!(history.contains("History for"), "unexpected output: {}", history);
-        // `display_author` resolves the stored ref to the actor's display
-        // name ("Tester" — see `test_engine_with_session`), not the raw ref.
-        assert!(history.contains("Tester"), "expected author display name in history: {}", history);
-
-        let restore = engine.cmd_program_restore(&session_id, &actor_ref, &format!("{}/on_tick 1", ref_id));
-        assert!(restore.contains("Restored"), "unexpected output: {}", restore);
-
-        let versions = engine.db.list_program_versions(&ref_id, "on_tick").unwrap();
-        assert_eq!(versions.len(), 3, "restore must append, not rewind");
-        assert!(!versions[2].source.contains("state.x"), "restored version should be the first source, not the second");
-
-        assert!(
-            !engine.world.get(&ref_id).unwrap().programs["on_tick"].source.contains("state.x"),
-            "the live program should now run the restored (first) source"
-        );
-    }
-
-    #[test]
-    fn lib_command_records_a_version_with_author() {
-        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
-        engine.cmd_lib(&session_id, &actor_ref, "greet = return {}");
-
-        let ref_id = engine
-            .world
-            .objects
-            .values()
-            .find(|o| o.kind == Kind::Code && o.key == "greet")
-            .unwrap()
-            .ref_id
-            .clone();
-        let versions = engine.db.list_program_versions(&ref_id, "lib_greet").unwrap();
-        assert_eq!(versions.len(), 1);
-        assert_eq!(versions[0].author.as_deref(), Some(actor_ref.as_str()));
-    }
-
-    #[test]
-    fn rmlib_records_a_tombstone() {
-        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
-        engine.cmd_lib(&session_id, &actor_ref, "greet = return {}");
-        let ref_id = engine
-            .world
-            .objects
-            .values()
-            .find(|o| o.kind == Kind::Code && o.key == "greet")
-            .unwrap()
-            .ref_id
-            .clone();
-
-        engine.cmd_rmlib(&session_id, &actor_ref, "greet");
-        let versions = engine.db.list_program_versions(&ref_id, "lib_greet").unwrap();
-        assert_eq!(versions.len(), 2);
-        assert!(versions[1].deleted);
-        assert_eq!(versions[1].author.as_deref(), Some(actor_ref.as_str()));
-    }
-
-    #[test]
-    fn program_multiline_editor_installs_and_records_version() {
-        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
-        let room_ref = engine.world.get(&actor_ref).and_then(|a| a.location_ref.clone()).unwrap();
-
-        // Leaving the source blank after `=` enters the multi-line editor —
-        // see docs/plans/program-authoring.md Stage 3's "Prerequisite:
-        // multi-line authoring".
-        engine.handle_input(&session_id, &format!("@program {}/on_look =", room_ref));
-        assert!(
-            engine.world.get(&actor_ref).unwrap().attrs.contains_key("_program_editing"),
-            "blank source after '=' should enter the multi-line editor"
-        );
-
-        engine.handle_input(&session_id, "local x = 1");
-        engine.handle_input(&session_id, "return x");
-        engine.handle_input(&session_id, ".");
-
-        assert!(!engine.world.get(&actor_ref).unwrap().attrs.contains_key("_program_editing"));
-        let program = &engine.world.get(&room_ref).unwrap().programs["on_look"];
-        assert!(program.source.contains("return x"), "unexpected source: {}", program.source);
-
-        let versions = engine.db.list_program_versions(&room_ref, "on_look").unwrap();
-        assert_eq!(versions.len(), 1);
-        assert_eq!(versions[0].author.as_deref(), Some(actor_ref.as_str()));
-    }
-
-    #[test]
-    fn program_multiline_editor_abort_discards_buffer_and_records_nothing() {
-        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
-        let room_ref = engine.world.get(&actor_ref).and_then(|a| a.location_ref.clone()).unwrap();
-
-        engine.handle_input(&session_id, &format!("@program {}/on_look =", room_ref));
-        engine.handle_input(&session_id, "return 1");
-        engine.handle_input(&session_id, "@abort");
-
-        assert!(!engine.world.get(&actor_ref).unwrap().attrs.contains_key("_program_editing"));
-        assert!(!engine.world.get(&room_ref).unwrap().programs.contains_key("on_look"));
-        let versions = engine.db.list_program_versions(&room_ref, "on_look").unwrap();
-        assert!(versions.is_empty());
-    }
-
-    /// The one negative case the plan is explicit about: softcode's
-    /// `set_program()` (the `Intent::SetProgram` path, used to attach
-    /// behaviour to procedurally generated objects) is instantiation, not
-    /// authoring, and must never create a program version — see
-    /// docs/plans/program-authoring.md Stage 3's "Instantiation is not
-    /// authoring". Driven through `@eval` here since it exercises the exact
-    /// same `Intent::SetProgram` → `apply_to` path a hook would.
-    #[test]
-    fn softcode_set_program_does_not_create_a_version() {
-        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
-        let target = engine.world.next_dbref();
-        engine.world.add_object(GameObject::new(&target, "spawned", Kind::Item));
-
-        let out = engine.cmd_eval(
-            &session_id,
-            &actor_ref,
-            &format!(r#"set_program("{}", "on_use", "function on_use() end")"#, target),
-        );
-        assert!(out.starts_with("OK."), "unexpected output: {}", out);
-        assert!(
-            engine.world.get(&target).unwrap().programs.contains_key("on_use"),
-            "set_program should still have written the Program itself"
-        );
-
-        let versions = engine.db.list_program_versions(&target, "on_use").unwrap();
-        assert!(
-            versions.is_empty(),
-            "softcode set_program is instantiation, not authoring, and must not be versioned"
-        );
-    }
 
     #[test]
     fn format_epoch_secs_matches_known_values() {
@@ -7561,55 +6970,6 @@ mod tests {
         assert_eq!(format_epoch_secs(951_782_400), "2000-02-29 00:00:00 UTC");
     }
 
-    /// REST `SetProgram`/`RemoveProgram` record the acting account as
-    /// author — see docs/plans/program-authoring.md Stage 3's "Author":
-    /// "API SetProgram — account_id, resolved in the auth block".
-    #[test]
-    fn api_set_and_remove_program_record_account_as_author() {
-        let db = crate::db::Database::open(Path::new(":memory:")).unwrap();
-        let config = Config::default();
-        let (_tx, rx) = mpsc::unbounded_channel();
-        let mut engine = Engine::new(rx, db, &config);
-        let account = engine.accounts.create("api_tester", "password123").unwrap();
-        let account_id = account.id.clone();
-        engine.accounts.grant_scope(&account_id, Scope::Builder);
-        let token = "api-author-test-token".to_string();
-        let token_hash = Engine::hash_token(&token);
-        engine.api_tokens.insert(token_hash, TokenInfo {
-            account_id: account_id.clone(),
-            label: "test".to_string(),
-            persistent: false,
-            expires_at: None,
-        });
-
-        let ref_id = engine.world.next_dbref();
-        engine.world.add_object(GameObject::new(&ref_id, "gem", Kind::Item));
-
-        let resp = engine.handle_api_request(
-            ApiRequest::SetProgram {
-                ref_id: ref_id.clone(),
-                hook: "on_get".into(),
-                source: "function on_get(this, actor, room) end".into(),
-            },
-            Some(token.clone()),
-        );
-        assert!(resp.ok, "{:?}", resp.error);
-
-        let versions = engine.db.list_program_versions(&ref_id, "on_get").unwrap();
-        assert_eq!(versions.len(), 1);
-        assert_eq!(versions[0].author.as_deref(), Some(account_id.as_str()));
-
-        let resp = engine.handle_api_request(
-            ApiRequest::RemoveProgram { ref_id: ref_id.clone(), hook: "on_get".into() },
-            Some(token),
-        );
-        assert!(resp.ok, "{:?}", resp.error);
-
-        let versions = engine.db.list_program_versions(&ref_id, "on_get").unwrap();
-        assert_eq!(versions.len(), 2);
-        assert!(versions[1].deleted);
-        assert_eq!(versions[1].author.as_deref(), Some(account_id.as_str()));
-    }
 
     /// Builds an in-memory `Engine` with an account holding `scopes` and a
     /// live API token for it — the setup every REST-auth test below needs.
@@ -8095,7 +7455,7 @@ end
         }
         let prefixes: Vec<&str> =
             data["open_prefixes"].as_array().unwrap().iter().map(|p| p.as_str().unwrap()).collect();
-        assert_eq!(prefixes, ["on_", "cmd_", "lib_"]);
+        assert_eq!(prefixes, ["on_", "cmd_"]);
         // The advertised vocabulary agrees with the real validator: a listed
         // hook and each open prefix pass; a bare word and a bogus can_ fail.
         assert!(hooks::is_valid_hook_name(known[0]["name"].as_str().unwrap()));
@@ -8193,7 +7553,7 @@ end
         let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
         let r = mk_room(&mut engine, &token, "town", "hall");
         let set = engine.handle_api_request(
-            ApiRequest::SetProgram { ref_id: r.clone(), hook: "on_enter".into(), source: "return true".into() },
+            ApiRequest::SetScript { ref_id: r.clone(), source: "function on_enter(this, actor, room) end".into() },
             Some(token.clone()),
         );
         assert!(set.ok, "{:?}", set.error);
@@ -8214,9 +7574,9 @@ end
         mk_exit(&mut engine, &token, &a, &b); // a -> b
         // Delete b so the a->b exit dangles.
         engine.handle_api_request(ApiRequest::DeleteObject { ref_id: b.clone() }, Some(token.clone()));
-        // Inject a program that doesn't compile (bypassing SetProgram's own check).
+        // Inject a script that doesn't compile (bypassing SetScript's own check).
         if let Some(obj) = engine.world.get_mut(&a) {
-            let _ = hooks::set_program(obj, "on_enter", "local x = (".to_string());
+            hooks::set_script(obj, "local x = (".to_string());
         }
 
         let data = engine
@@ -8415,69 +7775,17 @@ end
         let (mut engine, token, _account_id) = engine_with_api_token(&[Scope::Builder]);
         let ref_id = engine.world.next_dbref();
         let mut obj = GameObject::new(&ref_id, "trap", Kind::Item);
-        hooks::set_program(&mut obj, "on_use", "-- secret source\nreturn 1".to_string()).unwrap();
+        hooks::set_script(&mut obj, "function on_use(this, actor, room)\n  -- secret source\nend".to_string());
         engine.world.add_object(obj);
 
-        let unauthenticated = engine.handle_api_request(ApiRequest::ListPrograms { ref_id: ref_id.clone() }, None);
-        assert!(!unauthenticated.ok, "ListPrograms must not serve Program source with no token");
+        let unauthenticated = engine.handle_api_request(ApiRequest::GetScript { ref_id: ref_id.clone() }, None);
+        assert!(!unauthenticated.ok, "GetScript must not serve script source with no token");
         assert_eq!(unauthenticated.error.as_deref(), Some("Authentication required"));
 
-        let authenticated = engine.handle_api_request(ApiRequest::ListPrograms { ref_id }, Some(token));
+        let authenticated = engine.handle_api_request(ApiRequest::GetScript { ref_id }, Some(token));
         assert!(authenticated.ok, "{:?}", authenticated.error);
     }
 
-    #[test]
-    fn api_program_history_and_restore_round_trip() {
-        let (mut engine, token, account_id) = engine_with_api_token(&[Scope::Builder]);
-        let ref_id = engine.world.next_dbref();
-        engine.world.add_object(GameObject::new(&ref_id, "trap", Kind::Item));
-
-        let resp = engine.handle_api_request(
-            ApiRequest::SetProgram { ref_id: ref_id.clone(), hook: "on_use".into(), source: "return 1".into() },
-            Some(token.clone()),
-        );
-        assert!(resp.ok, "{:?}", resp.error);
-        let resp = engine.handle_api_request(
-            ApiRequest::SetProgram { ref_id: ref_id.clone(), hook: "on_use".into(), source: "return 2".into() },
-            Some(token.clone()),
-        );
-        assert!(resp.ok, "{:?}", resp.error);
-
-        let history = engine.handle_api_request(
-            ApiRequest::ProgramHistory { ref_id: ref_id.clone(), hook: "on_use".into() },
-            Some(token.clone()),
-        );
-        assert!(history.ok, "{:?}", history.error);
-        let versions = history.data.unwrap();
-        let versions = versions.as_array().unwrap();
-        assert_eq!(versions.len(), 2);
-        assert_eq!(versions[0]["source"], "return 1");
-        assert_eq!(versions[1]["source"], "return 2");
-        // `ProgramHistory` resolves the stored account id to a display name
-        // at read time (`display_author`), same as `@program/history`.
-        let expected_author = engine.accounts.get(&account_id).unwrap().username.clone();
-        assert_eq!(versions[0]["author"], expected_author);
-
-        // No token — same hardening as ListPrograms, this also serves
-        // Program source.
-        let unauthenticated = engine.handle_api_request(
-            ApiRequest::ProgramHistory { ref_id: ref_id.clone(), hook: "on_use".into() },
-            None,
-        );
-        assert!(!unauthenticated.ok);
-
-        let restore = engine.handle_api_request(
-            ApiRequest::ProgramRestore { ref_id: ref_id.clone(), hook: "on_use".into(), version: 1 },
-            Some(token),
-        );
-        assert!(restore.ok, "{:?}", restore.error);
-        assert_eq!(engine.world.get(&ref_id).unwrap().programs["on_use"].source, "return 1");
-        // Restore is non-destructive — it appends a third version, never
-        // rewinds history.
-        let versions = engine.db.list_program_versions(&ref_id, "on_use").unwrap();
-        assert_eq!(versions.len(), 3);
-        assert_eq!(versions[2].source, "return 1");
-    }
 
     // -- Examine hardening (Stage 4) --
 

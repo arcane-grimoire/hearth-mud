@@ -27,10 +27,9 @@ Usage: hearth <subcommand> [args...] [--addr HOST:PORT | --config PATH] [--token
 Subcommands:
   eval [FILE]                       Run a one-shot Luau script against the live world.
                                      Reads stdin when FILE is '-' or omitted.
-  program get <ref>/<hook>          Print a program's current source to stdout.
-  program set <ref>/<hook> [FILE]   Set a program's source. Reads stdin when FILE is '-' or omitted.
-  program history <ref>/<hook>      List a program's version history.
-  program restore <ref>/<hook> <n>  Restore version <n>'s source as a new version.
+  program get <ref>                 Print an object's whole script source to stdout.
+  program set <ref> [FILE]          Set an object's script (hooks are functions in it).
+                                     Reads stdin when FILE is '-' or omitted.
   import <path> [--dry-run]         Install a TOML+.luau bundle into the DB.
                                      <path> is resolved on the SERVER's filesystem.
   export <path>                     Write DB-owned content back to files.
@@ -47,12 +46,10 @@ Every subcommand here requires an API token with at least builder scope
 Settings drawer under API Tokens -> Create. The token is shown once.";
 
 const PROGRAM_USAGE: &str = "\
-Usage: hearth program <get|set|history|restore> <ref>/<hook> [...] [--addr ...] [--token ...]
+Usage: hearth program <get|set> <ref> [FILE] [--addr ...] [--token ...]
 
-  hearth program get <ref>/<hook>
-  hearth program set <ref>/<hook> [FILE]
-  hearth program history <ref>/<hook>
-  hearth program restore <ref>/<hook> <n>";
+  hearth program get <ref>
+  hearth program set <ref> [FILE]";
 
 /// Whether `name` is a `hearth` CLI subcommand — used by `main.rs` to
 /// decide between CLI dispatch and the existing config-path-and-run-server
@@ -119,16 +116,6 @@ fn extract_global_opts(args: &[String]) -> (GlobalOpts, Vec<String>) {
         }
     }
     (opts, rest)
-}
-
-/// Split `<ref>/<hook>` on the *last* `/`, matching
-/// `Engine::resolve_ref_hook_path` — a dbref can itself contain slashes
-/// (`area/town/room/crossroads`), the hook name cannot.
-fn split_ref_hook(path: &str) -> Result<(String, String), String> {
-    match path.rsplit_once('/') {
-        Some((r, h)) if !r.is_empty() && !h.is_empty() => Ok((r.to_string(), h.to_string())),
-        _ => Err(format!("Expected <ref>/<hook>, got '{}'.", path)),
-    }
 }
 
 fn read_source(file: Option<&str>) -> Result<String, String> {
@@ -368,8 +355,6 @@ fn cmd_program(args: &[String]) -> i32 {
     match args.first().map(|s| s.as_str()) {
         Some("get") => cmd_program_get(&args[1..]),
         Some("set") => cmd_program_set(&args[1..]),
-        Some("history") => cmd_program_history(&args[1..]),
-        Some("restore") => cmd_program_restore(&args[1..]),
         Some(other) => {
             eprintln!("Unknown 'hearth program' subcommand '{}'.\n\n{}", other, PROGRAM_USAGE);
             2
@@ -383,17 +368,10 @@ fn cmd_program(args: &[String]) -> i32 {
 
 fn cmd_program_get(args: &[String]) -> i32 {
     let (opts, rest) = extract_global_opts(args);
-    let path = match rest.first() {
-        Some(p) => p,
+    let ref_id = match rest.first() {
+        Some(p) => p.clone(),
         None => {
-            eprintln!("Usage: hearth program get <ref>/<hook>");
-            return 2;
-        }
-    };
-    let (ref_id, hook) = match split_ref_hook(path) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("{}", e);
+            eprintln!("Usage: hearth program get <ref>");
             return 2;
         }
     };
@@ -405,27 +383,16 @@ fn cmd_program_get(args: &[String]) -> i32 {
             return 1;
         }
     };
-    // No single-program REST action exists — reuse `list_programs` (the
-    // same call `hearth program set` would need to confirm a write, and
-    // what `@programs` uses in-game) and pick out the one hook.
-    match api_call(&base, &token, serde_json::json!({ "action": "list_programs", "ref_id": ref_id })) {
+    match api_call(&base, &token, serde_json::json!({ "action": "get_script", "ref_id": ref_id })) {
         Ok(data) => {
-            let found = data
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|p| p.get("hook").and_then(|h| h.as_str()) == Some(hook.as_str()))
-                .and_then(|p| p.get("source").and_then(|s| s.as_str()).map(|s| s.to_string()));
-            match found {
-                Some(source) => {
-                    print!("{}", source);
-                    0
-                }
-                None => {
-                    eprintln!("{}/{} has no program.", ref_id, hook);
-                    1
-                }
+            // `get_script` returns { source, hooks, enabled } or null.
+            if data.is_null() {
+                eprintln!("{} has no script.", ref_id);
+                return 1;
             }
+            let source = data.get("source").and_then(|s| s.as_str()).unwrap_or("");
+            print!("{}", source);
+            0
         }
         Err(e) => {
             eprintln!("{}", e);
@@ -436,17 +403,10 @@ fn cmd_program_get(args: &[String]) -> i32 {
 
 fn cmd_program_set(args: &[String]) -> i32 {
     let (opts, rest) = extract_global_opts(args);
-    let path = match rest.first() {
+    let ref_id = match rest.first() {
         Some(p) => p.clone(),
         None => {
-            eprintln!("Usage: hearth program set <ref>/<hook> [FILE]");
-            return 2;
-        }
-    };
-    let (ref_id, hook) = match split_ref_hook(&path) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("{}", e);
+            eprintln!("Usage: hearth program set <ref> [FILE]");
             return 2;
         }
     };
@@ -468,119 +428,10 @@ fn cmd_program_set(args: &[String]) -> i32 {
     match api_call(
         &base,
         &token,
-        serde_json::json!({ "action": "set_program", "ref_id": ref_id, "hook": hook, "source": source }),
+        serde_json::json!({ "action": "set_script", "ref_id": ref_id, "source": source }),
     ) {
         Ok(_) => {
-            println!("Set {}/{}.", ref_id, hook);
-            0
-        }
-        Err(e) => {
-            eprintln!("{}", e);
-            1
-        }
-    }
-}
-
-fn cmd_program_history(args: &[String]) -> i32 {
-    let (opts, rest) = extract_global_opts(args);
-    let path = match rest.first() {
-        Some(p) => p,
-        None => {
-            eprintln!("Usage: hearth program history <ref>/<hook>");
-            return 2;
-        }
-    };
-    let (ref_id, hook) = match split_ref_hook(path) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("{}", e);
-            return 2;
-        }
-    };
-    let (base, token) = resolve_connection(&opts);
-    let token = match require_token(&token) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("{}", e);
-            return 1;
-        }
-    };
-    match api_call(
-        &base,
-        &token,
-        serde_json::json!({ "action": "program_history", "ref_id": ref_id, "hook": hook }),
-    ) {
-        Ok(data) => {
-            let versions = data.as_array().cloned().unwrap_or_default();
-            if versions.is_empty() {
-                println!("No version history for {}/{}.", ref_id, hook);
-                return 0;
-            }
-            println!("History for {}/{}:", ref_id, hook);
-            for v in &versions {
-                let n = v.get("version").and_then(|x| x.as_u64()).unwrap_or(0);
-                let created_at = v.get("created_at").and_then(|x| x.as_i64()).unwrap_or(0);
-                let author = v.get("author").and_then(|x| x.as_str()).unwrap_or("?");
-                let deleted = v.get("deleted").and_then(|x| x.as_bool()).unwrap_or(false);
-                println!(
-                    "  {:>3}  {}  {}{}",
-                    n,
-                    crate::engine::format_epoch_secs(created_at),
-                    author,
-                    if deleted { "  (deleted)" } else { "" }
-                );
-            }
-            0
-        }
-        Err(e) => {
-            eprintln!("{}", e);
-            1
-        }
-    }
-}
-
-fn cmd_program_restore(args: &[String]) -> i32 {
-    let (opts, rest) = extract_global_opts(args);
-    if rest.len() < 2 {
-        eprintln!("Usage: hearth program restore <ref>/<hook> <n>");
-        return 2;
-    }
-    let (ref_id, hook) = match split_ref_hook(&rest[0]) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("{}", e);
-            return 2;
-        }
-    };
-    let version: usize = match rest[1].parse() {
-        Ok(v) if v > 0 => v,
-        _ => {
-            eprintln!("Version number must be a positive integer.");
-            return 2;
-        }
-    };
-    let (base, token) = resolve_connection(&opts);
-    let token = match require_token(&token) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("{}", e);
-            return 1;
-        }
-    };
-    match api_call(
-        &base,
-        &token,
-        serde_json::json!({ "action": "program_restore", "ref_id": ref_id, "hook": hook, "version": version }),
-    ) {
-        Ok(data) => {
-            if data.get("restored_deleted").and_then(|v| v.as_bool()).unwrap_or(false) {
-                println!(
-                    "Version {} of {}/{} was a deletion — restored as a new deletion.",
-                    version, ref_id, hook
-                );
-            } else {
-                println!("Restored version {} of {}/{} as a new version.", version, ref_id, hook);
-            }
+            println!("Set script on {}.", ref_id);
             0
         }
         Err(e) => {
@@ -606,22 +457,6 @@ mod tests {
         assert!(!is_known_subcommand("hearth.toml"));
         assert!(!is_known_subcommand(""));
         assert!(!is_known_subcommand("Eval"));
-    }
-
-    #[test]
-    fn split_ref_hook_splits_on_last_slash() {
-        assert_eq!(
-            split_ref_hook("area/town/room/crossroads/on_look"),
-            Ok(("area/town/room/crossroads".to_string(), "on_look".to_string()))
-        );
-        assert_eq!(split_ref_hook("#5/on_tick"), Ok(("#5".to_string(), "on_tick".to_string())));
-    }
-
-    #[test]
-    fn split_ref_hook_rejects_missing_hook_or_ref() {
-        assert!(split_ref_hook("no_slash_here").is_err());
-        assert!(split_ref_hook("/on_tick").is_err());
-        assert!(split_ref_hook("#5/").is_err());
     }
 
     #[test]

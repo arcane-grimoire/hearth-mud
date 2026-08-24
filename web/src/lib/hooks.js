@@ -5,9 +5,10 @@ import { api } from './api.js';
 // the open-ended prefixes), so the client never hard-codes and drifts from the
 // list. Cached module-wide: the vocabulary is static for a running engine.
 //
-// Shape: { known: [{ name, describes }], openPrefixes: ['on_','cmd_','lib_'] }
+// Shape: { known: [{ name, describes }], openPrefixes: ['on_','cmd_'] }
+// (lib_ is NOT a hook — library modules are a separate concern.)
 
-const FALLBACK_PREFIXES = ['on_', 'cmd_', 'lib_'];
+const FALLBACK_PREFIXES = ['on_', 'cmd_'];
 let _cache = null;
 let _inflight = null;
 

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::Tag;
-use crate::softcode::hooks::ProgramRecord;
+use crate::softcode::hooks::{LibModule, ObjectScript};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,12 +64,25 @@ pub struct GameObject {
     pub owner_ref: Option<String>,
     #[serde(default)]
     pub target_ref: Option<String>,
+    /// The archetype (blueprint) this object is an instance of, if any.
+    ///
+    /// Reserved for prototype/instance support (see `docs/plans/archetypes.md`):
+    /// an instance delegates unset fields and its script to its archetype while
+    /// keeping its own `state`. Dormant today — nothing resolves through it yet.
+    #[serde(default)]
+    pub archetype_ref: Option<String>,
     pub attrs: HashMap<String, serde_json::Value>,
     pub tags: HashSet<Tag>,
     #[serde(default)]
     pub aliases: HashSet<String>,
+    /// The object's single behavior script (hooks as functions in one shared
+    /// scope). See [`ObjectScript`].
     #[serde(default)]
-    pub programs: HashMap<String, ProgramRecord>,
+    pub script: Option<ObjectScript>,
+    /// `require`able lib modules authored on this object, keyed by bare name
+    /// (no `lib_` prefix). See [`LibModule`].
+    #[serde(default)]
+    pub libs: HashMap<String, LibModule>,
     #[serde(default)]
     pub locks: HashMap<String, String>,
     pub id: String,
@@ -86,10 +99,12 @@ impl GameObject {
             location_ref: None,
             owner_ref: None,
             target_ref: None,
+            archetype_ref: None,
             attrs: HashMap::new(),
             tags: HashSet::new(),
             aliases: HashSet::new(),
-            programs: HashMap::new(),
+            script: None,
+            libs: HashMap::new(),
             locks: HashMap::new(),
             id: Uuid::new_v4().to_string(),
         }

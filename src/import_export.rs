@@ -3,14 +3,14 @@
 //! docs/plans/program-authoring.md Stage 4.
 //!
 //! Both directions share `loader`'s TOML struct definitions
-//! (`AreaFile`/`RoomDef`/`ObjectDef`/`ExitDef`/`ScriptDef`/`ProgramSource`,
-//! all made `pub(crate)` for this purpose) so import and export are
-//! provably the same format rather than two that could drift apart.
-//! `FILE_KEY_ATTR` is the identity mechanism `load_game_dir` (the boot
-//! loader) already uses; this module reuses it exactly, but drops the
-//! `system:managed` tag and `ProgramOrigin` — the ownership/reconcile layer
-//! Stage 4 supersedes with its own recorded/current/incoming hash
-//! comparison (see `resolve_one_program` below).
+//! (`AreaFile`/`RoomDef`/`ObjectDef`/`ExitDef`/`ScriptDef`/`ProgramSource`/
+//! `ScriptSource`, all made `pub(crate)` for this purpose) so import and
+//! export are provably the same format rather than two that could drift
+//! apart. `FILE_KEY_ATTR` is the identity mechanism `load_game_dir` (the boot
+//! loader) already uses; this module reuses it exactly, and reconciles an
+//! object's script/libs the same File-vs-InGame way the boot loader does
+//! (`ProgramOrigin`): an in-game edit is database-owned and never overwritten
+//! by an import — see `resolve_one_script` below.
 //!
 //! Deliberately separate from `loader.rs`'s boot-time reconciler: that code
 //! path is unchanged by this plan (see the plan's "Explicitly out of
@@ -21,16 +21,16 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::db::Database;
-use crate::loader::{self, ProgramSource};
-use crate::softcode::hooks;
+use crate::loader::{self, ProgramSource, ScriptSource};
+use crate::softcode::hooks::{self, ProgramOrigin};
 use crate::world::{GameObject, Kind, Tag, World};
 
-/// One (obj_ref, hook) program noted in an [`ImportReport`]'s `kept_local`
-/// or `conflicts` bucket.
+/// One object's script noted in an [`ImportReport`]'s `kept_local` bucket —
+/// an in-game edit an import declined to overwrite. Keyed by object ref;
+/// there is no per-hook granularity now that a script is one unit.
 #[derive(Debug, Clone)]
 pub struct ProgramNote {
     pub ref_id: String,
-    pub hook: String,
 }
 
 /// What an `@import` did (or, for a dry run, would do) — the four buckets
@@ -46,14 +46,12 @@ pub struct ImportReport {
     pub updated: Vec<String>,
     /// Object identities that existed and needed no change at all.
     pub unchanged: Vec<String>,
-    /// Programs where a local edit was detected but upstream hadn't
-    /// changed since the last import — kept as-is, nothing written.
+    /// Objects whose script was edited in-game (`ProgramOrigin::InGame`) —
+    /// the import declined to overwrite it and kept the local edit as-is.
     pub kept_local: Vec<ProgramNote>,
-    /// Programs where both the local copy and the incoming bundle had
-    /// changed since the last import — overwritten with the incoming
-    /// source, with the local edit preserved as a version (see
-    /// `resolve_one_program`) and reported here so the caller can point at
-    /// `@program/history`.
+    /// Unused now that scripts are a single database-owned unit: an in-game
+    /// edit is always kept (reported in `kept_local`), never overwritten, so
+    /// there is no conflict bucket to fill. Retained for report compatibility.
     pub conflicts: Vec<ProgramNote>,
     /// File keys present in the DB (under one of this bundle's areas) that
     /// this bundle no longer defines. Reported, never removed — see the
@@ -80,8 +78,8 @@ impl ImportReport {
         self.updated.sort();
         self.unchanged.sort();
         self.missing.sort();
-        self.kept_local.sort_by(|a, b| (&a.ref_id, &a.hook).cmp(&(&b.ref_id, &b.hook)));
-        self.conflicts.sort_by(|a, b| (&a.ref_id, &a.hook).cmp(&(&b.ref_id, &b.hook)));
+        self.kept_local.sort_by(|a, b| a.ref_id.cmp(&b.ref_id));
+        self.conflicts.sort_by(|a, b| a.ref_id.cmp(&b.ref_id));
         self.maps_installed.sort();
         self.maps_updated.sort();
         self.maps_kept_local.sort();
@@ -114,24 +112,11 @@ pub fn render_import_report(report: &ImportReport, dry_run: bool, bundle: &str) 
     }
     if !report.kept_local.is_empty() {
         out.push_str(&format!(
-            "  {} local edit(s) kept as-is (upstream unchanged since the last import):\r\n",
+            "  {} in-game script edit(s) kept as-is (import did not overwrite them):\r\n",
             report.kept_local.len()
         ));
         for n in &report.kept_local {
-            out.push_str(&format!("    = {}/{}\r\n", n.ref_id, n.hook));
-        }
-    }
-    if !report.conflicts.is_empty() {
-        out.push_str(&format!(
-            "  WARNING: {} local edit(s) were overwritten by this import. \
-             Nothing was lost — your edits are preserved in the version log:\r\n",
-            report.conflicts.len()
-        ));
-        for n in &report.conflicts {
-            out.push_str(&format!(
-                "    ! {}/{} — see @program/history {}/{}\r\n",
-                n.ref_id, n.hook, n.ref_id, n.hook
-            ));
+            out.push_str(&format!("    = {}\r\n", n.ref_id));
         }
     }
     if !report.maps_installed.is_empty() || !report.maps_updated.is_empty() {
@@ -200,11 +185,15 @@ pub fn import_bundle(
     }
     check_collisions(&areas)?;
 
+    let _ = author; // history was removed; author is no longer recorded here
     let mut report = if dry_run {
+        // Dry run computes against a throwaway clone so nothing reaches the
+        // real world; scripts no longer touch the DB, so cloning the world is
+        // the whole dry-run mechanism.
         let mut scratch = world.clone();
-        apply(&areas, &mut scratch, db, false, author)?
+        apply(&areas, &mut scratch)?
     } else {
-        apply(&areas, world, db, true, author)?
+        apply(&areas, world)?
     };
     // Map + terrain sources ride the same bundle, resolved into the
     // `file_sources` table with the same three-way (dry run writes nothing).
@@ -274,14 +263,20 @@ fn check_collisions(areas: &[loader::ParsedArea]) -> Result<(), String> {
     for area in areas {
         for room in &area.file.rooms {
             let fk = format!("{}/{}", area.area_name, room.key);
-            for hook in room.programs.keys() {
-                note_cmd(hook, &fk);
+            if let Some(script) = &room.script {
+                let source = script.resolve(&area.base_dir)?;
+                for hook in hooks::derive_hooks(&source) {
+                    note_cmd(&hook, &fk);
+                }
             }
         }
         for object in &area.file.objects {
             let fk = format!("{}/{}", area.area_name, object.key);
-            for hook in object.programs.keys() {
-                note_cmd(hook, &fk);
+            if let Some(script) = &object.script {
+                let source = script.resolve(&area.base_dir)?;
+                for hook in hooks::derive_hooks(&source) {
+                    note_cmd(&hook, &fk);
+                }
             }
         }
     }
@@ -324,137 +319,135 @@ pub(crate) fn blake3_hex(s: &str) -> String {
     blake3::hash(s.as_bytes()).to_hex().to_string()
 }
 
-/// Resolve one `(ref_id, hook)` against `incoming_source`, mutating
-/// `world`'s Program and (when `record_db`) `db`'s version log and import
-/// baseline as needed. `object_is_new` short-circuits straight to `New` —
-/// a freshly created object has nothing to compare against.
-fn resolve_one_program(
+/// Reconcile `ref_id`'s single script against `incoming_source`, mirroring
+/// `loader::install_script`: an in-game edit (`ProgramOrigin::InGame`) is
+/// database-owned and kept untouched; a File-origin or absent script is
+/// overwritten. `object_is_new` short-circuits straight to `New`.
+fn resolve_one_script(
     ref_id: &str,
-    hook: &str,
     incoming_source: &str,
     world: &mut World,
-    db: &Database,
-    record_db: bool,
-    author: Option<&str>,
     object_is_new: bool,
 ) -> Result<ProgOutcome, String> {
-    let incoming_hash = blake3_hex(incoming_source);
-
-    let current_source = if object_is_new {
+    let current = if object_is_new {
         None
     } else {
-        world.get(ref_id).and_then(|o| o.programs.get(hook)).map(|p| p.source.clone())
+        world
+            .get(ref_id)
+            .and_then(|o| o.script.as_ref())
+            .map(|s| (s.origin, s.source.clone()))
     };
 
-    let Some(current_source) = current_source else {
-        let obj = world
-            .get_mut(ref_id)
-            .ok_or_else(|| format!("No object with ref '{}'", ref_id))?;
-        hooks::set_program(obj, hook, incoming_source.to_string())?;
-        if record_db {
-            db.record_program_version(ref_id, hook, incoming_source, author)
-                .map_err(|e| e.to_string())?;
-            db.set_import_hash(ref_id, hook, &incoming_hash).map_err(|e| e.to_string())?;
-        }
-        return Ok(ProgOutcome::New);
-    };
-
-    let current_hash = blake3_hex(&current_source);
-    if current_hash == incoming_hash {
-        // Already matches — but if this hook has never gone through an
-        // import before, stamp a baseline now so a *future* local edit has
-        // something to be compared against.
-        if record_db {
-            let recorded = db.get_import_hash(ref_id, hook).map_err(|e| e.to_string())?;
-            if recorded.as_deref() != Some(incoming_hash.as_str()) {
-                db.set_import_hash(ref_id, hook, &incoming_hash).map_err(|e| e.to_string())?;
-            }
-        }
-        return Ok(ProgOutcome::Unchanged);
-    }
-
-    let recorded = db.get_import_hash(ref_id, hook).map_err(|e| e.to_string())?;
-    let outcome = match recorded {
-        None => ProgOutcome::Conflict,
-        Some(ref rec) if rec == &current_hash => ProgOutcome::Overwritten,
-        Some(ref rec) if rec == &incoming_hash => ProgOutcome::KeptLocal,
-        Some(_) => ProgOutcome::Conflict,
-    };
-
-    match outcome {
-        ProgOutcome::Overwritten | ProgOutcome::Conflict => {
-            if record_db {
-                if outcome == ProgOutcome::Conflict {
-                    // Guarantee the local edit about to be replaced is in
-                    // the version log, regardless of how it got there — see
-                    // the plan's "the local version is preserved in the
-                    // stage 3 version log."
-                    db.record_program_version(ref_id, hook, &current_source, author)
-                        .map_err(|e| e.to_string())?;
-                }
-                db.record_program_version(ref_id, hook, incoming_source, author)
-                    .map_err(|e| e.to_string())?;
-                db.set_import_hash(ref_id, hook, &incoming_hash).map_err(|e| e.to_string())?;
-            }
+    match current {
+        // No script yet — install the incoming one as File-owned.
+        None => {
             let obj = world
                 .get_mut(ref_id)
                 .ok_or_else(|| format!("No object with ref '{}'", ref_id))?;
-            hooks::set_program(obj, hook, incoming_source.to_string())?;
+            hooks::set_script_with_origin(obj, incoming_source.to_string(), ProgramOrigin::File);
+            Ok(ProgOutcome::New)
         }
-        ProgOutcome::KeptLocal | ProgOutcome::Unchanged | ProgOutcome::New => {}
+        // A database-owned in-game edit — never clobbered. Report it as
+        // kept-local only when the bundle would otherwise have changed it.
+        Some((ProgramOrigin::InGame, cur)) => {
+            if cur == incoming_source {
+                Ok(ProgOutcome::Unchanged)
+            } else {
+                Ok(ProgOutcome::KeptLocal)
+            }
+        }
+        // File-owned — overwrite when the incoming source differs.
+        Some((ProgramOrigin::File, cur)) => {
+            if cur == incoming_source {
+                Ok(ProgOutcome::Unchanged)
+            } else {
+                let obj = world
+                    .get_mut(ref_id)
+                    .ok_or_else(|| format!("No object with ref '{}'", ref_id))?;
+                hooks::set_script_with_origin(obj, incoming_source.to_string(), ProgramOrigin::File);
+                Ok(ProgOutcome::Overwritten)
+            }
+        }
     }
-    Ok(outcome)
 }
 
-/// Resolve every hook in `programs` against `ref_id`, appending
-/// [`ProgramNote`]s to `report` for the informational buckets. Returns
-/// whether anything actually changed, so the caller can decide whether the
-/// owning object counts as `updated` or `unchanged`.
-#[allow(clippy::too_many_arguments)]
-fn resolve_programs(
+/// Reconcile `ref_id`'s script and lib modules against the bundle, appending
+/// [`ProgramNote`]s to `report` for the kept-local bucket. Returns whether
+/// anything changed, so the caller can decide `updated` vs `unchanged`.
+fn resolve_script(
     ref_id: &str,
-    programs: &HashMap<String, ProgramSource>,
+    script: &Option<ScriptSource>,
+    libs: &HashMap<String, ProgramSource>,
     base_dir: &Path,
     world: &mut World,
-    db: &Database,
-    record_db: bool,
-    author: Option<&str>,
     object_is_new: bool,
     report: &mut ImportReport,
 ) -> Result<bool, String> {
     let mut any_changed = false;
-    for (hook, source_def) in programs {
-        let source = source_def.resolve(base_dir)?;
-        let outcome = resolve_one_program(
-            ref_id, hook, &source, world, db, record_db, author, object_is_new,
-        )?;
-        match outcome {
-            ProgOutcome::New | ProgOutcome::Overwritten => any_changed = true,
-            ProgOutcome::Conflict => {
+
+    // The single behavior script.
+    if let Some(src) = script {
+        let source = src.resolve(base_dir)?;
+        match resolve_one_script(ref_id, &source, world, object_is_new)? {
+            ProgOutcome::New | ProgOutcome::Overwritten | ProgOutcome::Conflict => {
                 any_changed = true;
-                report.conflicts.push(ProgramNote { ref_id: ref_id.to_string(), hook: hook.clone() });
             }
             ProgOutcome::KeptLocal => {
-                report.kept_local.push(ProgramNote { ref_id: ref_id.to_string(), hook: hook.clone() });
+                report.kept_local.push(ProgramNote { ref_id: ref_id.to_string() });
             }
             ProgOutcome::Unchanged => {}
         }
     }
+
+    // Lib modules — same File-vs-InGame rule, per module name; File-origin
+    // libs the bundle no longer names are dropped (an in-game one is kept).
+    let stale: Vec<String> = world
+        .get(ref_id)
+        .map(|o| {
+            o.libs
+                .iter()
+                .filter(|(name, m)| {
+                    m.origin == ProgramOrigin::File && !libs.contains_key(name.as_str())
+                })
+                .map(|(name, _)| name.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    for name in stale {
+        if let Some(obj) = world.get_mut(ref_id) {
+            hooks::remove_lib(obj, &name);
+            any_changed = true;
+        }
+    }
+    for (name, source_def) in libs {
+        let incoming = source_def.resolve(base_dir)?;
+        let current = world
+            .get(ref_id)
+            .and_then(|o| o.libs.get(name))
+            .map(|m| (m.origin, m.source.clone()));
+        match current {
+            Some((ProgramOrigin::InGame, _)) => {}
+            Some((ProgramOrigin::File, cur)) if cur == incoming => {}
+            _ => {
+                if let Some(obj) = world.get_mut(ref_id) {
+                    hooks::set_lib(obj, name, incoming, ProgramOrigin::File);
+                    any_changed = true;
+                }
+            }
+        }
+    }
+
     Ok(any_changed)
 }
 
-/// The create/update pass. When `record_db` is `false` this is exactly the
-/// dry-run computation — `world` is a scratch clone in that case (see
-/// `import_bundle`), so every mutation here is safe to always perform;
-/// only the `db` writes are gated.
 /// The `import_hashes` obj_ref sentinel under which map/terrain sources record
 /// their baseline hash. Not a real object ref (those are `#N`), so it can't
 /// collide; the path is the "hook".
 pub(crate) const FILE_SOURCE_REF: &str = "file_source";
 
 /// Bring the bundle's map + terrain sources into the `file_sources` table
-/// using the same recorded/current/incoming three-way as programs
-/// ([`resolve_one_program`]) — but, lacking a map version log to preserve a
+/// using the recorded/current/incoming three-way (dpkg's conffile
+/// algorithm) — but, lacking a map version log to preserve a
 /// discarded edit, a genuine conflict keeps the local copy and reports it
 /// rather than overwriting. `record_db == false` (dry run) computes outcomes
 /// without writing. Returns whether anything was written, so the caller knows
@@ -498,7 +491,7 @@ fn resolve_file_sources(
             ProgOutcome::Unchanged => {
                 // Stamp a baseline if this source has never been through
                 // import, so a future builder edit has something to compare
-                // against — mirrors resolve_one_program's Unchanged branch.
+                // against — the maps baseline analogue of a clean import.
                 if record_db
                     && db
                         .get_import_hash(FILE_SOURCE_REF, &path)
@@ -519,9 +512,6 @@ fn resolve_file_sources(
 fn apply(
     areas: &[loader::ParsedArea],
     world: &mut World,
-    db: &Database,
-    record_db: bool,
-    author: Option<&str>,
 ) -> Result<ImportReport, String> {
     let mut report = ImportReport::default();
 
@@ -598,8 +588,8 @@ fn apply(
                 }
             }
 
-            let prog_changed = resolve_programs(
-                &ref_id, &room.programs, &area.base_dir, world, db, record_db, author, is_new, &mut report,
+            let prog_changed = resolve_script(
+                &ref_id, &room.script, &room.libs, &area.base_dir, world, is_new, &mut report,
             )?;
             changed |= prog_changed;
 
@@ -681,8 +671,8 @@ fn apply(
                 }
             }
 
-            let prog_changed = resolve_programs(
-                &ref_id, &object.programs, &area.base_dir, world, db, record_db, author, is_new, &mut report,
+            let prog_changed = resolve_script(
+                &ref_id, &object.script, &object.libs, &area.base_dir, world, is_new, &mut report,
             )?;
             changed |= prog_changed;
 
@@ -783,10 +773,12 @@ fn apply(
                 }
             }
 
-            let mut programs = HashMap::new();
-            programs.insert("on_tick".to_string(), script.source.clone());
-            let prog_changed = resolve_programs(
-                &ref_id, &programs, &area.base_dir, world, db, record_db, author, is_new, &mut report,
+            // A `[[scripts]]` entry is a Code object whose whole script is the
+            // referenced source (it must define `function on_tick`).
+            let script_src = Some(ScriptSource::Detailed(script.source.clone()));
+            let empty_libs = HashMap::new();
+            let prog_changed = resolve_script(
+                &ref_id, &script_src, &empty_libs, &area.base_dir, world, is_new, &mut report,
             )?;
             changed |= prog_changed;
 
@@ -1272,16 +1264,33 @@ pub fn export_bundle(path: &Path, world: &mut World) -> Result<ExportReport, Str
                     report.objects_written += 1;
                 }
                 Kind::Code => {
-                    let interval = obj.attrs.get("tick_interval").and_then(|v| v.as_u64()).unwrap_or(1);
-                    let name = fk.rsplit('/').next().unwrap_or(&obj.key).to_string();
-                    let source = obj.programs.get("on_tick").map(|p| p.source.clone()).unwrap_or_default();
-                    let file_name = format!("{}__on_tick.luau", sanitize_filename(&name));
-                    std::fs::write(area_dir.join(&file_name), &source)
-                        .map_err(|e| format!("Failed to write {}: {}", file_name, e))?;
-                    area_file.scripts.push(loader::ScriptDef {
-                        name,
-                        interval,
-                        source: ProgramSource::File { file: file_name },
+                    // A Code object can host a script (a global tick/command
+                    // script) AND/OR require()able lib modules. Export it as a
+                    // full `[objects] kind="code"` (not `[[scripts]]`, which has
+                    // no slot for `libs` — a lib-only Code object exported that
+                    // way would lose its modules). `write_script` handles both
+                    // script and libs; `tick_interval` rides along in attrs.
+                    let key = fk.rsplit('/').next().unwrap_or(&obj.key).to_string();
+                    let location = obj
+                        .location_ref
+                        .as_deref()
+                        .and_then(|r| resolve_ref_to_key(r, area_name, &ref_to_key));
+                    let (script, libs) = write_script(obj, &key, &area_dir)?;
+                    let mut tags: Vec<String> = obj.tags.iter().map(|t| t.as_spec()).collect();
+                    tags.sort();
+                    let mut attrs = obj.attrs.clone();
+                    attrs.remove(loader::FILE_KEY_ATTR);
+                    area_file.objects.push(loader::ObjectDef {
+                        key,
+                        kind: obj.kind.to_string(),
+                        title: obj.title.clone(),
+                        description: obj.description.clone(),
+                        location,
+                        tags,
+                        attrs,
+                        locks: obj.locks.clone(),
+                        script,
+                        libs,
                     });
                     report.objects_written += 1;
                 }
@@ -1295,7 +1304,7 @@ pub fn export_bundle(path: &Path, world: &mut World) -> Result<ExportReport, Str
                     // `drop`/`examine`) keeps stamping from having any
                     // live gameplay side effect.
                     let key = fk.rsplit('/').next().unwrap_or(&obj.key).to_string();
-                    let programs = write_programs(obj, &key, &area_dir)?;
+                    let (script, libs) = write_script(obj, &key, &area_dir)?;
                     let mut tags: Vec<String> = obj.tags.iter().map(|t| t.as_spec()).collect();
                     tags.sort();
                     area_file.rooms.push(loader::RoomDef {
@@ -1304,7 +1313,8 @@ pub fn export_bundle(path: &Path, world: &mut World) -> Result<ExportReport, Str
                         description: obj.description.clone(),
                         tags,
                         locks: obj.locks.clone(),
-                        programs,
+                        script,
+                        libs,
                     });
                     report.objects_written += 1;
                 }
@@ -1330,7 +1340,7 @@ pub fn export_bundle(path: &Path, world: &mut World) -> Result<ExportReport, Str
                     };
                     // See the note on the `Kind::Room` arm above.
                     let key = fk.rsplit('/').next().unwrap_or(&obj.key).to_string();
-                    let programs = write_programs(obj, &key, &area_dir)?;
+                    let (script, libs) = write_script(obj, &key, &area_dir)?;
                     let mut tags: Vec<String> = obj.tags.iter().map(|t| t.as_spec()).collect();
                     tags.sort();
                     let mut attrs = obj.attrs.clone();
@@ -1344,7 +1354,8 @@ pub fn export_bundle(path: &Path, world: &mut World) -> Result<ExportReport, Str
                         tags,
                         attrs,
                         locks: obj.locks.clone(),
-                        programs,
+                        script,
+                        libs,
                     });
                     report.objects_written += 1;
                 }
@@ -1365,35 +1376,48 @@ pub fn export_bundle(path: &Path, world: &mut World) -> Result<ExportReport, Str
     Ok(report)
 }
 
-/// Write every Program on `obj` to a sibling `.luau` file under `area_dir`
-/// and return the `{hook: ProgramSource::File}` map to embed in its
-/// `RoomDef`/`ObjectDef`. Always emits file references, never inline
-/// source — matches the predominant style game authors already use (see
+/// Write `obj`'s script and lib modules to sibling `.luau` files under
+/// `area_dir` and return the `script`/`libs` fields to embed in its
+/// `RoomDef`/`ObjectDef`. Always emits file references, never inline source —
+/// matches the predominant style game authors already use (see
 /// `the-last-stag-mud`) and avoids TOML string-escaping edge cases for
 /// multi-line Luau.
 ///
 /// `export_key` (the last segment of the object's `FILE_KEY_ATTR`, not
-/// `obj.key`) names the file: `obj.key` is only guaranteed unique for an
-/// object that came from a file import (`check_collisions` enforces that
-/// at import time) — `@create` sets it from a lowercased title with no
-/// uniqueness check at all, so two ad-hoc objects can easily share one
-/// (two things both named "Crate"). Using `obj.key` here would let a
-/// second object's Program silently overwrite the first's `.luau` file on
-/// disk the moment both exported into the same area; `export_key` is
-/// already unique within the area by construction (see `dedupe_key`).
-fn write_programs(
+/// `obj.key`) names the files: `obj.key` is only guaranteed unique for an
+/// object that came from a file import (`check_collisions` enforces that at
+/// import time) — `@create` sets it from a lowercased title with no
+/// uniqueness check at all, so two ad-hoc objects can easily share one (two
+/// things both named "Crate"). Using `obj.key` here would let a second
+/// object's script silently overwrite the first's `.luau` file the moment
+/// both exported into the same area; `export_key` is already unique within
+/// the area by construction (see `dedupe_key`).
+fn write_script(
     obj: &GameObject,
     export_key: &str,
     area_dir: &Path,
-) -> Result<HashMap<String, ProgramSource>, String> {
-    let mut programs = HashMap::new();
-    for (hook, prog) in &obj.programs {
-        let file_name = format!("{}__{}.luau", sanitize_filename(export_key), hook);
-        std::fs::write(area_dir.join(&file_name), &prog.source)
+) -> Result<(Option<ScriptSource>, HashMap<String, ProgramSource>), String> {
+    let script = match &obj.script {
+        Some(s) => {
+            let file_name = format!("{}.luau", sanitize_filename(export_key));
+            std::fs::write(area_dir.join(&file_name), &s.source)
+                .map_err(|e| format!("Failed to write {}: {}", file_name, e))?;
+            Some(ScriptSource::Path(file_name))
+        }
+        None => None,
+    };
+    let mut libs = HashMap::new();
+    for (name, module) in &obj.libs {
+        let file_name = format!(
+            "{}__lib_{}.luau",
+            sanitize_filename(export_key),
+            sanitize_filename(name)
+        );
+        std::fs::write(area_dir.join(&file_name), &module.source)
             .map_err(|e| format!("Failed to write {}: {}", file_name, e))?;
-        programs.insert(hook.clone(), ProgramSource::File { file: file_name });
+        libs.insert(name.clone(), ProgramSource::File { file: file_name });
     }
-    Ok(programs)
+    Ok((script, libs))
 }
 
 #[cfg(test)]
@@ -1575,8 +1599,7 @@ mod tests {
                 kind = "item"
                 title = "a sign"
                 location = "crossroads"
-                [objects.programs]
-                on_look = {{ source = "function on_look() return 'a sign' end" }}
+                script = {{ source = "function on_look() return 'a sign' end" }}
 
                 [[exits]]
                 from = "crossroads"
@@ -1613,7 +1636,7 @@ mod tests {
             .values()
             .find(|o| o.key == "sign")
             .expect("sign should exist");
-        assert!(sign.programs.contains_key("on_look"));
+        assert!(sign.script.as_ref().is_some_and(|s| s.defines("on_look")));
         assert_eq!(sign.location_ref.as_deref(), Some(crossroads.ref_id.as_str()));
 
         let exit = world.exits_from(&crossroads.ref_id);
@@ -1665,7 +1688,7 @@ mod tests {
         assert!(report.conflicts.is_empty(), "{:?}", report);
         assert!(report.kept_local.is_empty(), "{:?}", report);
         let sign = world.get(&sign_ref).unwrap();
-        assert!(sign.programs["on_look"].source.contains("an updated sign"));
+        assert!(sign.script.as_ref().unwrap().source.contains("an updated sign"));
     }
 
     #[test]
@@ -1679,7 +1702,7 @@ mod tests {
         let sign_ref = world.objects.values().find(|o| o.key == "sign").unwrap().ref_id.clone();
         {
             let obj = world.get_mut(&sign_ref).unwrap();
-            hooks::set_program(obj, "on_look", "function on_look() return 'builder edit' end".into()).unwrap();
+            hooks::set_script(obj, "function on_look() return 'builder edit' end".into());
         }
 
         // Re-import the exact same bundle — upstream unchanged.
@@ -1689,13 +1712,16 @@ mod tests {
         assert!(report.conflicts.is_empty(), "{:?}", report);
         let sign = world.get(&sign_ref).unwrap();
         assert!(
-            sign.programs["on_look"].source.contains("builder edit"),
+            sign.script.as_ref().unwrap().source.contains("builder edit"),
             "local edit must survive when upstream did not change"
         );
     }
 
     #[test]
-    fn three_way_case_both_changed_is_a_conflict_and_preserves_history() {
+    fn in_game_script_edit_is_kept_even_when_upstream_also_changed() {
+        // With one database-owned script per object and no version log, an
+        // in-game edit is never overwritten by an import — the bundle's
+        // change is declined and the local edit reported as kept-local.
         let dir = TempDir::new();
         dir.write("town", "town.toml", &town_toml("Old description."));
         let db = temp_db();
@@ -1705,7 +1731,7 @@ mod tests {
         let sign_ref = world.objects.values().find(|o| o.key == "sign").unwrap().ref_id.clone();
         {
             let obj = world.get_mut(&sign_ref).unwrap();
-            hooks::set_program(obj, "on_look", "function on_look() return 'builder edit' end".into()).unwrap();
+            hooks::set_script(obj, "function on_look() return 'builder edit' end".into());
         }
 
         // Upstream *also* changes it.
@@ -1720,22 +1746,14 @@ mod tests {
 
         let report = import_bundle(&dir.path, &mut world, &db, false, Some("#7")).unwrap();
 
-        assert_eq!(report.conflicts.len(), 1, "{:?}", report);
-        assert_eq!(report.conflicts[0].ref_id, sign_ref);
-        assert_eq!(report.conflicts[0].hook, "on_look");
+        assert!(report.conflicts.is_empty(), "{:?}", report);
+        assert_eq!(report.kept_local.len(), 1, "{:?}", report);
+        assert_eq!(report.kept_local[0].ref_id, sign_ref);
 
         let sign = world.get(&sign_ref).unwrap();
         assert!(
-            sign.programs["on_look"].source.contains("upstream edit"),
-            "conflict resolves by overwriting with the incoming source"
-        );
-
-        // The local edit must be preserved in the version log.
-        let history = db.list_program_versions(&sign_ref, "on_look").unwrap();
-        assert!(
-            history.iter().any(|v| v.source.contains("builder edit")),
-            "local edit must be preserved in program history: {:?}",
-            history
+            sign.script.as_ref().unwrap().source.contains("builder edit"),
+            "an in-game edit is kept, not overwritten by the incoming source"
         );
     }
 
@@ -1750,7 +1768,6 @@ mod tests {
         let object_count_before = world.objects.len();
         let next_id_before = world.next_id;
         let sign_ref = world.objects.values().find(|o| o.key == "sign").unwrap().ref_id.clone();
-        let versions_before_dry_run = db.list_program_versions(&sign_ref, "on_look").unwrap().len();
 
         // Change upstream (both a plain field and the sign's program), then
         // dry-run import it.
@@ -1771,14 +1788,8 @@ mod tests {
         assert_eq!(crossroads.description, "Old description.", "dry run must not mutate the real world");
         let sign = world.get(&sign_ref).unwrap();
         assert!(
-            sign.programs["on_look"].source.contains("'a sign'"),
-            "dry run must not mutate the real world's Program either"
-        );
-
-        let versions_after_dry_run = db.list_program_versions(&sign_ref, "on_look").unwrap().len();
-        assert_eq!(
-            versions_after_dry_run, versions_before_dry_run,
-            "dry run must not write to the program version log"
+            sign.script.as_ref().unwrap().source.contains("'a sign'"),
+            "dry run must not mutate the real world's script either"
         );
     }
 
@@ -1843,14 +1854,12 @@ mod tests {
                 [[objects]]
                 key = "a"
                 kind = "item"
-                [objects.programs]
-                cmd_attack = { source = "function cmd_attack() end" }
+                script = { source = "function cmd_attack() end" }
 
                 [[objects]]
                 key = "b"
                 kind = "item"
-                [objects.programs]
-                cmd_attack = { source = "function cmd_attack() end" }
+                script = { source = "function cmd_attack() end" }
             "#,
         );
         let db = temp_db();
@@ -1941,6 +1950,54 @@ mod tests {
         let room = GameObject::new(&ref_id, &key, Kind::Room).with_title(title).with_owner(owner);
         world.add_object(room);
         ref_id
+    }
+
+    /// A lib-only `Kind::Code` object (an `@lib` / module-editor host: `libs`
+    /// populated, no script) must survive export → import with its module
+    /// source intact. Regression: the Code export arm used to force every
+    /// Code object into a `[[scripts]]` on_tick entry, which has no slot for
+    /// `libs`, so exporting then re-importing wrote an empty tick file and
+    /// silently dropped the library — `require("<name>")` would then break.
+    #[test]
+    fn lib_host_code_object_round_trips_through_export() {
+        let src_world = {
+            let mut world = World::new();
+            let ref_id = world.next_dbref();
+            let mut obj = GameObject::new(&ref_id, "greetings", Kind::Code);
+            hooks::set_lib(
+                &mut obj,
+                "greetings",
+                "return { hello = function() return \"hi\" end }".into(),
+                ProgramOrigin::InGame,
+            );
+            world.add_object(obj);
+            world
+        };
+
+        let export_dir = TempDir::new();
+        {
+            let mut world = src_world;
+            let report = export_bundle(&export_dir.path, &mut world).unwrap();
+            assert!(report.skipped.is_empty(), "lib host should be exportable: {:?}", report);
+            assert_eq!(report.objects_written, 1);
+        }
+
+        // Import into a FRESH world: proves the module source reached the
+        // files, not just that it stayed in memory.
+        let db = temp_db();
+        let mut fresh = World::new();
+        import_bundle(&export_dir.path, &mut fresh, &db, false, Some("#1")).unwrap();
+
+        let host = fresh
+            .objects
+            .values()
+            .find(|o| o.kind == Kind::Code && o.libs.contains_key("greetings"))
+            .expect("lib host survived export→import with its module");
+        assert!(
+            host.libs["greetings"].source.contains("hello"),
+            "module source must round-trip, got: {}",
+            host.libs["greetings"].source
+        );
     }
 
     /// Objects created entirely in-game (no `@import` involved, no
@@ -2089,25 +2146,25 @@ mod tests {
     /// `@create` derives `.key` from a lowercased title with no uniqueness
     /// check at all (unlike a file import, where `check_collisions`
     /// enforces it) — so two ad-hoc objects can easily share one, e.g. two
-    /// things both named "Crate". If `write_programs` used `obj.key` (the
+    /// things both named "Crate". If `write_script` used `obj.key` (the
     /// gameplay key) to name the `.luau` file it writes, the second
-    /// object's Program would silently overwrite the first's file on disk
+    /// object's script would silently overwrite the first's file on disk
     /// the moment both exported into the same area. It must use the
     /// disambiguated export key instead.
     #[test]
-    fn colliding_gameplay_keys_do_not_clobber_each_others_program_files() {
+    fn colliding_gameplay_keys_do_not_clobber_each_others_script_files() {
         let mut world = World::new();
         let owner = "#1";
         let room_ref = adhoc_room(&mut world, "Storage", owner);
 
         let a = world.next_dbref();
         let mut obj_a = GameObject::new(&a, "crate", Kind::Item).with_title("Crate").with_location(&room_ref);
-        hooks::set_program(&mut obj_a, "on_look", "return 'crate A'".into()).unwrap();
+        hooks::set_script(&mut obj_a, "function on_look() return 'crate A' end".into());
         world.add_object(obj_a);
 
         let b = world.next_dbref();
         let mut obj_b = GameObject::new(&b, "crate", Kind::Item).with_title("Crate").with_location(&room_ref);
-        hooks::set_program(&mut obj_b, "on_look", "return 'crate B'".into()).unwrap();
+        hooks::set_script(&mut obj_b, "function on_look() return 'crate B' end".into());
         world.add_object(obj_b);
 
         assert_eq!(world.get(&a).unwrap().key, world.get(&b).unwrap().key, "both share the same gameplay key");
@@ -2116,16 +2173,17 @@ mod tests {
         let report = export_bundle(&dir.path, &mut world).unwrap();
         assert!(report.skipped.is_empty(), "{:?}", report);
 
-        let source_a = world.get(&a).unwrap().programs["on_look"].source.clone();
-        let source_b = world.get(&b).unwrap().programs["on_look"].source.clone();
+        let source_a = world.get(&a).unwrap().script.as_ref().unwrap().source.clone();
+        let source_b = world.get(&b).unwrap().script.as_ref().unwrap().source.clone();
 
         // Read back both `.luau` files that were actually written and
-        // confirm neither one clobbered the other.
+        // confirm neither one clobbered the other. A `script = "..."` line
+        // is the untagged `ScriptSource::Path` form export emits.
         let toml_text =
             std::fs::read_to_string(dir.path.join(FALLBACK_AREA).join(format!("{}.toml", FALLBACK_AREA))).unwrap();
         let file_names: Vec<&str> = toml_text
             .lines()
-            .filter_map(|l| l.trim().strip_prefix("file = \"").and_then(|s| s.strip_suffix('"')))
+            .filter_map(|l| l.trim().strip_prefix("script = \"").and_then(|s| s.strip_suffix('"')))
             .collect();
         assert_eq!(file_names.len(), 2, "expected a distinct .luau file per object:\n{}", toml_text);
         assert_ne!(file_names[0], file_names[1], "both objects wrote to the same file: {:?}", file_names);

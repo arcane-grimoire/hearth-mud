@@ -39,13 +39,10 @@ title = "Aldric the Barkeep"
 description = "A heavyset man..."
 location = "tavern"
 tags = ["quest:giver"]
+script = "barkeep.luau"   # one script defining on_look, cmd_talk, ...
 
 [objects.attrs]
 dialogue_state = "idle"
-
-[objects.programs]
-on_look = { file = "barkeep_look.luau" }
-cmd_talk = { file = "barkeep_talk.luau" }
 
 [[objects]]
 key = "torch"
@@ -74,9 +71,8 @@ aliases = ["e"]
 
 [[scripts]]
 name = "weather"
-entry = "on_tick"
 interval = 60
-file = "weather.luau"
+file = "weather.luau"   # source defines function on_tick(this, state, room)
 ```
 
 ### Key rules
@@ -84,10 +80,21 @@ file = "weather.luau"
 - `key` is the human-readable identifier, not unique — two swords can both have `key = "sword"`
 - `location` references another object's key within the same area, or `"area/key"` for cross-area
 - `kind` is one of: `room`, `item`, `npc`, `exit` (never `player` — those are created by the engine)
-- Programs can be inline (`source = "..."`) or file references (`file = "script.luau"`)
+- Each room/object has **one** `script` field — the object's whole Luau script (its hooks are functions in it). It can be a single file (`script = "barkeep.luau"`), a list of files concatenated into one chunk so an object's methods can span files (`script = ["a.luau", "b.luau"]`), or the detailed form (`script = { file = "x.luau" }` or `script = { source = "..." }`)
+- An optional `[objects.libs]` (or `[rooms.libs]`) table adds `require()`able lib modules, keyed by bare name: `combat = { file = "combat.luau" }` (usually on `Kind::Code` objects)
 - Objects loaded from files are tagged `system:managed` and updated on `@reload-world`
 
 ## Hooks
+
+An object has **one script** — a single Luau chunk that defines its hooks as
+named top-level functions, all sharing one file-level scope (the Godot/LPMUD
+"object is the unit, hooks are its methods" model). Top-level `local` helpers
+and constants are shared by every hook the script defines; persistent `state`
+is per-object, shared across its hooks. The engine parses the script to learn
+which hooks it defines — a hook must be a **named top-level function** to be
+detected (functions inside string literals or built by metaprogramming are
+not). Valid hook names are the known `can_*`/`on_*` set below, plus open-ended
+`on_*` and `cmd_*` names.
 
 Three families, each with a different signature:
 
@@ -150,7 +157,7 @@ function cmd_talk(this, actor, room, args)
 end
 ```
 
-The player types `talk` and the engine finds a `cmd_talk` program on an object in the room, the actor's inventory, or a `system:global` tagged object. The `args` parameter receives everything after the command name.
+The player types `talk` and the engine finds an object whose script defines `cmd_talk` in the room, the actor's inventory, or a `system:global` tagged object. The `args` parameter receives everything after the command name.
 
 Resolution order: room itself → objects in room → actor's inventory → global objects.
 
@@ -272,7 +279,7 @@ All accept either an object table or a ref string (`"#5"`). `get_attr`, `has_att
 | `get_nearby(room, x, y, radius)` | table | All objects in `room` whose `_x`/`_y` attrs are within `radius` of the given coords |
 | `get_rooms_in_radius(room, distance)` | table | BFS walk through exits, returns `{ {ref, distance, name}, ... }`. Respects `muffle` and `blocked_sound` exit attrs. |
 
-## Write API (24 functions)
+## Write API (25 functions)
 
 All queue Intents — nothing happens until the script returns and the batch applies.
 
@@ -297,8 +304,9 @@ All queue Intents — nothing happens until the script returns and the batch app
 | `set_owner(ref, owner_ref)` | Set the object's owner |
 | `destroy(ref)` | Remove object (not players) |
 | `trigger(ref, hook, data?)` | Fire a hook on another object. Optional `data` (table) is available as `_trigger_data` attr during execution. |
-| `set_program(ref, hook, source)` | Attach a Luau program to an object |
-| `apply_template(ref, table)` | Install multiple programs from a `{ hook = source }` table. Works with `require()`: `apply_template(ref, require("template_foo"))` |
+| `set_script(ref, source)` | Set the object's **whole** script (source defines its hook functions). Replaces any existing script — a second call replaces the first, so put every hook in one source string. |
+| `set_lib(ref, name, source)` | Set a `require()`able lib module (bare `name`, no prefix) on a `Kind::Code` object |
+| `apply_template(ref, source_or_table)` | Install a script from a whole source string, or a table of source fragments concatenated into one script. Works with `require()`: `apply_template(ref, require("template_foo"))` |
 | `prompt(actor, obj, hook)` | Set up interactive prompt |
 | `after(ticks, ref, hook, data?)` | Schedule a hook to fire after N engine ticks, with optional data payload |
 | `cancel_after(ref, hook)` | Cancel a pending timer |
@@ -443,7 +451,7 @@ Tags are `category:key` pairs. Common conventions:
 
 ### Global command (available everywhere)
 
-Create an object with `system:global` tag and attach `cmd_` hooks:
+Create an object with `system:global` tag and a script defining `cmd_` hooks:
 
 ```toml
 [[objects]]
@@ -451,9 +459,7 @@ key = "rules"
 kind = "item"
 title = "Game Rules"
 tags = ["system:global"]
-
-[objects.programs]
-cmd_help = { source = 'function cmd_help(this, actor, room, args) emit(actor, "...") end' }
+script = { source = 'function cmd_help(this, actor, room, args) emit(actor, "...") end' }
 ```
 
 ### Persistent state on objects
@@ -513,12 +519,12 @@ Exits can carry attributes that control how `emit_radius` and `get_rooms_in_radi
 
 ## Testing softcode
 
-- `@program <ref>/<hook> = <luau>` — install inline (one-liners)
-- `@programs [<ref>]` — list programs on an object
-- `@rmprogram <ref>/<hook>` — remove a program
+- `@program <ref> = <luau>` — set the object's whole script inline (one-liners); `@program <ref>` (no `=`) opens a multi-line editor seeded with the current script
+- `@programs [<ref>]` — show an object's script and the hooks derived from it
+- `@rmprogram <ref>` — remove the object's script entirely
 - `@reload-world` — reload changed files only (hash-based incremental, shows what changed). Clears bytecode cache.
 - Syntax errors are caught at install time and rejected
-- Runtime errors disable the program; `@reload <ref>/<hook>` re-enables
+- Runtime errors disable the script; `@reload <ref>` re-enables it
 
 ## File organization
 
@@ -531,12 +537,12 @@ world/
     signal.luau          — pub/sub signals
   town/
     town.toml            — area definition
-    barkeep_talk.luau    — referenced by town.toml programs
+    barkeep.luau         — barkeep's script (referenced by town.toml's script field)
   forest/
     forest.toml
   system/
     system.toml          — global objects (system:global tag)
-    cmd_fight.luau       — game-wide commands
+    rules.luau           — game-wide commands (one script, many cmd_ hooks)
 ```
 
-Keep `.luau` files next to the `.toml` that references them. The `file` path in programs is relative to the TOML file's directory. Shared utility code goes in `lib/` and is loaded with `require("name")`.
+Keep `.luau` files next to the `.toml` that references them. A `script` field's `file` path is relative to the TOML file's directory. Shared utility code goes in `lib/` and is loaded with `require("name")`.
