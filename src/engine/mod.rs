@@ -10576,6 +10576,7 @@ end
             color: color.map(String::from),
             tile_image: None,
             tile_rotation: TileRotation::default(),
+            archetype: None,
             attrs: HashMap::new(),
         };
         let mut terrain = HashMap::new();
@@ -10614,6 +10615,7 @@ end
             color: Some(color.into()),
             tile_image: None,
             tile_rotation: TileRotation::default(),
+            archetype: None,
             attrs: HashMap::new(),
         };
         let mut terrain = HashMap::new();

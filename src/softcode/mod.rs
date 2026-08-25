@@ -2994,6 +2994,120 @@ mod tests {
         assert_eq!(world.get("#5").unwrap().attrs["eval_touched"], true);
     }
 
+    fn grid_move_world_and_templates() -> (
+        World,
+        String,
+        HashMap<String, crate::map_template::MapTemplateFile>,
+    ) {
+        use crate::map_template::{MapHeader, MapTemplateFile, TerrainDef, TileRotation};
+        let mut world = test_world();
+        // A terrain archetype object addressable by file key.
+        let arch = world.next_dbref();
+        let mut o = GameObject::new(&arch, "lava", Kind::Room);
+        o.attrs
+            .insert(crate::loader::FILE_KEY_ATTR.into(), serde_json::json!("world/lava"));
+        world.add_object(o);
+
+        let td = |passable: bool, archetype: Option<&str>| TerrainDef {
+            theme: "plains".into(),
+            title_prefix: None,
+            passable,
+            color: None,
+            tile_image: None,
+            tile_rotation: TileRotation::default(),
+            archetype: archetype.map(String::from),
+            attrs: HashMap::new(),
+        };
+        let mut terrain = HashMap::new();
+        terrain.insert("a".into(), td(true, Some("world/lava"))); // passable, hooked
+        terrain.insert("x".into(), td(false, None)); // impassable
+        let mut templates = HashMap::new();
+        // Row: passable, passable, impassable  → "aax"
+        templates.insert(
+            "m".into(),
+            MapTemplateFile {
+                map: MapHeader { name: "m".into(), grid: "aax".into() },
+                terrain,
+                cells: HashMap::new(),
+            },
+        );
+        (world, arch, templates)
+    }
+
+    #[test]
+    fn grid_move_moves_and_fires_terrain_hooks() {
+        let (world, arch, templates) = grid_move_world_and_templates();
+        let runtime = SoftcodeRuntime::new();
+        // #3 (alice) starts at unset _x/_y (→ 0,0); move east onto the passable
+        // hooked terrain at (1,0).
+        let result = runtime
+            .run_eval(
+                &world,
+                r##"return grid_move("#3", "m", "east")"##,
+                "#3",
+                Some("#1"),
+                Budget::default(),
+                counter(&world),
+                &test_themes(),
+                &templates,
+                &[],
+                0,
+            )
+            .expect("eval");
+        let intents = &result.batch.intents;
+        assert!(intents.iter().any(|i| matches!(i,
+            Intent::SetAttr { target, key, value } if target == "#3" && key == "_x" && *value == serde_json::json!(1))));
+        assert!(intents.iter().any(|i| matches!(i,
+            Intent::SetAttr { target, key, value } if target == "#3" && key == "_y" && *value == serde_json::json!(0))));
+        assert!(intents.iter().any(|i| matches!(i,
+            Intent::Trigger { target, hook, .. } if target == &arch && hook == "on_enter")));
+        assert!(intents.iter().any(|i| matches!(i,
+            Intent::Trigger { target, hook, .. } if target == &arch && hook == "on_leave")));
+    }
+
+    #[test]
+    fn grid_move_blocks_impassable_and_off_grid_and_unknown_map() {
+        let (world, _arch, templates) = grid_move_world_and_templates();
+        let runtime = SoftcodeRuntime::new();
+        // grid_move reads position from the WORLD's `_x`/`_y` (not pending
+        // intents), so seed position in the world, not via eval.
+        let run = |w: &World, src: &str| {
+            runtime
+                .run_eval(
+                    w,
+                    src,
+                    "#3",
+                    Some("#1"),
+                    Budget::default(),
+                    counter(w),
+                    &test_themes(),
+                    &templates,
+                    &[],
+                    0,
+                )
+                .expect("eval")
+        };
+        let moved = |r: &EvalResult| {
+            r.batch.intents.iter().any(|i| matches!(i, Intent::SetAttr { key, .. } if key == "_x"))
+        };
+
+        // From (0,0): west leaves the grid → blocked.
+        assert!(!moved(&run(&world, r##"return grid_move("#3","m","west")"##)));
+        // Unknown map → no move.
+        assert!(!moved(&run(&world, r##"return grid_move("#3","nope","east")"##)));
+
+        // Seed the player at (1,0); east → (2,0) is impassable 'x' → blocked.
+        let mut w2 = world.clone();
+        {
+            let a = w2.get_mut("#3").unwrap();
+            a.attrs.insert("_x".into(), serde_json::json!(1));
+            a.attrs.insert("_y".into(), serde_json::json!(0));
+        }
+        assert!(!moved(&run(&w2, r##"return grid_move("#3","m","east")"##)), "east into 'x' is blocked");
+        // Sanity: from (1,0), west → (0,0) passable → DOES move.
+        assert!(moved(&run(&w2, r##"return grid_move("#3","m","west")"##)), "west into 'a' moves");
+    }
+
     #[test]
     fn check_syntax_accepts_type_annotations() {
         // The editor seeds fresh hooks with typed signatures

@@ -62,6 +62,13 @@ pub struct TerrainDef {
     /// faces (north = unrotated). Purely a rendering hint, like `tile_image`.
     #[serde(default)]
     pub tile_rotation: TileRotation,
+    /// Optional archetype for squares of this terrain: an `"area/key"` file key
+    /// to an object whose hooks (`on_enter`/`on_leave`/custom `on_*`) fire when
+    /// a player steps onto/off a cell of this terrain during 2D-grid movement
+    /// (`grid_move`). Lets a game define terrain behavior once ("lava burns")
+    /// without a room per cell. Resolved to a dbref by `grid_move`.
+    #[serde(default)]
+    pub archetype: Option<String>,
     /// Game-defined custom attributes. Any key on a `[terrain.X]` block that
     /// isn't one of the named fields above is captured here and stamped onto
     /// every room of that terrain as a `terrain_<key>` attribute, so game
@@ -636,11 +643,11 @@ mod tests {
         let mut terrain = HashMap::new();
         terrain.insert(
             "f".to_string(),
-            TerrainDef { theme: "forest".into(), title_prefix: Some("Forest".into()), passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), attrs: HashMap::new() },
+            TerrainDef { theme: "forest".into(), title_prefix: Some("Forest".into()), passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), archetype: None, attrs: HashMap::new() },
         );
         terrain.insert(
             "r".to_string(),
-            TerrainDef { theme: "river".into(), title_prefix: Some("River".into()), passable: false, color: None, tile_image: None, tile_rotation: TileRotation::default(), attrs: HashMap::new() },
+            TerrainDef { theme: "river".into(), title_prefix: Some("River".into()), passable: false, color: None, tile_image: None, tile_rotation: TileRotation::default(), archetype: None, attrs: HashMap::new() },
         );
         MapTemplateFile {
             map: MapHeader { name: "test_map".into(), grid: grid.to_string() },
@@ -722,17 +729,17 @@ mod tests {
         let mut palette = HashMap::new();
         palette.insert(
             "f".to_string(),
-            TerrainDef { theme: "forest".into(), title_prefix: None, passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), attrs: HashMap::new() },
+            TerrainDef { theme: "forest".into(), title_prefix: None, passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), archetype: None, attrs: HashMap::new() },
         );
         palette.insert(
             "m".to_string(),
-            TerrainDef { theme: "mountain".into(), title_prefix: None, passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), attrs: HashMap::new() },
+            TerrainDef { theme: "mountain".into(), title_prefix: None, passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), archetype: None, attrs: HashMap::new() },
         );
 
         let mut map_terrain = HashMap::new();
         map_terrain.insert(
             "f".to_string(),
-            TerrainDef { theme: "swamp".into(), title_prefix: None, passable: false, color: None, tile_image: None, tile_rotation: TileRotation::default(), attrs: HashMap::new() },
+            TerrainDef { theme: "swamp".into(), title_prefix: None, passable: false, color: None, tile_image: None, tile_rotation: TileRotation::default(), archetype: None, attrs: HashMap::new() },
         );
         let tmpl = MapTemplateFile {
             map: MapHeader { name: "m".into(), grid: "f".into() },
@@ -755,7 +762,7 @@ mod tests {
         let mut terrain = HashMap::new();
         terrain.insert(
             "m".to_string(),
-            TerrainDef { theme: "forest".into(), title_prefix: None, passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), attrs },
+            TerrainDef { theme: "forest".into(), title_prefix: None, passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), archetype: None, attrs },
         );
         let tmpl = MapTemplateFile {
             map: MapHeader { name: "test_map".into(), grid: "m".into() },

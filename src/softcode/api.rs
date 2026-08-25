@@ -1979,6 +1979,135 @@ pub fn install<'scope, 'env>(
         })?,
     )?;
 
+    // 2D-grid movement within a single "grid room" (the wilderness model: a
+    // player's position is `_x`/`_y` attrs, terrain comes from a map template —
+    // there is NO room per cell). Moves the actor one cell in `dir`, honoring
+    // terrain/cell passability, and fires the terrain's `on_leave`/`on_enter`
+    // hooks (on its `archetype`, if any) so a game can attach terrain behavior
+    // ("lava burns") without a room per square. Returns a table:
+    //   { ok=false, reason="no_map" }              -- unknown map
+    //   { ok=true, moved=false, reason="blocked" } -- impassable / off-grid
+    //   { ok=true, moved=true, x, y, terrain }     -- moved
+    let b = Rc::clone(&batch);
+    env.set(
+        "grid_move",
+        scope.create_function(move |lua, (actor, map_name, dir): (Value, String, String)| {
+            let actor = ref_of(&actor)?;
+            let result = lua.create_table()?;
+
+            let (dx, dy): (i64, i64) = match dir.to_lowercase().as_str() {
+                "n" | "north" => (0, -1),
+                "s" | "south" => (0, 1),
+                "e" | "east" => (1, 0),
+                "w" | "west" => (-1, 0),
+                other => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "grid_move: unknown direction '{}' (use n/s/e/w)",
+                        other
+                    )));
+                }
+            };
+
+            let Some(template) = map_templates.get(&map_name) else {
+                result.set("ok", false)?;
+                result.set("reason", "no_map")?;
+                return Ok(result);
+            };
+            let grid = template.parse_grid();
+
+            let cur = |key: &str| -> i64 {
+                world
+                    .get(&actor)
+                    .and_then(|o| o.attrs.get(key))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0)
+            };
+            let (x, y) = (cur("_x"), cur("_y"));
+            let (nx, ny) = (x + dx, y + dy);
+
+            // Terrain char at a cell (None = off-grid or a gap).
+            let terrain_at = |cx: i64, cy: i64| -> Option<String> {
+                if cx < 0 || cy < 0 {
+                    return None;
+                }
+                let (cx, cy) = (cx as usize, cy as usize);
+                if cy >= grid.height || cx >= grid.width {
+                    return None;
+                }
+                grid.cells[cy][cx].map(|c| c.to_string())
+            };
+
+            let Some(new_terrain) = terrain_at(nx, ny) else {
+                result.set("ok", true)?;
+                result.set("moved", false)?;
+                result.set("reason", "blocked")?;
+                return Ok(result);
+            };
+            // Passability: a cell override wins, else the terrain's default,
+            // else impassable (unknown terrain never lets you through).
+            let passable = template
+                .cells
+                .get(&format!("{},{}", nx, ny))
+                .and_then(|o| o.passable)
+                .or_else(|| template.terrain.get(&new_terrain).map(|t| t.passable))
+                .unwrap_or(false);
+            if !passable {
+                result.set("ok", true)?;
+                result.set("moved", false)?;
+                result.set("reason", "blocked")?;
+                return Ok(result);
+            }
+
+            // Resolve a terrain's hook host (its `archetype` file key → dbref).
+            let arch_of = |tkey: &str| -> Option<String> {
+                template
+                    .terrain
+                    .get(tkey)
+                    .and_then(|t| t.archetype.as_deref())
+                    .and_then(|k| crate::loader::resolve_file_key(world, k))
+            };
+
+            let mut batch = b.borrow_mut();
+            batch.push(Intent::SetAttr {
+                target: actor.clone(),
+                key: "_x".into(),
+                value: serde_json::json!(nx),
+            });
+            batch.push(Intent::SetAttr {
+                target: actor.clone(),
+                key: "_y".into(),
+                value: serde_json::json!(ny),
+            });
+            // on_leave the old terrain, on_enter the new — fired after the move
+            // commits (deferred TriggerHook), with the moving actor as the
+            // ambient actor and the cell in the trigger data.
+            if let Some(old_terrain) = terrain_at(x, y)
+                && let Some(host) = arch_of(&old_terrain)
+            {
+                batch.push(Intent::Trigger {
+                    target: host,
+                    hook: "on_leave".into(),
+                    data: Some(serde_json::json!({ "x": x, "y": y, "map": map_name, "terrain": old_terrain })),
+                });
+            }
+            if let Some(host) = arch_of(&new_terrain) {
+                batch.push(Intent::Trigger {
+                    target: host,
+                    hook: "on_enter".into(),
+                    data: Some(serde_json::json!({ "x": nx, "y": ny, "map": map_name, "terrain": new_terrain })),
+                });
+            }
+            drop(batch);
+
+            result.set("ok", true)?;
+            result.set("moved", true)?;
+            result.set("x", nx)?;
+            result.set("y", ny)?;
+            result.set("terrain", new_terrain)?;
+            Ok(result)
+        })?,
+    )?;
+
     env.set(
         "get_map_template",
         scope.create_function(move |lua, name: String| {
@@ -2008,6 +2137,9 @@ pub fn install<'scope, 'env>(
                             cell.set("passable", terrain.passable)?;
                             if let Some(prefix) = &terrain.title_prefix {
                                 cell.set("title_prefix", prefix.clone())?;
+                            }
+                            if let Some(archetype) = &terrain.archetype {
+                                cell.set("archetype", archetype.clone())?;
                             }
                             if !terrain.attrs.is_empty() {
                                 let attrs = lua.create_table()?;
@@ -2060,6 +2192,9 @@ pub fn install<'scope, 'env>(
                 }
                 if let Some(color) = &def.color {
                     t.set("color", color.clone())?;
+                }
+                if let Some(archetype) = &def.archetype {
+                    t.set("archetype", archetype.clone())?;
                 }
                 if let Some(image) = &def.tile_image {
                     t.set("tile_image", image.clone())?;
