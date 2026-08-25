@@ -2,7 +2,24 @@
 
 Audit of the authentication and authorization model: `src/accounts.rs`,
 `src/net/web.rs`, the REST/token path in `src/engine/mod.rs`, and the telnet
-command gates. No code changes were made; this is findings only.
+command gates. Findings dated 2026-08-23.
+
+## Verification status (2026-08-25)
+
+Re-checked every finding against the current tree. Only the locking work
+landed since the audit; the rest stand.
+
+| # | Finding | Status |
+|---|---------|--------|
+| H1 | Builder can rewrite any object / system rules object | **Partially mitigated** — the `system:locked` guard now makes file-authoritative objects read-only to every authoring surface, and games lock `std/*` (rules + base archetypes) via `locked = [...]`. The *ownership* dimension is still open: a Builder can still edit any non-locked object, including other players' items. See H1 note below. |
+| H2 | `hash_token` uses `DefaultHasher` | **Open** — still `DefaultHasher` (`engine/mod.rs` `hash_token`). |
+| M1 | No rate limiting on authentication | **Open** — no throttle/backoff on telnet or API login. |
+| M2 | Unauthenticated world enumeration | **Open (narrowed)** — `Examine` and `ListPrograms` were correctly pulled out of the public `is_read` set and are now Builder-gated, but `ListRooms`/`ListObjects`/`ListExits` (and `ListHooks`) are still anonymous and still ignore `system:hidden` / `can_see`. |
+| M3 | `CorsLayer::permissive()` on every route | **Open** — still unconditional (`web.rs`), no config flag. |
+| L1–L4 | Notes | **Unchanged** — still applicable. |
+
+Net: **H2, M1, M2, M3 remain open**; H1 is partially addressed by the locking
+system but its ownership recommendation is not yet implemented.
 
 ## Model summary
 
@@ -56,6 +73,18 @@ if not, add:
    `system:managed`, or set programs carrying `cmd_*` hooks on global objects.
 
 This touches the domain model ("who owns what"), so it likely warrants an ADR.
+
+> **Update (2026-08-25): partially mitigated.** The `system:locked` guard
+> (`is_ref_locked` / `locked_target` in `handle_api_request`, config-driven
+> `locked = [prefixes]`) now makes file-authoritative objects read-only across
+> the whole authoring surface — `SetProgram`/`SetScript`, `SetAttribute`,
+> `AddTag`/`RemoveTag`, `DeleteObject`, etc. A game that locks its `std/*`
+> tier (The Last Stag does) blocks the specific "rewrite the `system:global`
+> rules object" and "delete managed content" attacks above. **Still open:**
+> the *ownership* rule (recommendation 1) — a Builder can still edit any
+> object that is *not* locked, including other players' items — and the
+> tag-based hard guard (recommendation 2) is realized only for objects a
+> game opts into locking, not for `system:global`/`system:managed` by tag.
 
 ### H2. Token hashing uses `DefaultHasher` (non-cryptographic)
 
