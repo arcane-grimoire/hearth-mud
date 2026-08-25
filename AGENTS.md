@@ -80,6 +80,15 @@ on every startup — new content is created, managed content is updated,
 non-managed content (player-created) is never touched. `@reload-world`
 re-reads files at runtime.
 
+**Tiering + locking.** Games split files into `world/*` (content: live,
+DB-authoritative) and `std/*` (code: rules + base archetypes,
+file-authoritative). Config `locked = [prefixes]` stamps `system:locked` (an
+OWN tag, not inherited) on matching managed objects, making their *definition*
+read-only to authoring (REST + telnet `@` edits, the builder) while runtime
+state via `apply_batch` still applies. `stamp_locked` reconciles the tag at
+boot/reload; a reload reports any file change shadowed by an in-game edit
+rather than dropping it silently.
+
 ## How global commands work
 
 Objects tagged `system:global` have their `cmd_*` hooks checked during

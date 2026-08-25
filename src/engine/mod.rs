@@ -427,6 +427,11 @@ pub struct Engine {
     /// Content hashes from the last load/reload, used to skip unchanged files.
     file_hashes: HashMap<std::path::PathBuf, String>,
     max_characters: u8,
+    /// File-key/area prefixes whose managed objects are stamped
+    /// `system:locked` (definition read-only to authoring). From
+    /// `Config::locked`; re-applied on every `@reload-world`. See
+    /// `crate::loader::stamp_locked`.
+    locked_prefixes: Vec<String>,
     /// Cached command list from `send_commands`, keyed by (location,
     /// builder scope, admin scope, world version) so repeated looks/updates
     /// in the same room skip the rebuild-and-sort.
@@ -564,6 +569,13 @@ impl Engine {
             }
         }
 
+        // Stamp `system:locked` on file-authoritative objects (config-driven
+        // `locked` prefixes). Runs regardless of `load_world_files`: the DB is
+        // authoritative for content, but the config is authoritative for which
+        // keys are locked, so a newly-added prefix takes effect on boot. See
+        // `crate::loader::stamp_locked` and `docs/plans/archetypes.md`.
+        crate::loader::stamp_locked(&mut world, &config.locked);
+
         // Resolve the spawn room to a dbref, creating a fallback room if
         // the configured key wasn't found anywhere.
         let spawn_room_ref = match key_map.get(&config.spawn_room) {
@@ -649,6 +661,7 @@ impl Engine {
             api_tokens,
             file_hashes,
             max_characters: config.max_characters,
+            locked_prefixes: config.locked.clone(),
             derived: None,
             commands_cache: None,
         }
@@ -1111,6 +1124,36 @@ impl Engine {
             acting_account = Some(account_id);
         }
 
+        // Locked-definition guard: an object stamped `system:locked` is
+        // file-authoritative and refuses authoring edits at every REST entry
+        // point that mutates a specific object's definition. Runtime state
+        // (softcode intents via `apply_batch`) is deliberately NOT gated here
+        // — only the authoring surface. See `is_object_locked`.
+        let locked_target: Option<&str> = match &req {
+            ApiRequest::SetAttribute { ref_id, .. }
+            | ApiRequest::SetDescription { ref_id, .. }
+            | ApiRequest::SetTitle { ref_id, .. }
+            | ApiRequest::SetLocation { ref_id, .. }
+            | ApiRequest::SetAliases { ref_id, .. }
+            | ApiRequest::UpdateExit { ref_id, .. }
+            | ApiRequest::AddTag { ref_id, .. }
+            | ApiRequest::RemoveTag { ref_id, .. }
+            | ApiRequest::DeleteObject { ref_id, .. }
+            | ApiRequest::SetScript { ref_id, .. }
+            | ApiRequest::ClearScript { ref_id }
+            | ApiRequest::SetArchetype { ref_id, .. }
+            | ApiRequest::DetachObject { ref_id }
+            | ApiRequest::SetLib { ref_id, .. }
+            | ApiRequest::RemoveLib { ref_id, .. }
+            | ApiRequest::InkSave { ref_id, .. } => Some(ref_id.as_str()),
+            _ => None,
+        };
+        if let Some(ref_id) = locked_target
+            && self.is_ref_locked(ref_id)
+        {
+            return ApiResponse::error(Self::locked_error(ref_id));
+        }
+
         match req {
             ApiRequest::ListRooms => {
                 let rooms: Vec<serde_json::Value> = self
@@ -1387,6 +1430,7 @@ impl Engine {
                             "archetype_ref": obj.archetype_ref,
                             "archetype": archetype,
                             "instance_count": instance_count,
+                            "locked": Self::is_object_locked(obj),
                             "attrs": obj.attrs,
                             "resolved_attrs": resolved_attrs,
                             "tags": tags,
@@ -1544,6 +1588,14 @@ impl Engine {
                             "{} is an archetype with live instances",
                             ref_id
                         ));
+                    }
+                    // A cascade flattens every instance (detach_object rewrites
+                    // its title/description/attrs/tags/script), which would
+                    // mutate a locked instance's definition indirectly — behind
+                    // the target-only guard above. Refuse rather than edit a
+                    // locked definition through the back door.
+                    if let Some(locked_inst) = instances.iter().find(|r| self.is_ref_locked(r)) {
+                        return ApiResponse::error(Self::locked_error(locked_inst));
                     }
                     // Flatten every instance before removing the archetype
                     // they depend on — cascade never orphans.
@@ -3207,6 +3259,9 @@ impl Engine {
             return "Usage: @describe [<ref> =] <description>\r\n".to_string();
         }
 
+        if self.is_ref_locked(&target_ref) {
+            return format!("{}\r\n", Self::locked_error(&target_ref));
+        }
         if let Some(obj) = self.world.get_mut(&target_ref) {
             obj.description = desc;
             format!("Description set on {}.\r\n", target_ref)
@@ -3255,6 +3310,9 @@ impl Engine {
         if !self.can_modify_object(session_id, actor_ref, target_ref) {
             return "Permission denied (not owner).\r\n".to_string();
         }
+        if self.is_ref_locked(target_ref) {
+            return format!("{}\r\n", Self::locked_error(target_ref));
+        }
         if self.world.get(target_ref).map(|o| o.kind == Kind::Player).unwrap_or(false) {
             return "Cannot destroy player objects.\r\n".to_string();
         }
@@ -3271,6 +3329,12 @@ impl Engine {
                     "{} is an archetype with live instances — pass --cascade to delete anyway.\r\n",
                     target_ref
                 );
+            }
+            // A cascade flattens each instance (rewriting its definition), which
+            // would mutate a locked instance indirectly — refuse rather than
+            // edit a locked definition through the back door.
+            if let Some(locked_inst) = instances.iter().find(|r| self.is_ref_locked(r)) {
+                return format!("{}\r\n", Self::locked_error(locked_inst));
             }
             // Flatten every instance before the archetype they depend on is
             // removed — cascade means "detach then delete", never "delete
@@ -3340,6 +3404,9 @@ impl Engine {
         if !self.can_modify_object(session_id, actor_ref, &resolved_ref) {
             return "Permission denied (not owner).\r\n".to_string();
         }
+        if self.is_ref_locked(&resolved_ref) {
+            return format!("{}\r\n", Self::locked_error(&resolved_ref));
+        }
 
         let json_val: serde_json::Value = match serde_json::from_str(value) {
             Ok(v) => v,
@@ -3402,6 +3469,9 @@ impl Engine {
         if new_name.is_empty() {
             return "Usage: @name [<ref> =] <new name>\r\n".to_string();
         }
+        if self.is_ref_locked(&target_ref) {
+            return format!("{}\r\n", Self::locked_error(&target_ref));
+        }
         if let Some(obj) = self.world.get_mut(&target_ref) {
             obj.title = Some(new_name.clone());
             format!("Renamed {} to '{}'.\r\n", target_ref, new_name)
@@ -3448,6 +3518,9 @@ impl Engine {
         }
         if !self.can_modify_object(session_id, actor_ref, target_ref) {
             return Some("Permission denied (not owner).\r\n".to_string());
+        }
+        if self.is_ref_locked(target_ref) {
+            return Some(format!("{}\r\n", Self::locked_error(target_ref)));
         }
         None
     }
@@ -4796,6 +4869,11 @@ impl Engine {
             return format!("Syntax error: {}\r\n", e);
         }
         let existing_ref = self.find_script_object_ref(name);
+        if let Some(r) = &existing_ref
+            && self.is_ref_locked(r)
+        {
+            return format!("{}\r\n", Self::locked_error(r));
+        }
         let is_new = existing_ref.is_none();
         let ref_id = existing_ref.unwrap_or_else(|| {
             let ref_id = self.world.next_dbref();
@@ -4859,6 +4937,9 @@ impl Engine {
         }
         match self.find_script_object_ref(name) {
             Some(ref_id) => {
+                if self.is_ref_locked(&ref_id) {
+                    return format!("{}\r\n", Self::locked_error(&ref_id));
+                }
                 let obj = self.world.get_mut(&ref_id).unwrap();
                 hooks::clear_script(obj);
                 if obj.script.is_none() && obj.libs.is_empty() {
@@ -4888,6 +4969,9 @@ impl Engine {
         }
         match self.find_script_object_ref(name) {
             Some(ref_id) => {
+                if self.is_ref_locked(&ref_id) {
+                    return format!("{}\r\n", Self::locked_error(&ref_id));
+                }
                 let obj = self.world.get_mut(&ref_id).unwrap();
                 obj.attrs.insert("tick_interval".into(), serde_json::json!(interval));
                 format!("Script '{}' interval set to {} tick(s).\r\n", name, interval)
@@ -4925,6 +5009,11 @@ impl Engine {
             return format!("Syntax error: {}\r\n", e);
         }
         let existing_ref = self.find_lib_object_ref(name);
+        if let Some(r) = &existing_ref
+            && self.is_ref_locked(r)
+        {
+            return format!("{}\r\n", Self::locked_error(r));
+        }
         let is_new = existing_ref.is_none();
         let ref_id = existing_ref.unwrap_or_else(|| {
             let ref_id = self.world.next_dbref();
@@ -4973,6 +5062,9 @@ impl Engine {
         }
         match self.find_lib_object_ref(name) {
             Some(ref_id) => {
+                if self.is_ref_locked(&ref_id) {
+                    return format!("{}\r\n", Self::locked_error(&ref_id));
+                }
                 let obj = self.world.get_mut(&ref_id).unwrap();
                 hooks::remove_lib(obj, name);
                 if obj.script.is_none() && obj.libs.is_empty() {
@@ -5009,6 +5101,9 @@ impl Engine {
             Ok(t) => t,
             Err(e) => return format!("{}\r\n", e),
         };
+        if self.is_ref_locked(&resolved) {
+            return format!("{}\r\n", Self::locked_error(&resolved));
+        }
         if let Some(obj) = self.world.get_mut(&resolved) {
             obj.tags.insert(tag.clone());
             format!("Tag '{}' added to {}.\r\n", tag.as_spec(), resolved)
@@ -5040,6 +5135,9 @@ impl Engine {
             Ok(t) => t,
             Err(e) => return format!("{}\r\n", e),
         };
+        if self.is_ref_locked(&resolved) {
+            return format!("{}\r\n", Self::locked_error(&resolved));
+        }
         if let Some(obj) = self.world.get_mut(&resolved) {
             if obj.tags.remove(&tag) {
                 format!("Tag '{}' removed from {}.\r\n", tag.as_spec(), resolved)
@@ -5090,6 +5188,9 @@ impl Engine {
                 if let Err(e) = self.db.save_file_hashes(&self.file_hashes) {
                     tracing::warn!(error = %e, "Failed to persist file hashes");
                 }
+                // Re-apply config-driven locking to anything newly created or
+                // re-imported this reload.
+                crate::loader::stamp_locked(&mut self.world, &self.locked_prefixes);
                 self.fire_lifecycle_hook("on_reload");
 
                 let mut msg = String::new();
@@ -5104,6 +5205,19 @@ impl Engine {
                     );
                     for file in &result.changed_files {
                         let _ = write!(msg, "  modified: {}\r\n", file);
+                    }
+                }
+                // Vocal divergence: name every object whose file script was
+                // shadowed by an in-game edit, so the drop is never silent.
+                if !result.diverged.is_empty() {
+                    use std::fmt::Write;
+                    let _ = write!(
+                        msg,
+                        "[yellow]{} file change(s) NOT applied — shadowed by in-game edits:[/]\r\n",
+                        result.diverged.len()
+                    );
+                    for key in &result.diverged {
+                        let _ = write!(msg, "  [yellow]diverged:[/] {} (file source ignored)\r\n", key);
                     }
                 }
                 msg.push_str("Script cache cleared.\r\n");
@@ -5242,6 +5356,12 @@ impl Engine {
                 None => return format!("Cannot find '{}'.\r\n", target_input),
             }
         };
+
+        // The mutating subcommands are authoring edits — refuse them on a
+        // locked, file-authoritative object (show/test/export stay read-only).
+        if matches!(subcommand, "edit" | "clear") && self.is_ref_locked(&target_ref) {
+            return format!("{}\r\n", Self::locked_error(&target_ref));
+        }
 
         match subcommand {
             "show" => {
@@ -6046,6 +6166,9 @@ impl Engine {
         if !self.can_modify_object(session_id, actor_ref, &resolved) {
             return "Permission denied (not owner).\r\n".to_string();
         }
+        if self.is_ref_locked(&resolved) {
+            return format!("{}\r\n", Self::locked_error(&resolved));
+        }
 
         // Validate the expression parses
         if let Err(e) = locks::parse(expr_str) {
@@ -6078,6 +6201,9 @@ impl Engine {
             target_ref.to_string()
         };
 
+        if self.is_ref_locked(&resolved) {
+            return format!("{}\r\n", Self::locked_error(&resolved));
+        }
         if let Some(obj) = self.world.get_mut(&resolved) {
             if obj.locks.remove(lock_type).is_some() {
                 format!("Lock '{}' removed from {}.\r\n", lock_type, resolved)
@@ -6198,6 +6324,32 @@ impl Engine {
             total_passed, total_failed
         ));
         out
+    }
+
+    /// Whether an object's DEFINITION is locked to in-game authoring — the
+    /// `system:locked` OWN tag. Deliberately NOT resolved up the archetype
+    /// chain (unlike `system:global`): a locked base must not lock its
+    /// subtypes or instances, only itself. Locking refuses authoring edits
+    /// (script, title, description, tags, archetype, location, delete, lib) at
+    /// the REST + `@`-command entry points. It does NOT block runtime state:
+    /// softcode hooks pushing intents during play still mutate a locked
+    /// object, so gameplay is unaffected — only the authoring surface is
+    /// closed. See `docs/plans/archetypes.md` and `crate::loader::stamp_locked`.
+    fn is_object_locked(obj: &GameObject) -> bool {
+        obj.tags
+            .iter()
+            .any(|t| t.category == "system" && t.key == "locked")
+    }
+
+    fn is_ref_locked(&self, ref_id: &str) -> bool {
+        self.world.get(ref_id).is_some_and(Self::is_object_locked)
+    }
+
+    fn locked_error(ref_id: &str) -> String {
+        format!(
+            "{} is locked (system:locked) — edit the file and @reload-world",
+            ref_id
+        )
     }
 
     fn can_modify_object(&self, session_id: &str, actor_ref: &str, target_ref: &str) -> bool {
@@ -6498,6 +6650,9 @@ impl Engine {
         }
         if self.world.get(new_owner).is_none() {
             return format!("No object with ref '{}'.\r\n", new_owner);
+        }
+        if self.is_ref_locked(target_ref) {
+            return format!("{}\r\n", Self::locked_error(target_ref));
         }
         if let Some(obj) = self.world.get_mut(target_ref) {
             obj.owner_ref = Some(new_owner.to_string());
@@ -9405,5 +9560,167 @@ end
         );
 
         assert_eq!(engine.scheduled_hooks.len(), before + 1);
+    }
+
+    // -- system:locked (file-authoritative object) --
+
+    /// Create an item and stamp `system:locked` on it. The `AddTag` succeeds
+    /// because the object is not yet locked when the tag is added; every edit
+    /// after that is refused.
+    async fn create_locked_item(tx: &mpsc::UnboundedSender<EngineMessage>) -> String {
+        let resp = api_call(tx, ApiRequest::CreateObject {
+            area: "test".into(),
+            key: "relic".into(),
+            kind: "item".into(),
+            title: Some("a relic".into()),
+            description: None,
+            location: Some("#1".into()),
+        }).await;
+        let ref_id = resp.data.unwrap()["ref_id"].as_str().unwrap().to_string();
+        let resp = api_call(tx, ApiRequest::AddTag {
+            ref_id: ref_id.clone(),
+            tag: "system:locked".into(),
+        }).await;
+        assert!(resp.ok, "locking a not-yet-locked object should succeed");
+        ref_id
+    }
+
+    #[tokio::test]
+    async fn locked_object_refuses_authoring_edits() {
+        let (tx, handle) = test_engine().await;
+        let locked = create_locked_item(&tx).await;
+
+        let edits = [
+            ApiRequest::SetScript { ref_id: locked.clone(), source: "function on_get() end".into() },
+            ApiRequest::SetTitle { ref_id: locked.clone(), title: "hax".into() },
+            ApiRequest::SetDescription { ref_id: locked.clone(), description: "hax".into() },
+            ApiRequest::SetAttribute { ref_id: locked.clone(), key: "hp".into(), value: serde_json::json!(10) },
+            ApiRequest::AddTag { ref_id: locked.clone(), tag: "foo:bar".into() },
+            // Self-protecting: cannot strip system:locked via the builder.
+            ApiRequest::RemoveTag { ref_id: locked.clone(), tag: "system:locked".into() },
+            ApiRequest::SetArchetype { ref_id: locked.clone(), archetype_ref: None },
+            ApiRequest::DeleteObject { ref_id: locked.clone(), cascade: false },
+        ];
+        for req in edits {
+            let resp = api_call(&tx, req).await;
+            assert!(!resp.ok, "a locked object must refuse the edit");
+            assert!(
+                resp.error.as_deref().unwrap_or("").contains("locked"),
+                "expected a locked error, got {:?}",
+                resp.error
+            );
+        }
+
+        // Examine reports the locked state, and self-protection held.
+        let resp = api_call(&tx, ApiRequest::Examine { ref_id: locked.clone() }).await;
+        let data = resp.data.unwrap();
+        assert_eq!(data["locked"], true);
+        assert!(
+            data["tags"].as_array().unwrap().iter().any(|t| t == "system:locked"),
+            "system:locked survives the refused RemoveTag"
+        );
+
+        // A non-locked object still allows the same edits.
+        let free = create_test_item(&tx).await;
+        let resp = api_call(&tx, ApiRequest::SetTitle { ref_id: free.clone(), title: "renamed".into() }).await;
+        assert!(resp.ok, "a non-locked object still accepts edits");
+
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn locked_object_still_accepts_runtime_state() {
+        let (tx, handle) = test_engine().await;
+        let locked = create_locked_item(&tx).await;
+
+        // A softcode hook's `set_attr` on a locked object still applies —
+        // runtime state is never blocked, only the authoring surface.
+        let resp = api_call(&tx, ApiRequest::Eval {
+            source: format!("set_attr(\"{}\", \"hp\", 42)", locked),
+        }).await;
+        assert!(resp.ok, "runtime set_attr on a locked object must apply: {:?}", resp.error);
+
+        let resp = api_call(&tx, ApiRequest::Examine { ref_id: locked.clone() }).await;
+        assert_eq!(resp.data.unwrap()["attrs"]["hp"], 42);
+
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn locked_is_own_tag_not_inherited() {
+        let (tx, handle) = test_engine().await;
+
+        // A locked base archetype.
+        let base = api_call(&tx, ApiRequest::CreateObject {
+            area: "test".into(),
+            key: "goblin".into(),
+            kind: "npc".into(),
+            title: Some("Goblin".into()),
+            description: None,
+            location: Some("#1".into()),
+        }).await.data.unwrap()["ref_id"].as_str().unwrap().to_string();
+        assert!(api_call(&tx, ApiRequest::AddTag { ref_id: base.clone(), tag: "system:locked".into() }).await.ok);
+
+        // An instance delegating to it — not itself locked.
+        let inst = api_call(&tx, ApiRequest::CreateObject {
+            area: "test".into(),
+            key: "grunt".into(),
+            kind: "npc".into(),
+            title: None,
+            description: None,
+            location: Some("#1".into()),
+        }).await.data.unwrap()["ref_id"].as_str().unwrap().to_string();
+        assert!(api_call(&tx, ApiRequest::SetArchetype {
+            ref_id: inst.clone(),
+            archetype_ref: Some(base.clone()),
+        }).await.ok, "reparenting a non-locked instance is allowed");
+
+        // The instance is NOT locked even though its archetype is (own tag only).
+        let resp = api_call(&tx, ApiRequest::Examine { ref_id: inst.clone() }).await;
+        assert_eq!(resp.data.unwrap()["locked"], false);
+
+        // ...and the instance still accepts authoring edits.
+        let resp = api_call(&tx, ApiRequest::SetTitle { ref_id: inst.clone(), title: "Grunt".into() }).await;
+        assert!(resp.ok, "a non-locked instance of a locked archetype is still editable");
+
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    /// A cascade delete flattens each instance (rewriting its definition), so it
+    /// must refuse when any instance is locked — otherwise a locked definition
+    /// would be mutated indirectly, behind the target-only guard.
+    #[tokio::test]
+    async fn cascade_delete_refuses_when_an_instance_is_locked() {
+        let (tx, handle) = test_engine().await;
+
+        // An UNLOCKED archetype with a LOCKED instance delegating to it.
+        let base = api_call(&tx, ApiRequest::CreateObject {
+            area: "test".into(), key: "goblin".into(), kind: "npc".into(),
+            title: Some("Goblin".into()), description: None, location: Some("#1".into()),
+        }).await.data.unwrap()["ref_id"].as_str().unwrap().to_string();
+        let inst = api_call(&tx, ApiRequest::CreateObject {
+            area: "test".into(), key: "grunt".into(), kind: "npc".into(),
+            title: None, description: None, location: Some("#1".into()),
+        }).await.data.unwrap()["ref_id"].as_str().unwrap().to_string();
+        assert!(api_call(&tx, ApiRequest::SetArchetype {
+            ref_id: inst.clone(), archetype_ref: Some(base.clone()),
+        }).await.ok);
+        assert!(api_call(&tx, ApiRequest::AddTag { ref_id: inst.clone(), tag: "system:locked".into() }).await.ok);
+
+        // Cascading the delete would flatten the locked instance — refuse.
+        let resp = api_call(&tx, ApiRequest::DeleteObject { ref_id: base.clone(), cascade: true }).await;
+        assert!(!resp.ok, "cascade must not flatten a locked instance");
+
+        // Both objects survive and the delegation is intact.
+        assert!(api_call(&tx, ApiRequest::Examine { ref_id: base.clone() }).await.ok, "archetype survives");
+        let inst_resp = api_call(&tx, ApiRequest::Examine { ref_id: inst.clone() }).await;
+        assert_eq!(inst_resp.data.unwrap()["archetype_ref"].as_str(), Some(base.as_str()),
+            "the locked instance still delegates — it was not flattened");
+
+        drop(tx);
+        let _ = handle.await;
     }
 }

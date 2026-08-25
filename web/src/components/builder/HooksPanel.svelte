@@ -35,6 +35,10 @@
   );
   const libs = $derived([...(obj?.libs || [])].sort());
   const isCode = $derived(obj?.kind === 'code' || libs.length > 0);
+  // A `system:locked` object is file-authoritative: its script is read-only to
+  // in-game authoring. Hooks still open (view-only in the editor), but the
+  // add/clear controls are hidden. See PropertiesPanel + docs/plans/archetypes.md.
+  const locked = $derived(obj?.locked === true);
 
   let hooksData = $state(null);
   let hookErr = $state('');
@@ -74,7 +78,9 @@
   <section class="sec">
     <div class="sec-h">
       <span class="sec-lbl">Script</span>
-      {#if obj?.has_script}
+      {#if locked}
+        <span class="lock-pill" title="Defined in a source file — edit the file and @reload-world">🔒 read-only</span>
+      {:else if obj?.has_script}
         {#if confirmClear}
           <button class="confirm" onclick={clearScript}>Delete script?</button>
           <button class="cancel" onclick={() => (confirmClear = false)}>×</button>
@@ -83,20 +89,24 @@
         {/if}
       {/if}
     </div>
-    <p class="hint">One Luau script per object. Its hooks are the top-level functions it defines (<code>on_enter</code>, <code>can_get</code>, <code>cmd_talk</code>…), sharing scope for helpers and constants.</p>
+    {#if locked}
+      <p class="hint">This object is <code>system:locked</code> — file-authoritative. Its script is read-only here; edit the source file and run <code>@reload-world</code>. Open a hook to view it.</p>
+    {:else}
+      <p class="hint">One Luau script per object. Its hooks are the top-level functions it defines (<code>on_enter</code>, <code>can_get</code>, <code>cmd_talk</code>…), sharing scope for helpers and constants.</p>
 
-    <div class="add">
-      <Typeahead
-        options={hookOpts}
-        fallbackLabel="new hook"
-        placeholder="add a hook — on_enter, cmd_talk…"
-        emptyLabel="No matching hook"
-        allowCustom
-        customLabel={'Use "{query}"'}
-        onselect={pickHook}
-      />
-    </div>
-    {#if hookErr}<div class="err">{hookErr}</div>{/if}
+      <div class="add">
+        <Typeahead
+          options={hookOpts}
+          fallbackLabel="new hook"
+          placeholder="add a hook — on_enter, cmd_talk…"
+          emptyLabel="No matching hook"
+          allowCustom
+          customLabel={'Use "{query}"'}
+          onselect={pickHook}
+        />
+      </div>
+      {#if hookErr}<div class="err">{hookErr}</div>{/if}
+    {/if}
 
     {#if hooks.length}
       <div class="list">
@@ -133,12 +143,14 @@
     <section class="sec">
       <div class="sec-h"><span class="sec-lbl">Modules</span></div>
       <p class="hint">Reusable libraries loaded elsewhere with <code>require("name")</code>. Each is its own chunk that returns a table.</p>
-      <div class="add lib-add">
-        <PackageIcon size={13} />
-        <input class="lib-in" placeholder="new module name (e.g. combat)" bind:value={newLib}
-          onkeydown={(e) => e.key === 'Enter' && addLib()} />
-        <button class="lib-go" disabled={!newLib.trim()} onclick={addLib}>Add</button>
-      </div>
+      {#if !locked}
+        <div class="add lib-add">
+          <PackageIcon size={13} />
+          <input class="lib-in" placeholder="new module name (e.g. combat)" bind:value={newLib}
+            onkeydown={(e) => e.key === 'Enter' && addLib()} />
+          <button class="lib-go" disabled={!newLib.trim()} onclick={addLib}>Add</button>
+        </div>
+      {/if}
       {#if libs.length}
         <div class="list">
           {#each libs as m}
@@ -208,4 +220,5 @@
   .confirm { background: none; border: none; color: var(--accent-red, #e06c75); cursor: pointer; font: inherit; font-size: 11.5px; padding: 2px 4px; flex: none; }
   .cancel { background: none; border: none; color: var(--text-muted, #8c8378); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 4px; flex: none; }
   .none { color: var(--text-muted, #8c8378); font-style: italic; font-size: 12px; padding: 4px 2px; }
+  .lock-pill { flex: none; font-size: 11px; color: var(--accent-amber, #c9956b); background: color-mix(in srgb, var(--accent-amber, #c9956b) 14%, transparent); border: 1px solid color-mix(in srgb, var(--accent-amber, #c9956b) 35%, transparent); border-radius: 999px; padding: 1px 8px; }
 </style>

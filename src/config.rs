@@ -29,6 +29,15 @@ pub struct Config {
     /// they are never persisted to the DB (see Stage 2's "`require`
     /// resolution").
     pub load_world_files: bool,
+    /// File-key/area prefixes whose managed objects are stamped
+    /// `system:locked` at load — their definition is file-authoritative and
+    /// read-only to in-game authoring (the builder, REST, and `@` commands
+    /// refuse to edit them; edit the source file and `@reload-world`).
+    ///
+    /// Runtime *state* (attrs a hook sets during play) is never blocked —
+    /// only the authoring surface. See `docs/plans/archetypes.md`. Typically
+    /// `["std", "system"]`: the code tier is locked, world content is live.
+    pub locked: Vec<String>,
 }
 
 impl Default for Config {
@@ -44,6 +53,7 @@ impl Default for Config {
             game_web_dir: None,
             max_characters: 3,
             load_world_files: true,
+            locked: Vec::new(),
         }
     }
 }

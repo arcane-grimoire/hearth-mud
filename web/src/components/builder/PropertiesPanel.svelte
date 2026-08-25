@@ -41,6 +41,11 @@
 
   const isExit = $derived(obj?.kind === 'exit');
   const isRoom = $derived(obj?.kind === 'room');
+  // A `system:locked` object is file-authoritative: its definition is read-only
+  // to in-game authoring (edit the source file and @reload-world). The server
+  // refuses every authoring edit; the panel mirrors that by disabling the
+  // controls and showing a banner, so it reads as "locked", not "broken".
+  const locked = $derived(obj?.locked === true);
 
   let sortedAttrs = $derived(obj ? Object.keys(obj.attrs || {}).sort() : []);
   // Engine-managed attrs (_file_key, _rx/_ry, …) are noise for most editing and
@@ -96,11 +101,13 @@
     res.ok ? onchanged() : showFlash(res.error || 'Could not remove the tag', { tone: 'danger' });
   }
   function startEdit(key) {
+    if (locked) return;
     editingAttr = key;
     const val = obj.attrs[key];
     editValue = typeof val === 'object' ? JSON.stringify(val, null, 2) : String(val);
   }
   async function saveAttr(key) {
+    if (locked) return;
     let value;
     try { value = JSON.parse(editValue); } catch { value = editValue; }
     const res = await api('set_attribute', { ref_id: obj.ref_id, key, value });
@@ -185,15 +192,24 @@
 </script>
 
 {#if obj}
-  <div class="pp">
+  <div class="pp" class:is-locked={locked}>
+    {#if locked}
+      <div class="lock-banner" role="note">
+        <span class="lock-ico" aria-hidden="true">🔒</span>
+        <div>
+          <strong>Locked — file-authoritative</strong>
+          <span class="lock-sub">This object is defined in a source file (<code>system:locked</code>). Edit the file and run <code>@reload-world</code>; changes made here would not be saved.</span>
+        </div>
+      </div>
+    {/if}
     <section>
       <h3>Identity</h3>
       <label class="fl">Title
-        <input type="text" class="fi" class:inh-field={inheritedTitle} value={obj.title || ''} placeholder={inheritedTitle} onchange={setTitle} />
+        <input type="text" class="fi" class:inh-field={inheritedTitle} value={obj.title || ''} placeholder={inheritedTitle} onchange={setTitle} disabled={locked} />
       </label>
       {#if inheritedTitle}<div class="inh-note">inherited from {obj.archetype?.title || obj.archetype_ref} — type to override</div>{/if}
       <label class="fl">Description
-        <textarea class="ft" class:inh-field={inheritedDesc} rows="4" bind:value={descDraft} placeholder={inheritedDesc} onchange={setDescription}></textarea>
+        <textarea class="ft" class:inh-field={inheritedDesc} rows="4" bind:value={descDraft} placeholder={inheritedDesc} onchange={setDescription} disabled={locked}></textarea>
       </label>
       {#if inheritedDesc}<div class="inh-note">inherited from {obj.archetype?.title || obj.archetype_ref} — type to override</div>{/if}
 
@@ -227,15 +243,15 @@
       <section>
         <h3>Exit</h3>
         <label class="fl">Direction
-          <input type="text" class="fi" bind:value={exitDir} placeholder="north" />
+          <input type="text" class="fi" bind:value={exitDir} placeholder="north" disabled={locked} />
         </label>
         <label class="fl">Target room
-          <input type="text" class="fi" bind:value={exitTarget} placeholder="#12" />
+          <input type="text" class="fi" bind:value={exitTarget} placeholder="#12" disabled={locked} />
         </label>
         <div class="row">
           <span class="none">from {obj.location_ref || '(unplaced)'}</span>
           <span style="flex:1"></span>
-          <Button size="sm" onclick={saveExit} label="Save exit" />
+          <Button size="sm" onclick={saveExit} label="Save exit" disabled={locked} />
         </div>
       </section>
     {:else if !isRoom}
@@ -243,8 +259,8 @@
         <h3>Location</h3>
         <div class="none">in {obj.location_ref || '(nowhere)'}</div>
         <div class="row">
-          <input class="mi" placeholder="move to a room ref, e.g. #12" bind:value={moveDest} onkeydown={(e) => e.key === 'Enter' && doMove()} />
-          <Button size="sm" onclick={doMove} label="Move" />
+          <input class="mi" placeholder="move to a room ref, e.g. #12" bind:value={moveDest} onkeydown={(e) => e.key === 'Enter' && doMove()} disabled={locked} />
+          <Button size="sm" onclick={doMove} label="Move" disabled={locked} />
         </div>
       </section>
     {/if}
@@ -260,15 +276,15 @@
             <span class="arch-ref">{obj.archetype.ref_id}</span>
             <span style="flex:1"></span>
             <Tooltip text="Copy inherited values down onto this object and stop delegating">
-              <Button size="sm" onclick={detachObject} label="Detach" />
+              <Button size="sm" onclick={detachObject} label="Detach" disabled={locked} />
             </Tooltip>
           </div>
         {:else}
           <div class="none">Not an instance — defines everything itself.</div>
         {/if}
         <div class="row">
-          <input class="mi" placeholder="delegate to a ref, e.g. #7" bind:value={archDraft} onkeydown={(e) => e.key === 'Enter' && setArchetype()} />
-          <Button size="sm" onclick={setArchetype} label={obj.archetype ? 'Change' : 'Set'} />
+          <input class="mi" placeholder="delegate to a ref, e.g. #7" bind:value={archDraft} onkeydown={(e) => e.key === 'Enter' && setArchetype()} disabled={locked} />
+          <Button size="sm" onclick={setArchetype} label={obj.archetype ? 'Change' : 'Set'} disabled={locked} />
         </div>
         {#if obj.instance_count > 0}
           <div class="inst">{obj.instance_count} object{obj.instance_count === 1 ? '' : 's'} delegate to this one.</div>
@@ -281,7 +297,7 @@
       <p class="hint">A <code>category:key</code> label — used by locks, queries, and behavior (e.g. <code>system:hidden</code>).</p>
       <div class="tags">
         {#each ownTagList as tag}
-          <span class="tag">{tag}<Tooltip text="Remove tag"><button aria-label="Remove tag" onclick={() => removeTag(tag)}>×</button></Tooltip></span>
+          <span class="tag">{tag}<Tooltip text="Remove tag"><button aria-label="Remove tag" onclick={() => removeTag(tag)} disabled={locked}>×</button></Tooltip></span>
         {/each}
         {#each inheritedTags as t}
           <Tooltip text={`Inherited from ${t.source} — remove it on the archetype`}><span class="tag inh-tag">{t.tag}<span class="src">{t.source}</span></span></Tooltip>
@@ -289,8 +305,8 @@
         {#if !ownTagList.length && !inheritedTags.length}<span class="none">no tags</span>{/if}
       </div>
       <div class="row">
-        <input class="mi" placeholder="category:key" bind:value={newTag} onkeydown={(e) => e.key === 'Enter' && addTag()} />
-        <Button size="sm" onclick={addTag} label="Add" />
+        <input class="mi" placeholder="category:key" bind:value={newTag} onkeydown={(e) => e.key === 'Enter' && addTag()} disabled={locked} />
+        <Button size="sm" onclick={addTag} label="Add" disabled={locked} />
       </div>
     </section>
 
@@ -298,13 +314,13 @@
       <h3>Aliases</h3>
       <div class="tags">
         {#each obj.aliases || [] as a}
-          <span class="tag">{a}<Tooltip text="Remove alias"><button aria-label="Remove alias" onclick={() => removeAlias(a)}>×</button></Tooltip></span>
+          <span class="tag">{a}<Tooltip text="Remove alias"><button aria-label="Remove alias" onclick={() => removeAlias(a)} disabled={locked}>×</button></Tooltip></span>
         {/each}
         {#if !(obj.aliases || []).length}<span class="none">no aliases</span>{/if}
       </div>
       <div class="row">
-        <input class="mi" placeholder={isExit ? 'alt direction (e.g. n)' : 'name people can use'} bind:value={newAlias} onkeydown={(e) => e.key === 'Enter' && addAlias()} />
-        <Button size="sm" onclick={addAlias} label="Add" />
+        <input class="mi" placeholder={isExit ? 'alt direction (e.g. n)' : 'name people can use'} bind:value={newAlias} onkeydown={(e) => e.key === 'Enter' && addAlias()} disabled={locked} />
+        <Button size="sm" onclick={addAlias} label="Add" disabled={locked} />
       </div>
     </section>
 
@@ -323,13 +339,13 @@
                 <td class="av"><textarea bind:value={editValue} onkeydown={(e) => attrKeydown(e, key)}></textarea></td>
                 <td class="aa"><button onclick={() => saveAttr(key)}>Save</button></td>
               {:else}
-                <td class="av" ondblclick={() => startEdit(key)} title="Double-click to edit">{disp}</td>
+                <td class="av" ondblclick={() => startEdit(key)} title={locked ? 'Locked — edit the source file' : 'Double-click to edit'}>{disp}</td>
                 <td class="aa">
-                  <button onclick={() => startEdit(key)}>Edit</button>
+                  <button onclick={() => startEdit(key)} disabled={locked}>Edit</button>
                   {#if ov}
-                    <Tooltip text="Revert to the inherited value"><button class="del" onclick={() => deleteAttr(key)}>Revert</button></Tooltip>
+                    <Tooltip text="Revert to the inherited value"><button class="del" onclick={() => deleteAttr(key)} disabled={locked}>Revert</button></Tooltip>
                   {:else}
-                    <Tooltip text="Delete attribute"><button class="del" onclick={() => deleteAttr(key)}>Del</button></Tooltip>
+                    <Tooltip text="Delete attribute"><button class="del" onclick={() => deleteAttr(key)} disabled={locked}>Del</button></Tooltip>
                   {/if}
                 </td>
               {/if}
@@ -351,7 +367,7 @@
                 <td class="av">{disp}</td>
                 <td class="aa">
                   <span class="src">{r.source}</span>
-                  <Tooltip text="Copy this value down as an own attribute you can edit"><button onclick={() => overrideAttr(key)}>Override</button></Tooltip>
+                  <Tooltip text="Copy this value down as an own attribute you can edit"><button onclick={() => overrideAttr(key)} disabled={locked}>Override</button></Tooltip>
                 </td>
               </tr>
             {/each}
@@ -359,9 +375,9 @@
         </table>
       {/if}
       <div class="row">
-        <input class="mi kw" placeholder="key" bind:value={newAttrKey} />
-        <input class="mi" placeholder="value (JSON or string)" bind:value={newAttrValue} onkeydown={(e) => e.key === 'Enter' && addAttr()} />
-        <Button size="sm" onclick={addAttr} label="Add" />
+        <input class="mi kw" placeholder="key" bind:value={newAttrKey} disabled={locked} />
+        <input class="mi" placeholder="value (JSON or string)" bind:value={newAttrValue} onkeydown={(e) => e.key === 'Enter' && addAttr()} disabled={locked} />
+        <Button size="sm" onclick={addAttr} label="Add" disabled={locked} />
       </div>
 
       {#if sysAttrs.length}
@@ -379,10 +395,10 @@
                     <td class="av"><textarea bind:value={editValue} onkeydown={(e) => attrKeydown(e, key)}></textarea></td>
                     <td class="aa"><button onclick={() => saveAttr(key)}>Save</button></td>
                   {:else}
-                    <td class="av" ondblclick={() => startEdit(key)} title="Double-click to edit">{disp}</td>
+                    <td class="av" ondblclick={() => startEdit(key)} title={locked ? 'Locked — edit the source file' : 'Double-click to edit'}>{disp}</td>
                     <td class="aa">
-                      <button onclick={() => startEdit(key)}>Edit</button>
-                      <Tooltip text="Delete attribute"><button class="del" onclick={() => deleteAttr(key)}>Del</button></Tooltip>
+                      <button onclick={() => startEdit(key)} disabled={locked}>Edit</button>
+                      <Tooltip text="Delete attribute"><button class="del" onclick={() => deleteAttr(key)} disabled={locked}>Del</button></Tooltip>
                     </td>
                   {/if}
                 </tr>
@@ -406,20 +422,32 @@
       </section>
     {/if}
 
-    <section class="danger">
-      {#if confirmDelete}
-        <span class="confirm">Delete {obj.key} permanently?</span>
-        <Button size="sm" tone="critical" onclick={doDelete} label="Delete" />
-        <Button size="sm" onclick={() => (confirmDelete = false)} label="Cancel" />
-      {:else}
-        <button class="del-link" onclick={() => (confirmDelete = true)}>Delete {obj.kind}</button>
-      {/if}
-    </section>
+    {#if !locked}
+      <section class="danger">
+        {#if confirmDelete}
+          <span class="confirm">Delete {obj.key} permanently?</span>
+          <Button size="sm" tone="critical" onclick={doDelete} label="Delete" />
+          <Button size="sm" onclick={() => (confirmDelete = false)} label="Cancel" />
+        {:else}
+          <button class="del-link" onclick={() => (confirmDelete = true)}>Delete {obj.kind}</button>
+        {/if}
+      </section>
+    {/if}
   </div>
 {/if}
 
 <style>
   .pp { display: flex; flex-direction: column; gap: 12px; padding: 12px; }
+  /* Locked: a prominent banner, plus disabled controls read as "read-only",
+     not "broken". The banner explains where the source of truth actually is. */
+  .lock-banner { display: flex; gap: 10px; align-items: flex-start; background: color-mix(in srgb, var(--accent-amber, #c9956b) 12%, var(--bg-surface, #17140f)); border: 1px solid color-mix(in srgb, var(--accent-amber, #c9956b) 40%, transparent); border-radius: 10px; padding: 10px 12px; }
+  .lock-ico { font-size: 15px; line-height: 1.3; }
+  .lock-banner strong { display: block; font-size: 12.5px; color: var(--accent-amber, #c9956b); }
+  .lock-sub { display: block; margin-top: 2px; font-size: var(--fs-meta); line-height: 1.5; color: var(--text-secondary, #b6a888); }
+  .lock-sub code { font-family: var(--font-mono, ui-monospace, monospace); color: var(--text-primary, #ece0c8); }
+  /* Disabled controls: dim them so the whole panel reads as read-only. */
+  .is-locked .fi:disabled, .is-locked .ft:disabled, .is-locked .mi:disabled { opacity: 0.55; cursor: not-allowed; }
+  .is-locked .aa button:disabled, .is-locked .tag button:disabled { opacity: 0.4; cursor: not-allowed; }
   /* Each group is a raised card so the long form reads as distinct blocks
      rather than one undivided scroll. */
   section { display: flex; flex-direction: column; gap: 8px; background: var(--bg-surface, #17140f); border: 1px solid var(--border-muted, #211d16); border-radius: 10px; padding: 12px 14px; }

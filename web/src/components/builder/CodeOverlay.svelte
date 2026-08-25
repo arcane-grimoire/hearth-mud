@@ -25,6 +25,7 @@
     hook = null,       // optional: a hook to focus/seed and default the preview to
     libName = null,    // when set, edit this lib module rather than the object script
     objName = '',
+    locked = false,    // file-authoritative object: open view-only, Save disabled
     onclose = () => {},
     onsaved = () => {},
   } = $props();
@@ -155,6 +156,7 @@
   }
 
   async function save(src) {
+    if (locked) { showFlash('This object is locked (system:locked) — edit the source file and @reload-world', { tone: 'warning' }); return; }
     saving = true;
     const body = src ?? source;
     const res = isLib
@@ -266,6 +268,7 @@
         {/if}
       {/if}
       {#if dirty}<span class="dot">●</span>{/if}
+      {#if locked}<span class="lock-pill" title="Defined in a source file — edit the file and @reload-world">🔒 read-only</span>{/if}
     </div>
     <span class="sp"></span>
     <Tooltip text="Run — evaluate the buffer as your character"><Button size="sm" onclick={run} disabled={running}><PlayIcon size={13} /> Run</Button></Tooltip>
@@ -276,7 +279,7 @@
         </button>
       </Tooltip>
     {/if}
-    <Tooltip text="Save (⌘S)"><Button size="sm" tone="accent" onclick={() => save()} disabled={saving || !dirty}><SaveIcon size={13} /> Save</Button></Tooltip>
+    <Tooltip text={locked ? 'Locked — edit the source file and @reload-world' : 'Save (⌘S)'}><Button size="sm" tone="accent" onclick={() => save()} disabled={saving || !dirty || locked}><SaveIcon size={13} /> Save</Button></Tooltip>
     <Tooltip text={helpOpen ? 'Hide scripting reference' : 'Show scripting reference'}>
       <button class="help-btn" class:on={helpOpen} aria-expanded={helpOpen}
         aria-controls={helpOpen ? 'co-help-panel' : undefined}
@@ -293,7 +296,7 @@
         <div class="none">Loading…</div>
       {:else}
         {#key (isLib ? 'lib:' + libName : 'script') + ':' + refId}
-          <CodeEditor bind:value={source} hook={fireHook} onsave={save} onchange={() => {}} onlookup={lookupInHelp} oncursor={(h) => { cursorHook = h; }} />
+          <CodeEditor bind:value={source} hook={fireHook} onsave={save} onchange={() => {}} onlookup={lookupInHelp} oncursor={(h) => { cursorHook = h; }} readOnly={locked} />
         {/key}
       {/if}
     </div>
@@ -379,6 +382,7 @@
   .sep { color: var(--text-muted, #8c8378); }
   .dot { color: var(--accent-amber, #c9956b); }
   .sp { flex: 1; }
+  .lock-pill { flex: none; font-size: 11px; color: var(--accent-amber, #c9956b); background: color-mix(in srgb, var(--accent-amber, #c9956b) 14%, transparent); border: 1px solid color-mix(in srgb, var(--accent-amber, #c9956b) 35%, transparent); border-radius: 999px; padding: 1px 8px; }
   .x { background: none; border: none; color: var(--text-muted, #8c8378); cursor: pointer; padding: 2px; line-height: 0; }
   .x:hover { color: var(--text-primary, #ece0c8); }
 

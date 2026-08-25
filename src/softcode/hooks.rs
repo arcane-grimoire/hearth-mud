@@ -214,7 +214,7 @@ fn derive_hooks_inner(source: &str) -> Vec<String> {
     };
     let mut out: Vec<String> = Vec::new();
     let mut push = |name: String| {
-        if is_valid_hook_name(&name) && !out.iter().any(|h| *h == name) {
+        if is_valid_hook_name(&name) && !out.contains(&name) {
             out.push(name);
         }
     };

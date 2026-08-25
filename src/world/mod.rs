@@ -244,7 +244,18 @@ impl World {
     pub fn resolved_tags(&self, obj: &GameObject) -> HashSet<Tag> {
         let mut tags: HashSet<Tag> = obj.tags.clone();
         for anc in self.archetype_ancestors(obj) {
-            tags.extend(anc.tags.iter().cloned());
+            // `system:locked` is an OWN-only lock (see `loader::stamp_locked`
+            // and `Engine::is_object_locked`): a locked base must not make its
+            // subtypes or instances appear or behave as locked. Enforcement
+            // already checks own tags only; excluding it here keeps every
+            // display/query surface (examine, `find_by_tag`, the builder's
+            // inherited-tags) consistent with that. Every other tag inherits.
+            tags.extend(
+                anc.tags
+                    .iter()
+                    .filter(|t| !(t.category == "system" && t.key == "locked"))
+                    .cloned(),
+            );
         }
         tags
     }
@@ -461,5 +472,38 @@ mod tests {
 
         assert!(world.has_archetype_instances(&archetype_ref));
         assert!(!world.has_archetype_instances(&instance_ref));
+    }
+
+    /// `system:locked` is an own-only lock: a locked base must not make its
+    /// subtypes/instances appear locked via `resolved_tags` (which every
+    /// display/query surface uses). Every other tag still inherits, and an
+    /// object's OWN `system:locked` is kept.
+    #[test]
+    fn resolved_tags_does_not_inherit_system_locked() {
+        let locked = Tag { category: "system".into(), key: "locked".into() };
+        let global = Tag { category: "system".into(), key: "global".into() };
+
+        let mut world = World::new();
+        let base_ref = world.next_dbref();
+        let mut base = GameObject::new(&base_ref, "monster", Kind::Npc);
+        base.tags.insert(locked.clone());
+        base.tags.insert(global.clone());
+        world.add_object(base);
+
+        let child_ref = world.next_dbref();
+        let mut child = GameObject::new(&child_ref, "grunt", Kind::Npc);
+        child.archetype_ref = Some(base_ref.clone());
+        world.add_object(child);
+
+        let resolved = world.resolved_tags(world.get(&child_ref).unwrap());
+        assert!(!resolved.contains(&locked), "inherited system:locked must not leak to subtypes");
+        assert!(resolved.contains(&global), "other system tags still inherit");
+
+        // An object's OWN system:locked is kept.
+        world.get_mut(&child_ref).unwrap().tags.insert(locked.clone());
+        assert!(
+            world.resolved_tags(world.get(&child_ref).unwrap()).contains(&locked),
+            "own system:locked is kept",
+        );
     }
 }

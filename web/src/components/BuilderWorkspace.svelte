@@ -465,6 +465,7 @@
               refId={activeTab.ref}
               hook={activeTab.hook}
               objName={nameOf(activeTab.ref)}
+              locked={obj?.ref_id === activeTab.ref && obj?.locked === true}
               onclose={() => closeTab(activeTab.id)}
               onsaved={structureChanged}
             />
@@ -475,6 +476,7 @@
               refId={activeTab.ref}
               libName={activeTab.name}
               objName={nameOf(activeTab.ref)}
+              locked={obj?.ref_id === activeTab.ref && obj?.locked === true}
               onclose={() => closeTab(activeTab.id)}
               onsaved={structureChanged}
             />

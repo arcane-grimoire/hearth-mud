@@ -22,6 +22,11 @@ pub struct LoadResult {
     pub skipped: u32,
     pub file_hashes: HashMap<PathBuf, String>,
     pub changed_files: Vec<String>,
+    /// Objects whose file-defined script was shadowed by an in-game edit on
+    /// this load, by file key — the file change was NOT applied. Surfaced
+    /// loudly (never silently dropped) in the reload report. See
+    /// `install_script`.
+    pub diverged: Vec<String>,
 }
 
 const MANAGED_TAG: Tag = Tag {
@@ -34,6 +39,76 @@ fn managed_tag() -> Tag {
         category: "system".to_string(),
         key: "managed".to_string(),
     }
+}
+
+fn locked_tag() -> Tag {
+    Tag {
+        category: "system".to_string(),
+        key: "locked".to_string(),
+    }
+}
+
+/// Whether a file key (`"<area>/<key>"`) falls under a configured `locked`
+/// prefix. A prefix matches the whole area (`"std"` covers `"std/monster"`)
+/// or an exact key, but never a partial segment (`"std"` must not match
+/// `"standard/x"`).
+fn key_is_locked(file_key: &str, prefixes: &[String]) -> bool {
+    prefixes.iter().any(|p| {
+        file_key == p || file_key.starts_with(&format!("{p}/"))
+    })
+}
+
+/// Reconcile the `system:locked` own-tag on managed objects against the
+/// configured `locked` prefixes: a managed object is locked **iff** its file
+/// key matches a prefix (see `Config::locked` and `docs/plans/archetypes.md`).
+/// The config is the single source of truth for which managed objects are
+/// locked, so this both *adds* the tag where a key now matches and *removes*
+/// it where it no longer does — dropping a prefix (or clearing `locked`
+/// entirely) unlocks those objects on the next boot rather than leaving them
+/// read-only forever.
+///
+/// Called by the engine after `load_game_dir` (and on `@reload-world`), and
+/// also when `load_world_files = false` — the DB is authoritative for content
+/// then, but the config still decides which keys lock, so a changed prefix
+/// takes effect on the next boot without re-importing. Only `system:managed`
+/// (file-authoritative) objects are touched; player-created objects are never
+/// reconciled (a hand-set lock on one stands). Idempotent: a pass that changes
+/// nothing is a no-op. `system:locked` is an OWN tag and is never resolved up
+/// the archetype chain, so a locked base does not lock its subtypes/instances.
+///
+/// Returns the number of objects whose lock state changed this pass.
+pub fn stamp_locked(world: &mut World, prefixes: &[String]) -> u32 {
+    let managed = managed_tag();
+    let locked = locked_tag();
+    // Decide per managed object whether its lock state must flip.
+    let changes: Vec<(String, bool)> = world
+        .objects
+        .values()
+        .filter(|o| o.tags.contains(&managed))
+        .filter_map(|o| {
+            let fk = o.attrs.get(FILE_KEY_ATTR).and_then(|v| v.as_str())?;
+            let should_lock = key_is_locked(fk, prefixes);
+            let is_locked = o.tags.contains(&locked);
+            (should_lock != is_locked).then(|| (o.ref_id.clone(), should_lock))
+        })
+        .collect();
+    let mut added = 0u32;
+    let mut removed = 0u32;
+    for (ref_id, should_lock) in &changes {
+        if let Some(obj) = world.get_mut(ref_id) {
+            if *should_lock {
+                obj.tags.insert(locked.clone());
+                added += 1;
+            } else {
+                obj.tags.remove(&locked);
+                removed += 1;
+            }
+        }
+    }
+    if added > 0 || removed > 0 {
+        tracing::info!(added, removed, "Reconciled system:locked on file-authoritative objects");
+    }
+    added + removed
 }
 
 /// Attr key used to remember an object's `"<area>/<key>"` file identity, so
@@ -362,11 +437,13 @@ pub fn load_game_dir(
             skipped: 0,
             file_hashes: HashMap::new(),
             changed_files: Vec::new(),
+            diverged: Vec::new(),
         });
     }
 
     let mut new_hashes: HashMap<PathBuf, String> = HashMap::new();
     let mut changed_files: Vec<String> = Vec::new();
+    let mut diverged: Vec<String> = Vec::new();
 
     // Parse every area file up front — later passes need to see all of them
     // together to resolve cross-file/cross-area references.
@@ -503,7 +580,7 @@ pub fn load_game_dir(
                     existing.locks = room.locks.clone();
                     existing.archetype_ref = archetype_ref;
                     sync_managed_tags(existing, &room.tags);
-                    install_script(existing, &room.script, &room.libs, base_dir)?;
+                    install_script(existing, &room.script, &room.libs, base_dir, &mut diverged)?;
                     updated += 1;
                 }
                 continue;
@@ -519,7 +596,7 @@ pub fn load_game_dir(
             obj.locks = room.locks.clone();
             obj.archetype_ref = archetype_ref;
             obj.attrs.insert(FILE_KEY_ATTR.into(), serde_json::json!(file_key));
-            install_script(&mut obj, &room.script, &room.libs, base_dir)?;
+            install_script(&mut obj, &room.script, &room.libs, base_dir, &mut diverged)?;
             world.add_object(obj);
             created += 1;
         }
@@ -551,7 +628,7 @@ pub fn load_game_dir(
                     existing.attrs.extend(object.attrs.clone());
                     existing.locks = object.locks.clone();
                     sync_managed_tags(existing, &object.tags);
-                    install_script(existing, &object.script, &object.libs, base_dir)?;
+                    install_script(existing, &object.script, &object.libs, base_dir, &mut diverged)?;
                     updated += 1;
                 }
                 continue;
@@ -574,7 +651,7 @@ pub fn load_game_dir(
             obj.attrs.insert(FILE_KEY_ATTR.into(), serde_json::json!(file_key));
             obj.locks = object.locks.clone();
             obj.archetype_ref = archetype_ref;
-            install_script(&mut obj, &object.script, &object.libs, base_dir)?;
+            install_script(&mut obj, &object.script, &object.libs, base_dir, &mut diverged)?;
             world.add_object(obj);
             created += 1;
         }
@@ -641,7 +718,7 @@ pub fn load_game_dir(
                             "tick_interval".into(),
                             serde_json::json!(script.interval),
                         );
-                        install_script(existing, &script_src, &empty_libs, &area.base_dir)?;
+                        install_script(existing, &script_src, &empty_libs, &area.base_dir, &mut diverged)?;
                         updated += 1;
                     }
                     continue;
@@ -653,7 +730,7 @@ pub fn load_game_dir(
             obj.attrs.insert("tick_interval".into(), serde_json::json!(script.interval));
             obj.tags.insert(managed.clone());
             obj.attrs.insert(FILE_KEY_ATTR.into(), serde_json::json!(file_key));
-            install_script(&mut obj, &script_src, &empty_libs, &area.base_dir)?;
+            install_script(&mut obj, &script_src, &empty_libs, &area.base_dir, &mut diverged)?;
             world.add_object(obj);
             created += 1;
         }
@@ -679,6 +756,7 @@ pub fn load_game_dir(
         skipped,
         file_hashes: new_hashes,
         changed_files,
+        diverged,
     })
 }
 
@@ -705,12 +783,36 @@ fn install_script(
     script: &Option<ScriptSource>,
     libs: &std::collections::HashMap<String, ProgramSource>,
     base_dir: &Path,
+    diverged: &mut Vec<String>,
 ) -> Result<(), String> {
     // The object's single script.
     let script_is_ingame = obj
         .script
         .as_ref()
         .is_some_and(|s| s.origin == ProgramOrigin::InGame);
+    // Vocal divergence: an in-game edit shadows the file, so the file's script
+    // state — whether it (re)defines a script OR removes one — will NOT be
+    // applied. An in-game script always differs from the file (that's what
+    // gives it `InGame` origin), so report whenever one shadows a reconciled
+    // file, including the case where the file drops its `script` entry (which
+    // would otherwise vanish silently — exactly what this report guards).
+    // Never silent. See `docs/plans/archetypes.md`; the file remains the
+    // distribution source, so a maintainer needs to know the running copy has
+    // drifted from it.
+    if script_is_ingame {
+        let label = obj
+            .attrs
+            .get(FILE_KEY_ATTR)
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| obj.ref_id.clone());
+        tracing::warn!(
+            object = %obj.ref_id,
+            file_key = %label,
+            "file script shadowed by an in-game edit — file change NOT applied"
+        );
+        diverged.push(label);
+    }
     if !script_is_ingame {
         match script {
             Some(src) => {
@@ -1705,5 +1807,102 @@ archetype = "loop/a"
 
         assert_eq!(key_map.get("town/crossroads"), Some(&crossroads));
         assert_eq!(key_map.len(), 1, "only file-identified objects belong in the map");
+    }
+
+    #[test]
+    fn key_is_locked_matches_area_and_exact_key_but_not_partial_segment() {
+        let prefixes = vec!["std".to_string()];
+        assert!(key_is_locked("std/monster", &prefixes), "area prefix covers keys under it");
+        assert!(key_is_locked("std", &prefixes), "exact key matches");
+        assert!(!key_is_locked("standard/foo", &prefixes), "must not match a partial segment");
+        assert!(!key_is_locked("town/square", &prefixes));
+        assert!(!key_is_locked("std/monster", &[]), "no prefixes locks nothing");
+    }
+
+    /// A configured `locked` prefix stamps `system:locked` (own tag) onto its
+    /// managed objects at load, and nothing else. Idempotent on re-stamp.
+    #[test]
+    fn config_locked_prefix_stamps_system_locked() {
+        let dir = TempGameDir::new();
+        dir.write_area(
+            "std",
+            "monster.toml",
+            "area = \"std\"\n[[objects]]\nkey = \"monster\"\nkind = \"npc\"\ntitle = \"Monster\"\n",
+        );
+        dir.write_area(
+            "town",
+            "town.toml",
+            "area = \"town\"\n[[rooms]]\nkey = \"square\"\ntitle = \"Square\"\n",
+        );
+
+        let mut world = World::new();
+        let result = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+
+        let stamped = stamp_locked(&mut world, &["std".to_string()]);
+        assert_eq!(stamped, 1, "only the std/* object is stamped");
+
+        let locked = locked_tag();
+        let monster = world.get(result.key_map.get("std/monster").unwrap()).unwrap();
+        assert!(monster.tags.contains(&locked), "std/* object is locked");
+        let square = world.get(result.key_map.get("town/square").unwrap()).unwrap();
+        assert!(!square.tags.contains(&locked), "town/* object is not locked");
+
+        // Idempotent: re-stamping stamps nothing new.
+        assert_eq!(stamp_locked(&mut world, &["std".to_string()]), 0);
+
+        // Dropping the prefix reconciles the stale lock away — a removed
+        // `locked` config must not leave objects read-only forever.
+        assert_eq!(stamp_locked(&mut world, &[]), 1, "clearing prefixes unlocks");
+        let monster = world.get(result.key_map.get("std/monster").unwrap()).unwrap();
+        assert!(!monster.tags.contains(&locked), "std/* object is unlocked after prefix removal");
+        assert_eq!(stamp_locked(&mut world, &[]), 0, "already unlocked — no further change");
+    }
+
+    /// A file change that an in-game edit shadows must be surfaced (never
+    /// silently dropped): the in-game script survives, and the load reports the
+    /// divergence by file key.
+    #[test]
+    fn shadowed_file_script_reports_divergence() {
+        let dir = TempGameDir::new();
+        dir.write_area(
+            "town",
+            "town.toml",
+            &area_with_program(
+                "Old.",
+                r#"script = { source = "function on_enter() return 'file' end" }"#,
+            ),
+        );
+
+        let mut world = World::new();
+        let first = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+        let ref_id = first.key_map.get("town/crossroads").unwrap().clone();
+        assert!(first.diverged.is_empty(), "no divergence on the first clean load");
+
+        // An in-game edit shadows the file version.
+        hooks::set_script(
+            world.get_mut(&ref_id).unwrap(),
+            "function on_enter() return 'edited' end".into(),
+        );
+
+        // Change the file and reload — the file change cannot be applied.
+        dir.write_area(
+            "town",
+            "town.toml",
+            &area_with_program(
+                "New.",
+                r#"script = { source = "function on_enter() return 'file2' end" }"#,
+            ),
+        );
+        let second = load_game_dir(&dir.path, &mut world, &first.file_hashes).unwrap();
+
+        assert!(
+            second.diverged.iter().any(|k| k.contains("crossroads")),
+            "a shadowed file change must be surfaced, got {:?}",
+            second.diverged
+        );
+        // The in-game edit survived; the file change was NOT applied.
+        assert!(
+            world.get(&ref_id).unwrap().script.as_ref().unwrap().source.contains("edited"),
+        );
     }
 }

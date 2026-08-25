@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { EditorView, keymap, hoverTooltip } from '@codemirror/view';
-  import { EditorState } from '@codemirror/state';
+  import { EditorState, Compartment } from '@codemirror/state';
   import { basicSetup } from 'codemirror';
   import { StreamLanguage, HighlightStyle, syntaxHighlighting } from '@codemirror/language';
   import { lua } from '@codemirror/legacy-modes/mode/lua';
@@ -12,7 +12,7 @@
   import { loadHooks } from '../../lib/hooks.js';
   import { API_FUNCTIONS, API_GLOBALS, OBJECT_MEMBERS } from './hearth-api.js';
 
-  let { value = $bindable(''), onsave = () => {}, onchange = () => {}, onlookup = null, oncursor = null, hook = '' } = $props();
+  let { value = $bindable(''), onsave = () => {}, onchange = () => {}, onlookup = null, oncursor = null, hook = '', readOnly = false } = $props();
 
   let host;
   let view;
@@ -262,6 +262,12 @@
     { key: 'Mod-s', preventDefault: true, run: (v) => { onsave(v.state.doc.toString()); return true; } },
   ]);
 
+  // `locked` often resolves async (after the examine call), so the read-only
+  // facets live in a Compartment and get reconfigured when `readOnly` flips —
+  // otherwise a locked tab opened before examine returns would stay editable.
+  const readOnlyCompartment = new Compartment();
+  const readOnlyExtension = (ro) => [EditorState.readOnly.of(ro), EditorView.editable.of(!ro)];
+
   onMount(() => {
     view = new EditorView({
       parent: host,
@@ -278,6 +284,10 @@
           lintGutter(),
           saveKeymap,
           hearthTheme,
+          // A locked, file-authoritative object opens view-only: the buffer is
+          // shown but not editable (edit the source file and @reload-world).
+          // In a Compartment so it can be reconfigured when `readOnly` flips.
+          readOnlyCompartment.of(readOnlyExtension(readOnly)),
           EditorView.updateListener.of((u) => {
             // Report the hook function the cursor sits in, so the Help panel's
             // "current" card follows the caret through a multi-hook script.
@@ -305,6 +315,15 @@
       syncing = true;
       view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: v } });
       syncing = false;
+    }
+  });
+
+  // Reconfigure read-only when `readOnly` changes (e.g. examine resolves the
+  // object as locked after the editor mounted).
+  $effect(() => {
+    const ro = readOnly;
+    if (view) {
+      view.dispatch({ effects: readOnlyCompartment.reconfigure(readOnlyExtension(ro)) });
     }
   });
 </script>

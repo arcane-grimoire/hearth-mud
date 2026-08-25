@@ -194,8 +194,29 @@ than today's inline stats, stage 1 earned its keep.
 - **`clear_attr` — DONE.** An alias for the existing `unset_attr` intent,
   named for the archetype-facing reading ("revert to inheriting" vs. "delete
   the attr") — see `src/softcode/api.rs`.
-- **Authoring surface** — `@archetype`, builder "N instances / which fields are
-  overridden", the "where does this hook come from" inspector view.
+- **Authoring surface — DONE.** The builder `Examine` reports the archetype
+  summary, per-attr provenance (`resolved_attrs`: value / source / overrides),
+  per-hook origin (`resolved_hooks`), resolved title/description, per-tag source
+  (`resolved_tags`), and `instance_count` ("N delegate to this"). The web
+  `PropertiesPanel`/`HooksPanel` render own-vs-inherited for attrs, title,
+  description, tags, and hooks, with Set/Detach archetype controls; `set_archetype`
+  (Intent + REST + Luau) reparents, cycle-guarded. `@archetype` telnet command
+  is still pending; the web surface is the primary one.
+- **Tiering + locking — DONE.** Content vs code split by convention: `world/*`
+  areas are live/DB-authoritative content; `std/*` is code (rules + base
+  archetypes), file-authoritative and locked. `system:locked` is an OWN tag
+  (never resolved up the archetype chain — a locked base does not lock its
+  subtypes/instances) that makes an object's definition read-only to every
+  authoring surface (REST + telnet `@` edits), while runtime state (softcode
+  intents via `apply_batch`) still applies — "lock the definition, not the
+  state." `hearth.toml` `locked = [prefixes]` is the source of truth for which
+  managed objects are locked; `loader::stamp_locked` reconciles the tag at
+  boot/reload (adds where a file key matches, removes where it no longer does).
+  A cascade delete refuses when any affected instance is locked (no indirect
+  mutation). Reload is vocal: a file change shadowed by an in-game edit — a
+  redefinition OR a removal — is reported, never silently dropped. The builder
+  renders locked objects read-only (banner, disabled controls, read-only
+  CodeMirror). Runtime archetype *creation* stays out (file-first).
 - **`@export` / declared attrs** — ties into `docs/plans/attribute-schema.md`;
   an archetype's declared attrs become an instance's typed inspector defaults.
 - **Live debugger** — hook error → inspect `this`/`actor` state → edit → re-fire

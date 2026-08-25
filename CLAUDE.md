@@ -198,6 +198,9 @@ spawn_room = "town/crossroads"  # <area>/<key>
 game_dir = "../the-last-stag-mud/world"
 game_web_dir = "web/dist"  # optional, relative to game root (parent of game_dir)
 load_world_files = true    # boot-time world loading; see below before turning off
+locked = ["std"]           # optional: file-key/area prefixes whose managed
+                           # objects are file-authoritative and read-only to
+                           # in-game authoring (see Tiering + locking below)
 ```
 
 **`game_dir` is always required, even with `load_world_files = false`.**
@@ -255,6 +258,20 @@ This is the general form of the rule Program authoring worked out for Programs
 and the map builder applied to maps + terrain; it applies to any future editor —
 themes, ink. If a feature lets someone change something from inside the game,
 its store is the database.
+
+**Tiering + locking.** A game splits its files into two tiers by convention:
+`world/*` areas are **content** — live, DB-authoritative, edited in-game; `std/*`
+is **code** — rules + base archetypes, file-authoritative, locked. Locking is the
+`system:locked` tag: an OWN tag (never inherited up the archetype chain, so a
+locked base does not lock its subtypes/instances) that makes an object's
+*definition* read-only to every authoring surface (REST + telnet `@` edits, the
+builder) while runtime *state* (softcode intents through `apply_batch`) still
+applies — "lock the definition, not the state." The `locked = [prefixes]` config
+is the source of truth for which managed objects are locked; `stamp_locked`
+reconciles the tag at boot/`@reload-world` (adding and removing as prefixes
+change). A reload is vocal: a file change shadowed by an in-game edit is reported,
+never silently dropped. The Last Stag's `game/` directory is the reference layout
+(`game/world/*` content, `game/std/*` code, `locked = ["std"]`).
 
 ## Design decisions
 
