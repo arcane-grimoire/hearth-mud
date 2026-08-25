@@ -125,7 +125,7 @@ Require the `admin` scope.
 | `@revoke <user> <scope>` | Revoke a scope (can't revoke your own admin) |
 | `@scopes [<user>]` | View scopes for a user (default: yourself) |
 | `@wall <message>` | Broadcast a message to all online players |
-| `@force <player> = <command>` | Run a command as an online player (charm/puppet). `@`-commands and quit are refused; the command runs under the target's own scopes |
+| `@force <player\|npc> = <command>` | Run a command as an online player or an NPC in your room (charm/puppet, or a self-driving NPC). `@`-commands and quit are refused; the command runs under the target's own scopes |
 | `@boot <user>` | Disconnect a player |
 | `@save` | Save the world and accounts to SQLite |
 | `@shutdown` | Graceful server shutdown (saves, notifies, stops) |

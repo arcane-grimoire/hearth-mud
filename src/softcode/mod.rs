@@ -101,12 +101,13 @@ pub enum Intent {
         location: Option<String>,
         owner: Option<String>,
     },
-    /// Force a player to run a command as if they had typed it — charm,
-    /// puppet, confusion. Runs through the normal command parser under the
-    /// *target's* own scopes; `@`-commands and `quit` are refused on the
-    /// forced path (see the engine's `deliver_effects`), and a depth guard
-    /// bounds forced-command chains. The `actor` must be a player (only
-    /// players have the session-bound command dispatch).
+    /// Force a player or NPC to run a command as if they had typed it — charm,
+    /// puppet, confusion, or a self-driving NPC. Runs through the normal command
+    /// parser under the *target's* own scopes; `@`-commands and `quit` are
+    /// refused on the forced path (see the engine's `deliver_effects`), and a
+    /// depth guard bounds forced-command chains. A player runs through their
+    /// live session; an NPC (no session) runs the gameplay subset with no
+    /// client to echo to.
     RunCommandAs {
         actor: String,
         command: String,
@@ -824,9 +825,9 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 let obj = world
                     .get(actor)
                     .ok_or_else(|| format!("run_command_as: no object '{}'", actor))?;
-                if obj.kind != Kind::Player {
+                if !matches!(obj.kind, Kind::Player | Kind::Npc) {
                     return Err(format!(
-                        "run_command_as: '{}' is not a player (only players have command dispatch)",
+                        "run_command_as: '{}' must be a player or an NPC",
                         actor
                     ));
                 }
@@ -2712,7 +2713,21 @@ mod tests {
             Effect::RunCommand { actor, command } if actor == "#3" && command == "say hi"
         )));
 
-        // A non-player target is refused (#5 is an item).
+        // An NPC (#7, the guard) is a valid target too — self-driving NPCs.
+        let effects = apply_batch(
+            &mut world,
+            &IntentBatch::from_intents(vec![Intent::RunCommandAs {
+                actor: "#7".into(),
+                command: "go north".into(),
+            }]),
+        )
+        .unwrap();
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::RunCommand { actor, command } if actor == "#7" && command == "go north"
+        )));
+
+        // A non-player/non-npc target is refused (#5 is an item).
         assert!(apply_batch(
             &mut world,
             &IntentBatch::from_intents(vec![Intent::RunCommandAs {

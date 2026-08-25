@@ -80,7 +80,7 @@ export const API_FUNCTIONS = [
   ['cancel_after', 'cancel_after(ref, hook)', 'Cancel a scheduled timer for this object/hook.'],
   ['get_timers', 'get_timers(ref)', 'Pending timers on an object.'],
   ['trigger', 'trigger(ref, hook, data?)', 'Fire a hook after this script; passes data as `args`.'],
-  ['run_command_as', 'run_command_as(actor, command)', 'Force a player to run a command as if typed (charm/puppet). Runs under their own scopes; @-commands and quit are refused.'],
+  ['run_command_as', 'run_command_as(actor, command)', 'Force a player or NPC to run a command as if typed (charm/puppet, or a self-driving NPC). Runs under their own scopes; @-commands and quit are refused.'],
   ['pass', 'pass(args?)', 'Inside a hook, call the inherited version of THIS hook — the next archetype ancestor above the one currently running that defines it (MOO pass()/super). Forwards this call’s args unless given explicit ones; returns nil if there is no ancestor definition.'],
   ['get_tick', 'get_tick', 'The current world tick count (a value, not a call).'],
   ['prompt', 'prompt(actor, obj, hook)', 'Route the actor’s next input to a hook on obj.'],

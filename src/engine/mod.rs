@@ -1735,20 +1735,20 @@ impl Engine {
                         "That command cannot be forced (@-commands and quit are refused).",
                     );
                 }
-                match self.world.get(&ref_id) {
-                    Some(o) if o.kind == Kind::Player => {}
-                    Some(_) => return ApiResponse::error("Target is not a player"),
+                let kind = match self.world.get(&ref_id) {
+                    Some(o) => o.kind.clone(),
                     None => return ApiResponse::error(format!("No object with ref '{}'", ref_id)),
-                }
-                let Some(session_id) = self.session_for_actor(&ref_id) else {
-                    return ApiResponse::error("That player has no active session");
                 };
+                if !matches!(kind, Kind::Player | Kind::Npc) {
+                    return ApiResponse::error("Target is not a player or NPC");
+                }
+                if kind == Kind::Player && self.session_for_actor(&ref_id).is_none() {
+                    return ApiResponse::error("That player has no active session");
+                }
                 if self.force_depth >= MAX_FORCE_DEPTH {
                     return ApiResponse::error("Forced-command depth limit reached");
                 }
-                self.force_depth += 1;
-                self.handle_game_input(&session_id, &command);
-                self.force_depth = self.force_depth.saturating_sub(1);
+                self.dispatch_as_actor(&ref_id, &command);
                 ApiResponse::ok()
             }
             ApiRequest::AddTag { ref_id, tag } => {
@@ -3352,121 +3352,152 @@ impl Engine {
             return;
         }
 
+        self.run_command(&actor_ref, Some(session_id), input);
+    }
+
+    /// Dispatch one command as `actor_ref`. `session_id` is `Some` for a player
+    /// — output and room data flow to their client, and the session-only
+    /// commands (quit, who, the `@`-builder/admin verbs, character management,
+    /// help) are available. It is `None` for a session-less actor, such as a
+    /// `run_command_as`-driven NPC, which runs only the gameplay subset
+    /// (movement, get/drop/put/use, say/emote, and game `cmd_*` hooks) with no
+    /// client to echo to. Player behavior is identical to the pre-refactor path.
+    fn run_command(&mut self, actor_ref: &str, session_id: Option<&str>, input: &str) {
+        if input.is_empty() {
+            return;
+        }
+        // Sentinel used by say/emote/whisper only to skip echoing to the
+        // speaker's own session. `""` matches no real session, which is exactly
+        // right for a session-less NPC (nothing to skip, nothing to echo).
+        let sid = session_id.unwrap_or("");
+
         let (cmd, args) = match input.split_once(' ') {
             Some((c, a)) => (c.to_lowercase(), a.trim().to_string()),
             None => (input.to_lowercase(), String::new()),
         };
 
-        let room_before = self.world.get(&actor_ref).and_then(|a| a.location_ref.clone());
+        let room_before = self.world.get(actor_ref).and_then(|a| a.location_ref.clone());
 
         let output = match cmd.as_str() {
-            // Player commands
-            "look" | "l" => self.cmd_look(&actor_ref, &args),
+            // Gameplay commands — available with or without a session.
+            "look" | "l" => self.cmd_look(actor_ref, &args),
             "say" | "\"" => {
                 let msg = if cmd == "\"" {
                     input[1..].trim().to_string()
                 } else {
                     args.clone()
                 };
-                self.cmd_say(session_id, &actor_ref, &msg)
+                self.cmd_say(sid, actor_ref, &msg)
             }
-            "go" => self.cmd_go(&actor_ref, &args),
-            "quit" | "q" => {
-                self.send(session_id, "Farewell.\r\n");
-                self.handle_disconnect(session_id);
-                return;
-            }
-            "inventory" | "inv" | "i" => commands::do_inventory(&self.world, &actor_ref),
-            "get" | "take" => self.cmd_get(&actor_ref, &args),
-            "put" | "place" => self.cmd_put(&actor_ref, &args),
-            "drop" => self.cmd_drop(&actor_ref, &args),
-            "use" => self.cmd_use(&actor_ref, &args),
-            "examine" | "ex" => commands::do_examine(&self.world, &actor_ref, &args),
-            "who" => self.do_who(session_id),
-            "@password" => self.cmd_password(session_id, &args),
-            "@email" => self.cmd_email(session_id, &args),
-            "whisper" => self.cmd_whisper(session_id, &actor_ref, &args),
+            "go" => self.cmd_go(actor_ref, &args),
+            "inventory" | "inv" | "i" => commands::do_inventory(&self.world, actor_ref),
+            "get" | "take" => self.cmd_get(actor_ref, &args),
+            "put" | "place" => self.cmd_put(actor_ref, &args),
+            "drop" => self.cmd_drop(actor_ref, &args),
+            "use" => self.cmd_use(actor_ref, &args),
+            "examine" | "ex" => commands::do_examine(&self.world, actor_ref, &args),
+            "whisper" => self.cmd_whisper(sid, actor_ref, &args),
             "emote" | "pose" | ":" => {
                 let msg = if cmd == ":" {
                     input[1..].trim().to_string()
                 } else {
                     args.clone()
                 };
-                self.do_emote(session_id, &actor_ref, &msg)
+                self.do_emote(sid, actor_ref, &msg)
             }
 
-            // Builder commands (@ prefix)
-            "@dig" => self.cmd_dig(session_id, &actor_ref, &args),
-            "@open" => self.cmd_open(session_id, &actor_ref, &args),
-            "@describe" | "@desc" => self.cmd_describe(session_id, &actor_ref, &args),
-            "@create" => self.cmd_create(session_id, &actor_ref, &args),
-            "@destroy" => self.cmd_destroy(session_id, &actor_ref, &args),
-            "@set" => self.cmd_set(session_id, &actor_ref, &args),
-            "@teleport" | "@tel" => self.cmd_teleport(session_id, &actor_ref, &args),
-            "@name" => self.cmd_name(session_id, &actor_ref, &args),
-            "@program" => self.cmd_program(session_id, &actor_ref, &args),
-            "@programs" => self.cmd_programs(session_id, &actor_ref, &args),
-            "@rmprogram" => self.cmd_rmprogram(session_id, &actor_ref, &args),
-            "@tag" => self.cmd_tag(session_id, &actor_ref, &args),
-            "@untag" => self.cmd_untag(session_id, &actor_ref, &args),
-            "@script" => self.cmd_script(session_id, &actor_ref, &args),
-            "@scripts" => self.cmd_scripts(session_id),
-            "@rmscript" => self.cmd_rmscript(session_id, &actor_ref, &args),
-            "@script-interval" => self.cmd_script_interval(session_id, &args),
-            "@lib" => self.cmd_lib(session_id, &actor_ref, &args),
-            "@libs" => self.cmd_libs(session_id),
-            "@rmlib" => self.cmd_rmlib(session_id, &actor_ref, &args),
-            "@lock" => self.cmd_lock(session_id, &actor_ref, &args),
-            "@alias" => self.cmd_alias(session_id, &actor_ref, &args),
-            "@clone" => self.cmd_clone(session_id, &actor_ref, &args),
-            "@force" => self.cmd_force(session_id, &actor_ref, &args),
-            "@unlock" => self.cmd_unlock(session_id, &actor_ref, &args),
-            "@locks" => self.cmd_locks(session_id, &actor_ref, &args),
+            // Session-only commands (quit, who, the `@`-builder/admin verbs,
+            // character management, help). Unreachable for a session-less actor
+            // — a forced NPC never gets here (the forced gate bans `@`/quit), and
+            // any other verb falls through to the game `cmd_*` dispatch below.
+            _ if session_id.is_some() => {
+                let session_id = sid;
+                match cmd.as_str() {
+                    "quit" | "q" => {
+                        self.send(session_id, "Farewell.\r\n");
+                        self.handle_disconnect(session_id);
+                        return;
+                    }
+                    "who" => self.do_who(session_id),
+                    "@password" => self.cmd_password(session_id, &args),
+                    "@email" => self.cmd_email(session_id, &args),
+                    "@dig" => self.cmd_dig(session_id, actor_ref, &args),
+                    "@open" => self.cmd_open(session_id, actor_ref, &args),
+                    "@describe" | "@desc" => self.cmd_describe(session_id, actor_ref, &args),
+                    "@create" => self.cmd_create(session_id, actor_ref, &args),
+                    "@destroy" => self.cmd_destroy(session_id, actor_ref, &args),
+                    "@set" => self.cmd_set(session_id, actor_ref, &args),
+                    "@teleport" | "@tel" => self.cmd_teleport(session_id, actor_ref, &args),
+                    "@name" => self.cmd_name(session_id, actor_ref, &args),
+                    "@program" => self.cmd_program(session_id, actor_ref, &args),
+                    "@programs" => self.cmd_programs(session_id, actor_ref, &args),
+                    "@rmprogram" => self.cmd_rmprogram(session_id, actor_ref, &args),
+                    "@tag" => self.cmd_tag(session_id, actor_ref, &args),
+                    "@untag" => self.cmd_untag(session_id, actor_ref, &args),
+                    "@script" => self.cmd_script(session_id, actor_ref, &args),
+                    "@scripts" => self.cmd_scripts(session_id),
+                    "@rmscript" => self.cmd_rmscript(session_id, actor_ref, &args),
+                    "@script-interval" => self.cmd_script_interval(session_id, &args),
+                    "@lib" => self.cmd_lib(session_id, actor_ref, &args),
+                    "@libs" => self.cmd_libs(session_id),
+                    "@rmlib" => self.cmd_rmlib(session_id, actor_ref, &args),
+                    "@lock" => self.cmd_lock(session_id, actor_ref, &args),
+                    "@alias" => self.cmd_alias(session_id, actor_ref, &args),
+                    "@clone" => self.cmd_clone(session_id, actor_ref, &args),
+                    "@force" => self.cmd_force(session_id, actor_ref, &args),
+                    "@unlock" => self.cmd_unlock(session_id, actor_ref, &args),
+                    "@locks" => self.cmd_locks(session_id, actor_ref, &args),
 
-            "@charlist" => self.cmd_charlist(session_id),
-            "@charcreate" => self.cmd_charcreate(session_id, &args),
-            "@charswitch" => self.cmd_charswitch(session_id, &args),
-            "@chardelete" => self.cmd_chardelete(session_id, &args),
-            "@puppet" => self.cmd_puppet(session_id, &actor_ref, &args),
-            "@unpuppet" => self.cmd_unpuppet(session_id),
+                    "@charlist" => self.cmd_charlist(session_id),
+                    "@charcreate" => self.cmd_charcreate(session_id, &args),
+                    "@charswitch" => self.cmd_charswitch(session_id, &args),
+                    "@chardelete" => self.cmd_chardelete(session_id, &args),
+                    "@puppet" => self.cmd_puppet(session_id, actor_ref, &args),
+                    "@unpuppet" => self.cmd_unpuppet(session_id),
 
-            "@chown" => self.cmd_chown(session_id, &args),
-            "@archetype" | "@chparent" => self.cmd_archetype(session_id, &actor_ref, &args),
-            "@dialogue" | "@dialog" => self.cmd_dialogue(session_id, &actor_ref, &args),
+                    "@chown" => self.cmd_chown(session_id, &args),
+                    "@archetype" | "@chparent" => self.cmd_archetype(session_id, actor_ref, &args),
+                    "@dialogue" | "@dialog" => self.cmd_dialogue(session_id, actor_ref, &args),
 
-            // Admin commands
-            "@grant" => self.cmd_grant(session_id, &args),
-            "@revoke" => self.cmd_revoke(session_id, &args),
-            "@scopes" => self.cmd_scopes(session_id, &args),
-            "@wall" => self.cmd_wall(session_id, &args),
-            "@boot" => self.cmd_boot(session_id, &args),
-            "@save" => self.cmd_save(session_id),
-            "@shutdown" => self.cmd_shutdown(session_id),
-            "@reload-world" => self.cmd_reload_world(session_id),
-            "@eval" => self.cmd_eval(session_id, &actor_ref, &args),
-            "@import" => self.cmd_import(session_id, &args),
-            "@export" => self.cmd_export(session_id, &args),
-            "@maxchars" => self.cmd_maxchars(session_id, &args),
-            "@test" => self.cmd_test(session_id, &args),
-            "@reload" => self.cmd_reload(session_id, &actor_ref, &args),
+                    "@grant" => self.cmd_grant(session_id, &args),
+                    "@revoke" => self.cmd_revoke(session_id, &args),
+                    "@scopes" => self.cmd_scopes(session_id, &args),
+                    "@wall" => self.cmd_wall(session_id, &args),
+                    "@boot" => self.cmd_boot(session_id, &args),
+                    "@save" => self.cmd_save(session_id),
+                    "@shutdown" => self.cmd_shutdown(session_id),
+                    "@reload-world" => self.cmd_reload_world(session_id),
+                    "@eval" => self.cmd_eval(session_id, actor_ref, &args),
+                    "@import" => self.cmd_import(session_id, &args),
+                    "@export" => self.cmd_export(session_id, &args),
+                    "@maxchars" => self.cmd_maxchars(session_id, &args),
+                    "@test" => self.cmd_test(session_id, &args),
+                    "@reload" => self.cmd_reload(session_id, actor_ref, &args),
 
-            "@token" | "@tokens" => self.cmd_token(session_id, &args),
-            "@display" => self.cmd_display(&actor_ref, &args),
+                    "@token" | "@tokens" => self.cmd_token(session_id, &args),
+                    "@display" => self.cmd_display(actor_ref, &args),
 
-            "help" | "?" => {
-                let is_builder = self.session_has_scope(session_id, Scope::Builder);
-                let is_admin = self.session_has_scope(session_id, Scope::Admin);
-                commands::do_help_with_roles(is_builder, is_admin)
+                    "help" | "?" => {
+                        let is_builder = self.session_has_scope(session_id, Scope::Builder);
+                        let is_admin = self.session_has_scope(session_id, Scope::Admin);
+                        commands::do_help_with_roles(is_builder, is_admin)
+                    }
+                    _ => self.dispatch_fallback(actor_ref, &cmd, &args),
+                }
             }
-            _ => self.dispatch_fallback(&actor_ref, &cmd, &args),
+            // Session-less actor (an NPC): an unknown verb resolves to a game
+            // `cmd_*` hook, same as for players.
+            _ => self.dispatch_fallback(actor_ref, &cmd, &args),
         };
 
-        self.send(session_id, &output);
+        if let Some(session_id) = session_id {
+            self.send(session_id, &output);
 
-        let room_after = self.world.get(&actor_ref).and_then(|a| a.location_ref.clone());
-        if matches!(cmd.as_str(), "look" | "l") || room_before != room_after {
-            self.send_room_data(session_id, &actor_ref);
-            self.send_commands(session_id, &actor_ref);
+            let room_after = self.world.get(actor_ref).and_then(|a| a.location_ref.clone());
+            if matches!(cmd.as_str(), "look" | "l") || room_before != room_after {
+                self.send_room_data(session_id, actor_ref);
+                self.send_commands(session_id, actor_ref);
+            }
         }
     }
 
@@ -4353,13 +4384,9 @@ impl Engine {
                 self.send_to_actor_ref(&target, "You resist the compulsion.\r\n");
                 continue;
             }
-            let Some(session_id) = self.session_for_actor(&target) else {
-                // No live session (offline player). Nothing to drive.
-                continue;
-            };
-            self.force_depth += 1;
-            self.handle_game_input(&session_id, &command);
-            self.force_depth = self.force_depth.saturating_sub(1);
+            // Player → their session; NPC → session-less dispatch. An offline
+            // player is a no-op (see `dispatch_as_actor`).
+            self.dispatch_as_actor(&target, &command);
         }
     }
 
@@ -4382,6 +4409,24 @@ impl Engine {
             SessionState::Playing { actor_ref: ar, .. } if ar == actor_ref => Some(sid.clone()),
             _ => None,
         })
+    }
+
+    /// Run a forced (`run_command_as`) command as `target`, bumping the
+    /// recursion-depth guard around it: a player with a live session runs
+    /// through their session; a session-less NPC runs through the session-less
+    /// dispatch. An offline player (no session, not an NPC) is a no-op — there
+    /// is no body to drive. Callers apply `forced_command_allowed` and the
+    /// depth ceiling first.
+    fn dispatch_as_actor(&mut self, target: &str, command: &str) {
+        self.force_depth += 1;
+        if let Some(session_id) = self.session_for_actor(target) {
+            // Players go through the full session path (prompt/editor prelude
+            // included), exactly as before.
+            self.handle_game_input(&session_id, command);
+        } else if self.world.get(target).map(|o| o.kind == Kind::Npc).unwrap_or(false) {
+            self.run_command(target, None, command);
+        }
+        self.force_depth = self.force_depth.saturating_sub(1);
     }
 
     fn send_to_actor_ref(&self, actor_ref: &str, message: &str) {
@@ -6746,58 +6791,71 @@ impl Engine {
     /// puppet). Admin-gated; the same forced-command gate as softcode
     /// `run_command_as` (@-commands and quit refused, depth-bounded). The
     /// player must be online. `<player>` is a ref or an online player's name.
-    fn cmd_force(&mut self, session_id: &str, _actor_ref: &str, args: &str) -> String {
+    fn cmd_force(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
         if !self.session_has_scope(session_id, Scope::Admin) {
             return "Permission denied.\r\n".to_string();
         }
         let (who, command) = match args.split_once('=') {
             Some((w, c)) => (w.trim(), c.trim()),
-            None => return "Usage: @force <player> = <command>\r\n".to_string(),
+            None => return "Usage: @force <player|npc> = <command>\r\n".to_string(),
         };
         if command.is_empty() {
-            return "Usage: @force <player> = <command>\r\n".to_string();
+            return "Usage: @force <player|npc> = <command>\r\n".to_string();
         }
         if !Self::forced_command_allowed(command) {
             return "That command cannot be forced (@-commands and quit are refused).\r\n"
                 .to_string();
         }
-        // Resolve the target among online players (a #ref or a name).
-        let online: Vec<String> = self
-            .sessions
-            .values()
-            .filter_map(|s| match &s.state {
-                SessionState::Playing { actor_ref, .. } => Some(actor_ref.clone()),
-                _ => None,
-            })
-            .collect();
+        // Resolve the target: a #ref, an online player by name, or an NPC in
+        // the forcer's current room by name/key.
         let target = if who.starts_with('#') {
             who.to_string()
         } else {
-            match online.iter().find(|ar| {
-                self.world.get(ar).is_some_and(|o| {
-                    self.world.display_name(o).eq_ignore_ascii_case(who)
-                        || o.key.eq_ignore_ascii_case(who)
-                })
-            }) {
-                Some(r) => r.clone(),
-                None => return format!("No online player matching '{}'.\r\n", who),
+            let online = self.sessions.values().find_map(|s| match &s.state {
+                SessionState::Playing { actor_ref, .. } => self.world.get(actor_ref).and_then(|o| {
+                    (self.world.display_name(o).eq_ignore_ascii_case(who)
+                        || o.key.eq_ignore_ascii_case(who))
+                    .then(|| actor_ref.clone())
+                }),
+                _ => None,
+            });
+            match online {
+                Some(r) => r,
+                None => {
+                    let room = self.world.get(actor_ref).and_then(|a| a.location_ref.clone());
+                    let npc = room.and_then(|rm| {
+                        self.world
+                            .objects_in(&rm)
+                            .into_iter()
+                            .find(|o| {
+                                o.kind == Kind::Npc
+                                    && (self.world.display_name(o).eq_ignore_ascii_case(who)
+                                        || o.key.eq_ignore_ascii_case(who))
+                            })
+                            .map(|o| o.ref_id.clone())
+                    });
+                    match npc {
+                        Some(r) => r,
+                        None => return format!("No player or NPC matching '{}'.\r\n", who),
+                    }
+                }
             }
         };
-        match self.world.get(&target) {
-            Some(o) if o.kind == Kind::Player => {}
-            Some(_) => return "That's not a player.\r\n".to_string(),
+        let (kind, label) = match self.world.get(&target) {
+            Some(o) => (o.kind.clone(), self.world.display_name(o)),
             None => return format!("No object with ref '{}'.\r\n", target),
-        }
-        let Some(target_session) = self.session_for_actor(&target) else {
-            return "That player has no active session.\r\n".to_string();
         };
+        if !matches!(kind, Kind::Player | Kind::Npc) {
+            return "You can only force a player or an NPC.\r\n".to_string();
+        }
+        if kind == Kind::Player && self.session_for_actor(&target).is_none() {
+            return "That player has no active session.\r\n".to_string();
+        }
         if self.force_depth >= MAX_FORCE_DEPTH {
             return "Forced-command depth limit reached.\r\n".to_string();
         }
-        self.force_depth += 1;
-        self.handle_game_input(&target_session, command);
-        self.force_depth = self.force_depth.saturating_sub(1);
-        format!("You force {} to '{}'.\r\n", target, command)
+        self.dispatch_as_actor(&target, command);
+        format!("You force {} to '{}'.\r\n", label, command)
     }
 
     fn cmd_locks(&self, session_id: &str, actor_ref: &str, args: &str) -> String {
@@ -10220,6 +10278,75 @@ end
         );
         assert!(!gated.ok);
         assert!(gated.error.as_deref().unwrap().contains("cannot be forced"));
+    }
+
+    /// `run_command_as` drives NPCs through the session-less dispatch: a forced
+    /// gameplay command actually executes against the NPC's body.
+    #[test]
+    fn forcing_an_npc_runs_gameplay_and_hooks() {
+        let (mut engine, admin, _) = engine_with_api_token(&[Scope::Admin]);
+
+        // Two rooms joined by a north exit, and an NPC standing in room A whose
+        // room defines a `cmd_wave` hook that marks the actor.
+        let a = engine.world.next_dbref();
+        let mut room_a = GameObject::new(&a, "rooma", Kind::Room);
+        crate::softcode::hooks::set_script(
+            &mut room_a,
+            "function cmd_wave(this, actor, room, args)\n  set_attr(actor, \"waved\", true)\nend\n"
+                .to_string(),
+        );
+        engine.world.add_object(room_a);
+        let b = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&b, "roomb", Kind::Room));
+        let exit = engine.world.next_dbref();
+        engine.world.add_object(
+            GameObject::new(&exit, "north", Kind::Exit).with_location(&a).with_target(&b),
+        );
+        let npc = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&npc, "goblin", Kind::Npc).with_location(&a));
+
+        // Force the NPC to run a game cmd_ hook (on the room, since dispatch
+        // excludes the actor's own hooks) — it runs with the NPC as actor.
+        let waved = engine.handle_api_request(
+            ApiRequest::RunCommandAs { ref_id: npc.clone(), command: "wave".into() },
+            Some(admin.clone()),
+        );
+        assert!(waved.ok, "{:?}", waved.error);
+        assert_eq!(
+            engine.world.get(&npc).unwrap().attrs.get("waved"),
+            Some(&serde_json::json!(true)),
+            "the room's cmd_wave should have fired with the NPC as actor"
+        );
+
+        // Force the NPC to walk north — its location actually changes.
+        let moved = engine.handle_api_request(
+            ApiRequest::RunCommandAs { ref_id: npc.clone(), command: "go north".into() },
+            Some(admin.clone()),
+        );
+        assert!(moved.ok, "{:?}", moved.error);
+        assert_eq!(
+            engine.world.get(&npc).unwrap().location_ref.as_deref(),
+            Some(b.as_str()),
+            "the forced NPC should have moved to room B"
+        );
+
+        // The `@`-gate still holds for NPC targets.
+        let gated = engine.handle_api_request(
+            ApiRequest::RunCommandAs { ref_id: npc.clone(), command: "@grant admin bob".into() },
+            Some(admin.clone()),
+        );
+        assert!(!gated.ok);
+        assert!(gated.error.as_deref().unwrap().contains("cannot be forced"));
+
+        // A non-player/non-npc target (an item) is still refused.
+        let item = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&item, "rock", Kind::Item));
+        let bad = engine.handle_api_request(
+            ApiRequest::RunCommandAs { ref_id: item, command: "go north".into() },
+            Some(admin),
+        );
+        assert!(!bad.ok);
+        assert_eq!(bad.error.as_deref(), Some("Target is not a player or NPC"));
     }
 
     // -- @import / @export (Stage 4) --
