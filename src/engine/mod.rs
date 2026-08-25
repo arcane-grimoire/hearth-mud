@@ -135,6 +135,11 @@ pub enum ApiRequest {
     SetLib { ref_id: String, name: String, source: String },
     /// Remove a lib module by bare `<name>`.
     RemoveLib { ref_id: String, name: String },
+    /// Create a new standalone library: find-or-create a `Kind::Code` host for
+    /// `<name>` and seed a starter module — the builder-facing, file-free
+    /// counterpart of `@lib`. Refuses an existing name (edit it via `set_lib`).
+    /// Returns `{ ref_id, name }`.
+    CreateLibrary { name: String },
     /// An object's lib modules: `[{ name, source }]`.
     ListLibs { ref_id: String },
     /// Compile-check Luau without running or saving it — the linter backend
@@ -1735,6 +1740,22 @@ impl Engine {
                     None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
                 }
             }
+            ApiRequest::CreateLibrary { name } => {
+                if self.find_lib_object_ref(&name).is_some() {
+                    return ApiResponse::error(format!(
+                        "A library named '{}' already exists — open it to edit.",
+                        name
+                    ));
+                }
+                let starter =
+                    format!("-- {name} library — loaded with require(\"{name}\")\nlocal M = {{}}\n\nreturn M\n");
+                match self.upsert_library(&name, &starter) {
+                    Ok((ref_id, _)) => {
+                        ApiResponse::success(serde_json::json!({ "ref_id": ref_id, "name": name }))
+                    }
+                    Err(e) => ApiResponse::error(e),
+                }
+            }
             ApiRequest::ListLibs { ref_id } => {
                 match self.world.get(&ref_id) {
                     Some(obj) => {
@@ -1954,6 +1975,7 @@ impl Engine {
                             "has_script": hooks::has_authored_script(o),
                             "hooks": hooks,
                             "libs": libs,
+                            "locked": Self::is_object_locked(o),
                         })
                     })
                     .collect();
@@ -5083,20 +5105,32 @@ impl Engine {
         if name.is_empty() || source.is_empty() {
             return "Usage: @lib <name> = <luau source>\r\n".to_string();
         }
+        match self.upsert_library(name, source) {
+            Ok((_, true)) => format!("Library '{}' created — require(\"{}\").\r\n", name, name),
+            Ok((_, false)) => format!("Library '{}' updated.\r\n", name),
+            Err(e) => format!("{}\r\n", e),
+        }
+    }
+
+    /// Find-or-create the `Kind::Code` host for library `name` and set its
+    /// source. Shared by the telnet `@lib` command and the REST `create_library`
+    /// action, so both take the same guards: no shipped-module collision, valid
+    /// syntax, and a locked host is refused. Returns `(host ref, was_created)`.
+    fn upsert_library(&mut self, name: &str, source: &str) -> Result<(String, bool), String> {
         if self.softcode.is_shipped_module(name) {
-            return format!(
-                "'{}' is a shipped module — choose a different name.\r\n",
+            return Err(format!(
+                "'{}' is a shipped module — choose a different name.",
                 name
-            );
+            ));
         }
         if let Err(e) = self.softcode.check_syntax(source) {
-            return format!("Syntax error: {}\r\n", e);
+            return Err(format!("Syntax error: {}", e));
         }
         let existing_ref = self.find_lib_object_ref(name);
         if let Some(r) = &existing_ref
             && self.is_ref_locked(r)
         {
-            return format!("{}\r\n", Self::locked_error(r));
+            return Err(Self::locked_error(r));
         }
         let is_new = existing_ref.is_none();
         let ref_id = existing_ref.unwrap_or_else(|| {
@@ -5107,11 +5141,7 @@ impl Engine {
         let obj = self.world.get_mut(&ref_id).unwrap();
         hooks::set_lib(obj, name, source.to_string(), hooks::ProgramOrigin::InGame);
         self.softcode.invalidate_module_cache();
-        if is_new {
-            format!("Library '{}' created — require(\"{}\").\r\n", name, name)
-        } else {
-            format!("Library '{}' updated.\r\n", name)
-        }
+        Ok((ref_id, is_new))
     }
 
     fn cmd_libs(&self, session_id: &str) -> String {
@@ -9934,6 +9964,32 @@ end
         let inst_resp = api_call(&tx, ApiRequest::Examine { ref_id: inst.clone() }).await;
         assert_eq!(inst_resp.data.unwrap()["archetype_ref"].as_str(), Some(base.as_str()),
             "the locked instance still delegates — it was not flattened");
+
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    /// `create_library` (the builder-facing, file-free `@lib`) creates a
+    /// require()able module and refuses a duplicate name.
+    #[tokio::test]
+    async fn create_library_makes_a_module_and_refuses_duplicates() {
+        let (tx, handle) = test_engine().await;
+
+        let resp = api_call(&tx, ApiRequest::CreateLibrary { name: "myutils".into() }).await;
+        assert!(resp.ok, "create_library succeeds");
+        let ref_id = resp.data.unwrap()["ref_id"].as_str().unwrap().to_string();
+
+        // The host object carries the lib module.
+        let libs = api_call(&tx, ApiRequest::ListLibs { ref_id: ref_id.clone() }).await;
+        let arr = libs.data.unwrap();
+        assert!(
+            arr.as_array().unwrap().iter().any(|m| m["name"] == "myutils"),
+            "the created host carries the 'myutils' module"
+        );
+
+        // Creating the same name again is refused (edit it via set_lib instead).
+        let dup = api_call(&tx, ApiRequest::CreateLibrary { name: "myutils".into() }).await;
+        assert!(!dup.ok, "duplicate library name refused");
 
         drop(tx);
         let _ = handle.await;

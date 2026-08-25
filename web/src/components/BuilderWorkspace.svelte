@@ -120,6 +120,7 @@
   });
 
   let maps = $state([]); // named tile/terrain maps (Mapwright), each opens as a tab
+  let libraries = $state([]); // require()able lib modules, each opens as a lib tab
 
   let finderOpen = $state(false);
   let sidebarOpen = $state(true);
@@ -183,7 +184,8 @@
       api('list_objects_full', { limit: 3000 }),
       api('list_programs_all'),
     ]);
-    const progById = new Map((progRes?.ok ? progRes.data : []).map((e) => [e.ref_id, e]));
+    const progData = progRes?.ok ? progRes.data : [];
+    const progById = new Map(progData.map((e) => [e.ref_id, e]));
     const list = objRes?.ok ? (objRes.data?.objects || []) : [];
     truncated = objRes?.ok ? !!objRes.data?.truncated : false;
     objects = list.map((o) => {
@@ -191,7 +193,33 @@
       // area already on o, from _file_key; script/lib info from list_programs_all
       return { ...o, hooks: p?.hooks || [], has_script: !!p?.has_script, libs: p?.libs || [] };
     });
+    // require()able libraries live on Kind::Code hosts (excluded from the object
+    // list), so derive them from list_programs_all, which includes any lib host.
+    libraries = progData
+      .flatMap((e) => (e.libs || []).map((name) => ({ ref_id: e.ref_id, name, locked: !!e.locked })))
+      .sort((a, b) => a.name.localeCompare(b.name));
     loading = false;
+  }
+
+  // Inline "new library" creator (no file access — a builder authors a
+  // require()able module from here; the engine auto-creates the Code host).
+  let newLibOpen = $state(false);
+  let newLibName = $state('');
+  let creatingLib = $state(false);
+  async function createLibrary() {
+    const name = newLibName.trim();
+    if (!name) return;
+    creatingLib = true;
+    const res = await api('create_library', { name });
+    creatingLib = false;
+    if (res?.ok) {
+      newLibName = '';
+      newLibOpen = false;
+      await loadObjects();
+      openLibTab(res.data.ref_id, res.data.name);
+    } else {
+      showFlash(res?.error || 'Could not create the library', { tone: 'danger' });
+    }
   }
 
   const hasCode = (o) => o.has_script || o.hooks?.length || o.libs?.length;
@@ -374,6 +402,18 @@
         </div>
       {/if}
 
+      {#if newLibOpen}
+        <div class="new-form">
+          <div class="nf-hint">New library — authored here, no file access. Loaded with <code>require("name")</code>.</div>
+          <input class="nf-in" placeholder="library name (e.g. combat)" bind:value={newLibName}
+            onkeydown={(e) => e.key === 'Enter' && createLibrary()} />
+          <div class="nf-actions">
+            <button class="nf-go" disabled={creatingLib || !newLibName.trim()} onclick={createLibrary}>{creatingLib ? '…' : 'Create'}</button>
+            <button class="nf-x" onclick={() => { newLibOpen = false; newLibName = ''; }}>Cancel</button>
+          </div>
+        </div>
+      {/if}
+
       <div class="views">
         <button class="view-btn" onclick={() => openTab({ type: 'table' })} title="Object table"><TableIcon size={13} /> Table</button>
         <button class="view-btn" onclick={() => openTab({ type: 'map' })} title="Room map (connectivity)"><MapIcon size={13} /> Map</button>
@@ -403,10 +443,14 @@
             activeHook={activeTab?.type === 'code' ? activeTab.hook : null}
             maps={maps}
             activeMap={activeTab?.type === 'maps' ? activeTab.name : null}
+            libraries={libraries}
+            activeLib={activeTab?.type === 'lib' ? activeTab.name : null}
             onselect={openObject}
             onopenhook={openHookTab}
             onopenmap={(m) => openTab({ type: 'maps', name: m })}
             onnewmap={() => openTab({ type: 'maps' })}
+            onopenlib={openLibTab}
+            onnewlib={() => (newLibOpen = true)}
           />
           {#if truncated}
             <div class="ex-trunc" role="status">Showing the first {objects.length} objects — filter to find the rest.</div>

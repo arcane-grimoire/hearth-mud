@@ -3,6 +3,8 @@
   import FolderIcon from '@lucide/svelte/icons/folder';
   import FileCodeIcon from '@lucide/svelte/icons/file-code';
   import Grid3x3Icon from '@lucide/svelte/icons/grid-3x3';
+  import PackageIcon from '@lucide/svelte/icons/package';
+  import LockIcon from '@lucide/svelte/icons/lock';
   import PlusIcon from '@lucide/svelte/icons/plus';
   import { Tooltip } from '@kenn-io/kit-ui';
 
@@ -16,13 +18,18 @@
     activeHook = null,
     maps = [],
     activeMap = null,
+    libraries = [],
+    activeLib = null,
     onselect = () => {},
     onopenhook = () => {},
     onopenmap = () => {},
     onnewmap = () => {},
+    onopenlib = () => {},
+    onnewlib = () => {},
   } = $props();
 
   let mapsOpen = $state(true);
+  let libsOpen = $state(true);
 
   // Objects grouped into area "folders", each sorted by name.
   const grouped = $derived.by(() => {
@@ -96,6 +103,28 @@
       </button>
     {/each}
     {#if maps.length === 0}<div class="none sub">No maps yet</div>{/if}
+  {/if}
+
+  <!-- Libraries folder — require()able lib modules, authored in-world (no file
+       access), alongside object areas and maps. -->
+  <div class="area maps-folder">
+    <button class="area-btn" onclick={() => (libsOpen = !libsOpen)}>
+      <span class="chev" class:open={libsOpen}><ChevronRight size={12} /></span>
+      <FolderIcon size={13} />
+      <span class="area-name">Libraries</span>
+      <span class="area-count">{libraries.length}</span>
+    </button>
+    <Tooltip text="New library" align="end"><button class="area-add" aria-label="New library" onclick={onnewlib}><PlusIcon size={12} /></button></Tooltip>
+  </div>
+  {#if libsOpen}
+    {#each libraries as lib (lib.ref_id + ':' + lib.name)}
+      <button class="map-leaf" class:active={lib.name === activeLib} onclick={() => onopenlib(lib.ref_id, lib.name)}>
+        <PackageIcon size={12} />
+        <span class="hook-name">{lib.name}</span>
+        {#if lib.locked}<Tooltip text="Locked (file-authoritative)"><LockIcon size={10} /></Tooltip>{/if}
+      </button>
+    {/each}
+    {#if libraries.length === 0}<div class="none sub">No libraries yet</div>{/if}
   {/if}
 
   {#each grouped as [area, objs]}
