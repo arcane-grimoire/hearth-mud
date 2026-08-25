@@ -143,7 +143,7 @@ web/                   Svelte 5 + Vite web client
                        (⌘K), consumed by the unified workspace
 docs/
   adr/                 6 architectural decision records (ADR 0001–0006)
-  plans/               Pending/in-progress design docs (dbref migration, attribute schemas, client map integration)
+  plans/               Pending/in-progress design docs (archetype traits + live debugger, terrain attr schemas, Mudlet/GMCP client map integration)
   audits/              Point-in-time code/design audits
   archetypes.md        Archetypes guide (is-a delegation, file-based types, hot-reload)
   commands.md          Command reference
