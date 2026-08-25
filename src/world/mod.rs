@@ -128,7 +128,7 @@ impl World {
     /// Bounded and cycle-safe: a chain longer than [`MAX_ARCHETYPE_DEPTH`] or
     /// one that revisits a ref (a malformed chain that slipped past the
     /// `apply_batch` cycle guard) stops rather than looping forever.
-    fn archetype_ancestors(&self, obj: &GameObject) -> Vec<&GameObject> {
+    pub(crate) fn archetype_ancestors(&self, obj: &GameObject) -> Vec<&GameObject> {
         let mut out = Vec::new();
         let mut next = obj.archetype_ref.clone();
         let mut visited: HashSet<String> = HashSet::new();

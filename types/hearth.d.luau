@@ -242,6 +242,12 @@ declare function unset_tag(ref: ObjectRef, spec: string): ()
 --- Set an object's owner. Errors if the owner ref doesn't exist.
 declare function set_owner(ref: ObjectRef, owner: ObjectRef): ()
 
+--- Point an object at an existing archetype (or nil to clear the delegation).
+--- The object then inherits the archetype's title/description/attrs/tags/script
+--- where it has no value of its own. Reparents to an existing object; it does
+--- not create a new archetype. See docs/plans/archetypes.md.
+declare function set_archetype(ref: ObjectRef, archetype: ObjectRef?): ()
+
 --- Change an object's display name.
 declare function set_title(ref: ObjectRef, title: string): ()
 

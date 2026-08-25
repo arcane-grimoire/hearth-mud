@@ -21,7 +21,18 @@
     onchanged = () => {},
   } = $props();
 
-  const hooks = $derived([...(obj?.hooks || [])].sort());
+  // resolved_hooks carries every hook the object responds to (own + inherited)
+  // with the ref each resolves from ("own", or an ancestor ref). Fall back to
+  // the plain own-hook list when the examine payload predates that field.
+  const resolvedHooks = $derived(obj?.resolved_hooks || []);
+  const hooks = $derived(
+    resolvedHooks.length
+      ? resolvedHooks.filter((h) => h.source === 'own').map((h) => h.hook).sort()
+      : [...(obj?.hooks || [])].sort(),
+  );
+  const inheritedHooks = $derived(
+    resolvedHooks.filter((h) => h.source !== 'own').sort((a, b) => a.hook.localeCompare(b.hook)),
+  );
   const libs = $derived([...(obj?.libs || [])].sort());
   const isCode = $derived(obj?.kind === 'code' || libs.length > 0);
 
@@ -103,6 +114,19 @@
     {:else}
       <div class="none">No script yet. Add a hook above to start one.</div>
     {/if}
+
+    {#if inheritedHooks.length}
+      <div class="inh-lbl">Inherited<span class="inh-hint">click to override here</span></div>
+      <div class="list">
+        {#each inheritedHooks as h}
+          <button class="row inh" title={`Defined by ${h.source} — click to override it on this object`} onclick={() => onopen(h.hook)}>
+            <FileCodeIcon size={13} />
+            <span class="name">{h.hook}</span>
+            <span class="src">{h.source}</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
   </section>
 
   {#if isCode}
@@ -162,6 +186,15 @@
 
   .open-all { align-self: flex-start; background: none; border: none; color: var(--accent-amber, #c9956b); cursor: pointer; font: inherit; font-size: 12px; padding: 2px 0; }
   .open-all:hover { text-decoration: underline; }
+
+  /* Hooks the object inherits from its archetype — muted, tagged with their
+     source ref. Clicking seeds a stub here, overriding the inherited one. */
+  .inh-lbl { display: flex; align-items: baseline; gap: 6px; margin-top: 4px; font-size: var(--fs-label); font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted, #8c8378); }
+  .inh-hint { font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 11px; color: var(--text-muted, #8c8378); }
+  .row.inh { color: var(--text-muted, #8c8378); }
+  .row.inh .name { flex: 1; opacity: 0.85; }
+  .row.inh .src { color: var(--text-muted, #8c8378); font-size: 11px; }
+  .row.inh :global(svg) { color: var(--text-muted, #8c8378); opacity: 0.7; }
 
   .lib-add { display: flex; align-items: center; gap: 6px; }
   .lib-add :global(svg) { color: var(--accent-green, #8fb877); flex: none; }

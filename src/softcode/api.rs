@@ -1547,6 +1547,23 @@ pub fn install<'scope, 'env>(
     )?;
 
     let b = Rc::clone(&batch);
+    env.set(
+        "set_archetype",
+        // Point `ref` at an existing archetype, or clear it with nil. Reparents
+        // to an existing object — it does not create a new archetype.
+        scope.create_function(move |_, (r, arch): (Value, Value)| {
+            let target = ref_of(&r)?;
+            let archetype = match arch {
+                Value::Nil => None,
+                other => Some(ref_of(&other)?),
+            };
+            b.borrow_mut()
+                .push(Intent::SetArchetype { target, archetype });
+            Ok(())
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
     let dbref = Rc::clone(&dbref_counter);
     env.set(
         "create_exit",

@@ -106,6 +106,12 @@ pub enum Intent {
     Detach {
         target: String,
     },
+    /// Point `target` at an existing archetype (or clear it with `None`).
+    /// Reparenting to an existing object — never creates a new archetype.
+    SetArchetype {
+        target: String,
+        archetype: Option<String>,
+    },
     CreateExit {
         ref_id: String,
         source: String,
@@ -759,6 +765,28 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                     return Err(refuse("clone", target));
                 }
                 detach_object(world, target)?;
+            }
+            Intent::SetArchetype { target, archetype } => {
+                if !may_modify(world, authority, target) {
+                    return Err(refuse("set_archetype", target));
+                }
+                if world.get(target).is_none() {
+                    return Err(format!("set_archetype: no object '{}'", target));
+                }
+                if let Some(a) = archetype {
+                    if world.get(a).is_none() {
+                        return Err(format!("set_archetype: no archetype '{}'", a));
+                    }
+                    if world.would_cycle_archetype(target, a) {
+                        return Err(format!(
+                            "set_archetype: '{}' would create a cycle",
+                            a
+                        ));
+                    }
+                }
+                if let Some(obj) = world.get_mut(target) {
+                    obj.archetype_ref = archetype.clone();
+                }
             }
             Intent::CreateExit { ref_id, source, direction, target, aliases } => {
                 if at_object_quota(world, authority) {

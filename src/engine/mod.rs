@@ -116,6 +116,12 @@ pub enum ApiRequest {
     SetScript { ref_id: String, source: String },
     /// Remove an object's script entirely.
     ClearScript { ref_id: String },
+    /// Point an object at an existing archetype (or clear it with null).
+    /// Reparents to an existing object; does not create a new archetype.
+    SetArchetype { ref_id: String, archetype_ref: Option<String> },
+    /// Flatten an instance off its archetype (copy resolved fields/script down,
+    /// clear the delegation) — the REST counterpart of softcode `clone`.
+    DetachObject { ref_id: String },
     /// An object's script: `{ source, hooks: [..], enabled }` (or null).
     GetScript { ref_id: String },
     /// Set a `require`able lib module on a `Kind::Code` object, keyed by bare
@@ -1277,18 +1283,117 @@ impl Engine {
                             .unwrap_or_default();
                         let lib_names: Vec<String> = obj.libs.keys().cloned().collect();
                         let locks: &HashMap<String, String> = &obj.locks;
+
+                        // Archetype summary (the direct parent), if any.
+                        let archetype = obj
+                            .archetype_ref
+                            .as_deref()
+                            .and_then(|a| self.world.get(a))
+                            .map(|anc| serde_json::json!({
+                                "ref_id": anc.ref_id,
+                                "title": self.world.resolved_title(anc),
+                            }));
+
+                        // Per-attr provenance: own value wins, else the nearest
+                        // ancestor that supplies the key (nearest-first walk).
+                        // Own attrs are marked `overrides` when an ancestor also
+                        // defines the key (so the builder can offer "revert to
+                        // inherited").
+                        let ancestors = self.world.archetype_ancestors(obj);
+                        let ancestor_keys: std::collections::HashSet<&String> =
+                            ancestors.iter().flat_map(|a| a.attrs.keys()).collect();
+                        let mut resolved_attrs = serde_json::Map::new();
+                        for (k, v) in &obj.attrs {
+                            resolved_attrs.insert(
+                                k.clone(),
+                                serde_json::json!({
+                                    "value": v,
+                                    "source": "own",
+                                    "overrides": ancestor_keys.contains(k),
+                                }),
+                            );
+                        }
+                        for anc in &ancestors {
+                            for (k, v) in &anc.attrs {
+                                resolved_attrs.entry(k.clone()).or_insert_with(|| {
+                                    serde_json::json!({ "value": v, "source": anc.ref_id })
+                                });
+                            }
+                        }
+
+                        // Per-hook origin: every hook the object responds to
+                        // (own + inherited), with the ref it resolves from.
+                        let mut resolved_hooks: Vec<serde_json::Value> =
+                            hooks::resolve_hook_names(&self.world, obj)
+                                .into_iter()
+                                .filter_map(|hook| {
+                                    hooks::resolve_script(&self.world, obj, &hook).map(|(_, src)| {
+                                        let source = if src == obj.ref_id { "own".to_string() } else { src.to_string() };
+                                        serde_json::json!({ "hook": hook, "source": source })
+                                    })
+                                })
+                                .collect();
+                        resolved_hooks.sort_by(|a, b| a["hook"].as_str().cmp(&b["hook"].as_str()));
+
+                        // How many objects delegate directly to this one.
+                        let instance_count = self
+                            .world
+                            .objects
+                            .values()
+                            .filter(|o| o.archetype_ref.as_deref() == Some(obj.ref_id.as_str()))
+                            .count();
+
+                        // Effective (chain-resolved) title/description, so a pure
+                        // delegate that sets neither still shows the inherited
+                        // values in the builder rather than a blank field.
+                        let resolved_title = self.world.resolved_title(obj);
+                        let resolved_description = self.world.resolved_description(obj);
+
+                        // Per-tag provenance: own tags first ("own"), then each
+                        // ancestor (nearest first) contributes any tag not
+                        // already seen. Tags are a union up the chain.
+                        let mut resolved_tags: Vec<serde_json::Value> = Vec::new();
+                        let mut seen_tags: std::collections::HashSet<String> =
+                            std::collections::HashSet::new();
+                        for t in &obj.tags {
+                            let spec = t.as_spec();
+                            if seen_tags.insert(spec.clone()) {
+                                resolved_tags
+                                    .push(serde_json::json!({ "tag": spec, "source": "own" }));
+                            }
+                        }
+                        for anc in &ancestors {
+                            for t in &anc.tags {
+                                let spec = t.as_spec();
+                                if seen_tags.insert(spec.clone()) {
+                                    resolved_tags.push(serde_json::json!({
+                                        "tag": spec,
+                                        "source": anc.ref_id,
+                                    }));
+                                }
+                            }
+                        }
+
                         ApiResponse::success(serde_json::json!({
                             "ref_id": obj.ref_id,
                             "key": obj.key,
                             "kind": obj.kind.to_string(),
                             "title": obj.title,
+                            "resolved_title": resolved_title,
                             "description": obj.description,
+                            "resolved_description": resolved_description,
                             "location_ref": obj.location_ref,
                             "target_ref": obj.target_ref,
+                            "archetype_ref": obj.archetype_ref,
+                            "archetype": archetype,
+                            "instance_count": instance_count,
                             "attrs": obj.attrs,
+                            "resolved_attrs": resolved_attrs,
                             "tags": tags,
+                            "resolved_tags": resolved_tags,
                             "has_script": hooks::has_authored_script(obj),
                             "hooks": hook_names,
+                            "resolved_hooks": resolved_hooks,
                             "libs": lib_names,
                             "locks": locks,
                             "aliases": obj.aliases.iter().collect::<Vec<_>>(),
@@ -1473,6 +1578,32 @@ impl Engine {
                         ApiResponse::ok()
                     }
                     None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
+            ApiRequest::SetArchetype { ref_id, archetype_ref } => {
+                if self.world.get(&ref_id).is_none() {
+                    return ApiResponse::error(format!("No object with ref '{}'", ref_id));
+                }
+                if let Some(a) = &archetype_ref {
+                    if self.world.get(a).is_none() {
+                        return ApiResponse::error(format!("No archetype with ref '{}'", a));
+                    }
+                    if self.world.would_cycle_archetype(&ref_id, a) {
+                        return ApiResponse::error(format!(
+                            "'{}' would create an archetype cycle",
+                            a
+                        ));
+                    }
+                }
+                if let Some(obj) = self.world.get_mut(&ref_id) {
+                    obj.archetype_ref = archetype_ref;
+                }
+                ApiResponse::ok()
+            }
+            ApiRequest::DetachObject { ref_id } => {
+                match softcode::detach_object(&mut self.world, &ref_id) {
+                    Ok(()) => ApiResponse::ok(),
+                    Err(e) => ApiResponse::error(e),
                 }
             }
             ApiRequest::GetScript { ref_id } => {
@@ -6435,6 +6566,10 @@ fn describe_intent(intent: &softcode::Intent, world: &World) -> String {
             }
         }
         Intent::Detach { target } => format!("clone/detach {}", label(target)),
+        Intent::SetArchetype { target, archetype } => match archetype {
+            Some(a) => format!("set archetype of {} to {}", label(target), label(a)),
+            None => format!("clear archetype of {}", label(target)),
+        },
         Intent::CreateExit { source, direction, target, .. } => {
             format!("exit '{}' from {} → {}", direction, label(source), label(target))
         }
@@ -7516,6 +7651,95 @@ mod tests {
             "same-run read after clear_attr must see the inherited value, not nil: {}",
             out
         );
+    }
+
+    #[test]
+    fn examine_reports_archetype_delegation_and_instance_count() {
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
+        let arch = engine.world.next_dbref();
+        let mut a = GameObject::new(&arch, "goblin", Kind::Npc).with_title("Goblin");
+        a.description = "A snarling goblin.".into();
+        a.attrs.insert("armor".into(), serde_json::json!(2));
+        a.tags.insert(Tag::parse("kind:monster").unwrap());
+        hooks::set_script(&mut a, "function on_look(this, actor, room) end".to_string());
+        engine.world.add_object(a);
+
+        // A pure delegate: no own title or description, one own tag.
+        let inst = engine.world.next_dbref();
+        let mut i = GameObject::new(&inst, "grunt", Kind::Npc);
+        i.archetype_ref = Some(arch.clone());
+        i.attrs.insert("hp".into(), serde_json::json!(3)); // own
+        i.tags.insert(Tag::parse("faction:raiders").unwrap());
+        hooks::set_script(&mut i, "function on_death(this, actor, room) end".to_string());
+        engine.world.add_object(i);
+
+        let ex = engine
+            .handle_api_request(ApiRequest::Examine { ref_id: inst.clone() }, Some(token.clone()))
+            .data
+            .unwrap();
+        assert_eq!(ex["archetype_ref"].as_str(), Some(arch.as_str()));
+        assert_eq!(ex["archetype"]["title"].as_str(), Some("Goblin"));
+        // per-attr provenance
+        assert_eq!(ex["resolved_attrs"]["hp"]["source"].as_str(), Some("own"));
+        assert_eq!(ex["resolved_attrs"]["armor"]["source"].as_str(), Some(arch.as_str()));
+        assert_eq!(ex["resolved_attrs"]["armor"]["value"], serde_json::json!(2));
+        // per-hook origin
+        let hooks_v = ex["resolved_hooks"].as_array().unwrap();
+        let find = |h: &str| hooks_v.iter().find(|e| e["hook"] == h).map(|e| e["source"].as_str().unwrap().to_string());
+        assert_eq!(find("on_death").as_deref(), Some("own"));
+        assert_eq!(find("on_look").as_deref(), Some(arch.as_str()));
+
+        // Effective title/description come from the archetype (own is unset).
+        assert!(ex["title"].is_null());
+        assert_eq!(ex["resolved_title"].as_str(), Some("Goblin"));
+        assert_eq!(ex["description"].as_str(), Some(""));
+        assert_eq!(ex["resolved_description"].as_str(), Some("A snarling goblin."));
+
+        // Per-tag provenance: own tag "own", inherited tag names the ancestor.
+        let tags_v = ex["resolved_tags"].as_array().unwrap();
+        let tag_src = |t: &str| tags_v.iter().find(|e| e["tag"] == t).map(|e| e["source"].as_str().unwrap().to_string());
+        assert_eq!(tag_src("faction:raiders").as_deref(), Some("own"));
+        assert_eq!(tag_src("kind:monster").as_deref(), Some(arch.as_str()));
+
+        // instance_count on the archetype
+        let exa = engine
+            .handle_api_request(ApiRequest::Examine { ref_id: arch.clone() }, Some(token.clone()))
+            .data
+            .unwrap();
+        assert_eq!(exa["instance_count"].as_u64(), Some(1));
+    }
+
+    #[test]
+    fn set_archetype_sets_refuses_cycle_and_clears() {
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
+        let arch = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&arch, "goblin", Kind::Npc).with_title("Goblin"));
+        let inst = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&inst, "grunt", Kind::Npc));
+
+        // set
+        let r = engine.handle_api_request(
+            ApiRequest::SetArchetype { ref_id: inst.clone(), archetype_ref: Some(arch.clone()) },
+            Some(token.clone()),
+        );
+        assert!(r.ok, "{:?}", r.error);
+        assert_eq!(engine.world.get(&inst).unwrap().archetype_ref.as_deref(), Some(arch.as_str()));
+
+        // cycle refused (arch -> inst, while inst -> arch)
+        let r = engine.handle_api_request(
+            ApiRequest::SetArchetype { ref_id: arch.clone(), archetype_ref: Some(inst.clone()) },
+            Some(token.clone()),
+        );
+        assert!(!r.ok && r.error.unwrap().contains("cycle"));
+        assert_eq!(engine.world.get(&arch).unwrap().archetype_ref, None);
+
+        // clear
+        let r = engine.handle_api_request(
+            ApiRequest::SetArchetype { ref_id: inst.clone(), archetype_ref: None },
+            Some(token),
+        );
+        assert!(r.ok);
+        assert_eq!(engine.world.get(&inst).unwrap().archetype_ref, None);
     }
 
     /// Two-level chain: a child's `on_death` runs, calls `pass()`, and the

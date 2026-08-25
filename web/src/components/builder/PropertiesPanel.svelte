@@ -17,6 +17,7 @@
   let newAttrValue = $state('');
   let newTag = $state('');
   let newAlias = $state('');
+  let archDraft = $state('');   // ref to delegate to (set/change archetype)
 
   // Kind-specific editable state, reseeded whenever the panel points at a
   // different object (examine returns fresh data after each onchanged()).
@@ -34,6 +35,7 @@
       moveDest = '';
       confirmDelete = false;
       descDraft = obj.description || '';
+      archDraft = '';
     }
   });
 
@@ -46,6 +48,34 @@
   // the object's own attributes stay in the open.
   const userAttrs = $derived(sortedAttrs.filter((k) => !k.startsWith('_')));
   const sysAttrs = $derived(sortedAttrs.filter((k) => k.startsWith('_')));
+
+  // Delegation: resolved_attrs carries per-attr provenance {value, source,
+  // overrides}. `source === 'own'` means this object holds the value; any other
+  // source is the ancestor ref it's inherited from. `overrides` flags an own
+  // value that shadows an inherited one (so we can offer "revert to inherited").
+  const resolved = $derived(obj?.resolved_attrs || {});
+  const inheritedAttrs = $derived(
+    Object.keys(resolved)
+      .filter((k) => resolved[k]?.source !== 'own' && !k.startsWith('_'))
+      .sort(),
+  );
+  function overridesInherited(key) { return resolved[key]?.overrides === true; }
+
+  // Title/description/tags can also be inherited. `title` is the object's OWN
+  // title (null when unset); `resolved_title` is the effective value up the
+  // chain. When own is unset but a resolved value exists, show it muted so the
+  // builder reflects what a player actually sees — editing still writes an own
+  // override via the same set_title/set_description.
+  const ownTitle = $derived(obj?.title ?? '');
+  const inheritedTitle = $derived(!ownTitle && obj?.resolved_title ? obj.resolved_title : '');
+  const ownDesc = $derived(obj?.description ?? '');
+  const inheritedDesc = $derived(!ownDesc.trim() && obj?.resolved_description ? obj.resolved_description : '');
+  // Tags split into own (editable/removable) vs inherited (from the archetype,
+  // shown muted, not removable here).
+  const resolvedTags = $derived(obj?.resolved_tags || []);
+  const ownTags = $derived(resolvedTags.filter((t) => t.source === 'own').map((t) => t.tag));
+  const ownTagList = $derived(resolvedTags.length ? ownTags : (obj?.tags || []));
+  const inheritedTags = $derived(resolvedTags.filter((t) => t.source !== 'own'));
 
   async function setTitle(e) {
     const res = await api('set_title', { ref_id: obj.ref_id, title: e.target.value });
@@ -92,6 +122,28 @@
     if (e.key === 'Escape') editingAttr = null;
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveAttr(key); }
   }
+  // Copy an inherited value down as an own attribute so it can be edited here;
+  // the reverse ("Revert") is just deleteAttr, which drops the own value and
+  // lets the inherited one show through again.
+  async function overrideAttr(key) {
+    const value = resolved[key]?.value ?? null;
+    const res = await api('set_attribute', { ref_id: obj.ref_id, key, value });
+    res.ok ? onchanged() : showFlash(res.error || 'Could not override the attribute', { tone: 'danger' });
+  }
+
+  // Archetype delegation — point this object at another (inherit its
+  // title/attrs/tags/hooks) or flatten the chain and stop delegating.
+  async function setArchetype() {
+    const ref = archDraft.trim();
+    if (!ref) return;
+    const res = await api('set_archetype', { ref_id: obj.ref_id, archetype_ref: ref });
+    if (res.ok) { archDraft = ''; onchanged(); }
+    else showFlash(res.error || 'Could not set the archetype', { tone: 'danger' });
+  }
+  async function detachObject() {
+    const res = await api('detach_object', { ref_id: obj.ref_id });
+    res.ok ? onchanged() : showFlash(res.error || 'Could not detach the object', { tone: 'danger' });
+  }
 
   // Aliases — the whole set is replaced on every change (set_aliases).
   async function addAlias() {
@@ -137,11 +189,13 @@
     <section>
       <h3>Identity</h3>
       <label class="fl">Title
-        <input type="text" class="fi" value={obj.title || ''} onchange={setTitle} />
+        <input type="text" class="fi" class:inh-field={inheritedTitle} value={obj.title || ''} placeholder={inheritedTitle} onchange={setTitle} />
       </label>
+      {#if inheritedTitle}<div class="inh-note">inherited from {obj.archetype?.title || obj.archetype_ref} — type to override</div>{/if}
       <label class="fl">Description
-        <textarea class="ft" rows="4" bind:value={descDraft} onchange={setDescription}></textarea>
+        <textarea class="ft" class:inh-field={inheritedDesc} rows="4" bind:value={descDraft} placeholder={inheritedDesc} onchange={setDescription}></textarea>
       </label>
+      {#if inheritedDesc}<div class="inh-note">inherited from {obj.archetype?.title || obj.archetype_ref} — type to override</div>{/if}
 
       {#if !isExit}
         <!-- The description is prose a player reads; show it as they will, live,
@@ -150,9 +204,11 @@
         <div class="pview">
           <div class="pv-cap">Player's view</div>
           <div class="pv-screen">
-            <div class="pv-name">{obj.title || obj.key}</div>
+            <div class="pv-name">{obj.title || obj.resolved_title || obj.key}</div>
             {#if descDraft.trim()}
               <div class="pv-desc">{@html bbcodeToHtml(descDraft)}</div>
+            {:else if inheritedDesc}
+              <div class="pv-desc">{@html bbcodeToHtml(inheritedDesc)}</div>
             {:else}
               <div class="pv-none">No description yet — a player would see only the name.</div>
             {/if}
@@ -193,14 +249,44 @@
       </section>
     {/if}
 
+    {#if !isExit}
+      <section>
+        <h3>Archetype</h3>
+        <p class="hint">Delegate to another object to inherit its title, attributes, tags, and hooks. This object overrides only what it sets itself.</p>
+        {#if obj.archetype}
+          <div class="arch-cur">
+            <span class="arch-ico">▸</span>
+            <span class="arch-name">{obj.archetype.title || obj.archetype.ref_id}</span>
+            <span class="arch-ref">{obj.archetype.ref_id}</span>
+            <span style="flex:1"></span>
+            <Tooltip text="Copy inherited values down onto this object and stop delegating">
+              <Button size="sm" onclick={detachObject} label="Detach" />
+            </Tooltip>
+          </div>
+        {:else}
+          <div class="none">Not an instance — defines everything itself.</div>
+        {/if}
+        <div class="row">
+          <input class="mi" placeholder="delegate to a ref, e.g. #7" bind:value={archDraft} onkeydown={(e) => e.key === 'Enter' && setArchetype()} />
+          <Button size="sm" onclick={setArchetype} label={obj.archetype ? 'Change' : 'Set'} />
+        </div>
+        {#if obj.instance_count > 0}
+          <div class="inst">{obj.instance_count} object{obj.instance_count === 1 ? '' : 's'} delegate to this one.</div>
+        {/if}
+      </section>
+    {/if}
+
     <section>
       <h3>Tags</h3>
       <p class="hint">A <code>category:key</code> label — used by locks, queries, and behavior (e.g. <code>system:hidden</code>).</p>
       <div class="tags">
-        {#each obj.tags || [] as tag}
+        {#each ownTagList as tag}
           <span class="tag">{tag}<Tooltip text="Remove tag"><button aria-label="Remove tag" onclick={() => removeTag(tag)}>×</button></Tooltip></span>
         {/each}
-        {#if !(obj.tags || []).length}<span class="none">no tags</span>{/if}
+        {#each inheritedTags as t}
+          <Tooltip text={`Inherited from ${t.source} — remove it on the archetype`}><span class="tag inh-tag">{t.tag}<span class="src">{t.source}</span></span></Tooltip>
+        {/each}
+        {#if !ownTagList.length && !inheritedTags.length}<span class="none">no tags</span>{/if}
       </div>
       <div class="row">
         <input class="mi" placeholder="category:key" bind:value={newTag} onkeydown={(e) => e.key === 'Enter' && addTag()} />
@@ -230,8 +316,9 @@
           {#each userAttrs as key}
             {@const val = obj.attrs[key]}
             {@const disp = typeof val === 'object' ? JSON.stringify(val) : String(val)}
+            {@const ov = overridesInherited(key)}
             <tr>
-              <td class="ak">{key}</td>
+              <td class="ak">{key}{#if ov}<Tooltip text="Overrides an inherited value"><span class="ov">↑</span></Tooltip>{/if}</td>
               {#if editingAttr === key}
                 <td class="av"><textarea bind:value={editValue} onkeydown={(e) => attrKeydown(e, key)}></textarea></td>
                 <td class="aa"><button onclick={() => saveAttr(key)}>Save</button></td>
@@ -239,7 +326,11 @@
                 <td class="av" ondblclick={() => startEdit(key)} title="Double-click to edit">{disp}</td>
                 <td class="aa">
                   <button onclick={() => startEdit(key)}>Edit</button>
-                  <Tooltip text="Delete attribute"><button class="del" onclick={() => deleteAttr(key)}>Del</button></Tooltip>
+                  {#if ov}
+                    <Tooltip text="Revert to the inherited value"><button class="del" onclick={() => deleteAttr(key)}>Revert</button></Tooltip>
+                  {:else}
+                    <Tooltip text="Delete attribute"><button class="del" onclick={() => deleteAttr(key)}>Del</button></Tooltip>
+                  {/if}
                 </td>
               {/if}
             </tr>
@@ -247,6 +338,26 @@
           {#if !userAttrs.length}<tr><td colspan="3" class="none pad">No attributes</td></tr>{/if}
         </tbody>
       </table>
+
+      {#if inheritedAttrs.length}
+        <div class="inh-h">Inherited</div>
+        <table class="attrs">
+          <tbody>
+            {#each inheritedAttrs as key}
+              {@const r = resolved[key]}
+              {@const disp = typeof r.value === 'object' ? JSON.stringify(r.value) : String(r.value)}
+              <tr class="inh">
+                <td class="ak">{key}</td>
+                <td class="av">{disp}</td>
+                <td class="aa">
+                  <span class="src">{r.source}</span>
+                  <Tooltip text="Copy this value down as an own attribute you can edit"><button onclick={() => overrideAttr(key)}>Override</button></Tooltip>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
       <div class="row">
         <input class="mi kw" placeholder="key" bind:value={newAttrKey} />
         <input class="mi" placeholder="value (JSON or string)" bind:value={newAttrValue} onkeydown={(e) => e.key === 'Enter' && addAttr()} />
@@ -352,6 +463,26 @@
   .aa button:hover { color: var(--text-primary, #ece0c8); }
   .aa button.del:hover { color: var(--accent-red, #e06c75); }
   .ak.internal { color: var(--text-muted, #8c8378); }
+  /* Archetype delegation */
+  .arch-cur { display: flex; align-items: center; gap: 6px; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12.5px; }
+  .arch-ico { color: var(--accent-amber, #c9956b); }
+  .arch-name { color: var(--text-primary, #ece0c8); }
+  .arch-ref { color: var(--text-muted, #8c8378); font-size: 11px; }
+  .inst { font-size: var(--fs-meta); font-style: italic; color: var(--text-muted, #8c8378); }
+  /* Inherited title/description: the placeholder shows the effective value the
+     archetype supplies, tinted amber so it reads as a real inherited value
+     rather than a greyed-out hint. */
+  .inh-field::placeholder { color: color-mix(in srgb, var(--accent-amber, #c9956b) 60%, transparent); font-style: italic; opacity: 1; }
+  .inh-note { font-size: var(--fs-meta); font-style: italic; color: var(--text-muted, #8c8378); margin-top: -2px; }
+  /* Inherited tags read muted and carry their source ref; they can't be
+     removed here (they live on the archetype). */
+  .tag.inh-tag { opacity: 0.7; }
+  .tag.inh-tag .src { color: var(--text-muted, #8c8378); font-size: 10px; margin-left: 2px; }
+  /* Inherited attributes read muted; own values that shadow them get a ↑ mark. */
+  .inh-h { margin-top: 8px; font-size: var(--fs-label); font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted, #8c8378); }
+  tr.inh .ak, tr.inh .av { opacity: 0.7; }
+  .src { color: var(--text-muted, #8c8378); font-size: 11px; margin-right: 6px; }
+  .ov { color: var(--accent-amber, #c9956b); margin-left: 4px; cursor: help; }
   /* Point-of-use concept hints for the newcomer half of the audience. Muted and
      small so they read as help, not chrome; power users glide past them. */
   .hint { margin: -2px 0 2px; font-size: var(--fs-meta); line-height: 1.5; color: var(--text-muted, #8c8378); }
