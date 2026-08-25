@@ -28,7 +28,7 @@ use std::rc::Rc;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 use hearth_mud::map_template::MapTemplateFile;
-use hearth_mud::softcode::hooks::ProgramRecord;
+use hearth_mud::softcode::hooks::{self, ObjectScript};
 use hearth_mud::softcode::{apply_batch, Budget, ScheduledHook, SoftcodeRuntime};
 use hearth_mud::theme::Theme;
 use hearth_mud::world::{GameObject, Kind, Tag, World};
@@ -98,14 +98,24 @@ fn counter(world: &World) -> Rc<Cell<u64>> {
     Rc::new(Cell::new(world.next_id))
 }
 
+/// Builds an [`ObjectScript`] from `source` the way the engine does (via
+/// `hooks::set_script`, which derives the hook set from the parsed AST), so the
+/// benchmark exercises the same script model production runs.
+fn script(source: &str) -> ObjectScript {
+    let mut obj = GameObject::new("#5", "bench", Kind::Item);
+    hooks::set_script(&mut obj, source.to_string());
+    obj.script.expect("set_script installs a script")
+}
+
 /// Runs one hook against `world` and returns the resulting batch, panicking on
 /// any softcode error so a broken benchmark fails loudly instead of silently
-/// measuring an error path. `this`/`actor`/`room` are the standard sword/alice/
-/// room fixture refs.
+/// measuring an error path. The script's own object is the sword (`#5`), so
+/// `resolving_ref` and `this_ref` are both `#5` (no archetype); `actor` is
+/// alice (`#3`) and `room` is `#1`.
 fn run(
     runtime: &SoftcodeRuntime,
     world: &World,
-    program: &ProgramRecord,
+    script: &ObjectScript,
     themes: &HashMap<String, Theme>,
     maps: &HashMap<String, MapTemplateFile>,
     no_hooks: &[ScheduledHook],
@@ -113,7 +123,9 @@ fn run(
     runtime
         .run_hook(
             world,
-            program,
+            script,
+            "on_get",
+            "#5",
             "#5",
             "#3",
             Some("#1"),
@@ -150,7 +162,7 @@ fn softcode_benches(c: &mut Criterion) {
         b.iter(|| {
             n += 1;
             let source = format!("-- {n}\nfunction on_get(this, actor, room) end");
-            let program = ProgramRecord::new("on_get", source);
+            let program = script(&source);
             black_box(run(&runtime, &world, &program, &themes, &maps, &no_hooks));
         });
     });
@@ -160,7 +172,7 @@ fn softcode_benches(c: &mut Criterion) {
     // by *every* script, so it matters most.
     c.bench_function("dispatch_trivial", |b| {
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new("on_get", "function on_get(this, actor, room) end");
+        let program = script("function on_get(this, actor, room) end");
         // Prime the chunk cache so we measure warm dispatch, not first compile.
         run(&runtime, &world, &program, &themes, &maps, &no_hooks);
         b.iter(|| black_box(run(&runtime, &world, &program, &themes, &maps, &no_hooks)));
@@ -170,8 +182,7 @@ fn softcode_benches(c: &mut Criterion) {
     // every loop back-edge, so this isolates the per-interrupt overhead.
     c.bench_function("compute_loop", |b| {
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
-            "on_get",
+        let program = script(
             r#"
                 function on_get(this, actor, room)
                     local sum = 0
@@ -188,8 +199,7 @@ fn softcode_benches(c: &mut Criterion) {
     // against the populated world. Guards the read path and snapshotting.
     c.bench_function("read_heavy", |b| {
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
-            "on_get",
+        let program = script(
             r#"
                 function on_get(this, actor, room)
                     local total = 0
@@ -211,8 +221,7 @@ fn softcode_benches(c: &mut Criterion) {
     // the world. Measures batch build + validate + apply together.
     c.bench_function("write_heavy", |b| {
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
-            "on_get",
+        let program = script(
             r#"
                 function on_get(this, actor, room)
                     for i = 1, 100 do
@@ -234,8 +243,7 @@ fn softcode_benches(c: &mut Criterion) {
     // the closest single-benchmark proxy for real game-hook cost.
     c.bench_function("mixed_realistic", |b| {
         let runtime = SoftcodeRuntime::new();
-        let program = ProgramRecord::new(
-            "on_get",
+        let program = script(
             r#"
                 function on_get(this, actor, room)
                     local dmg = get_attr(this, "damage") or 0
