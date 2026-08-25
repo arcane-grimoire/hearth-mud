@@ -295,5 +295,5 @@
   .trow .ti[data-ok="false"] :global(svg) { color: var(--accent-red, #e06c75); }
   .trow.fail .tn { color: var(--accent-red, #e06c75); }
   .trow .tn { flex: 1 1 auto; min-width: 0; }
-  .terr { flex-basis: 100%; margin: 2px 0 4px 17px; padding: 6px 8px; background: color-mix(in srgb, var(--accent-red, #e06c75) 8%, transparent); border-left: 2px solid var(--accent-red, #e06c75); border-radius: 3px; font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--text-secondary, #b6a888); white-space: pre-wrap; overflow-x: auto; }
+  .terr { flex-basis: 100%; margin: 2px 0 4px 17px; padding: 6px 8px; background: color-mix(in srgb, var(--accent-red, #e06c75) 8%, transparent); border-radius: 5px; font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--text-secondary, #b6a888); white-space: pre-wrap; overflow-x: auto; }
 </style>
