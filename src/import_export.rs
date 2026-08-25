@@ -559,7 +559,10 @@ fn apply(
             let mut changed = is_new;
 
             if is_new {
-                let mut obj = GameObject::new(&ref_id, &room.key, Kind::Room).with_title(&room.title);
+                let mut obj = GameObject::new(&ref_id, &room.key, Kind::Room);
+                if let Some(title) = &room.title {
+                    obj = obj.with_title(title);
+                }
                 obj.description = room.description.clone();
                 obj.archetype_ref = archetype_ref.clone();
                 for t in &room.tags {
@@ -581,8 +584,10 @@ fn apply(
                     obj.attr_schema = room.attr_schema.clone();
                     changed = true;
                 }
-                if obj.title.as_deref() != Some(room.title.as_str()) {
-                    obj.title = Some(room.title.clone());
+                if let Some(title) = &room.title
+                    && obj.title.as_deref() != Some(title.as_str())
+                {
+                    obj.title = Some(title.clone());
                     changed = true;
                 }
                 if obj.description != room.description {
@@ -1348,7 +1353,10 @@ pub fn export_bundle(path: &Path, world: &mut World) -> Result<ExportReport, Str
                     tags.sort();
                     area_file.rooms.push(loader::RoomDef {
                         key,
-                        title: obj.title.clone().unwrap_or_default(),
+                        // Own title only (Option) — an archetyped room with no
+                        // own title exports no `title`, so it keeps inheriting
+                        // on re-import instead of gaining an empty override.
+                        title: obj.title.clone(),
                         description: obj.description.clone(),
                         tags,
                         locks: obj.locks.clone(),
@@ -2094,6 +2102,51 @@ mod tests {
             "the archetype relationship must survive export->import"
         );
         assert_eq!(fresh.resolved_title(grunt2).as_deref(), Some("Goblin"));
+    }
+
+    /// A room that inherits its title from an archetype must round-trip WITHOUT
+    /// gaining an empty own-title override — `RoomDef::title` is `Option`, so an
+    /// inheriting room exports no `title` and keeps inheriting on re-import.
+    #[test]
+    fn room_archetype_inherited_title_round_trips_through_export() {
+        let src = {
+            let mut world = World::new();
+            let base = world.next_dbref();
+            world.add_object(
+                GameObject::new(&base, "cave_base", Kind::Room).with_title("A Cave"),
+            );
+            let inst = world.next_dbref();
+            let mut r = GameObject::new(&inst, "cave1", Kind::Room);
+            r.archetype_ref = Some(base.clone());
+            // No own title — the room means to inherit "A Cave".
+            world.add_object(r);
+            world
+        };
+
+        let export_dir = TempDir::new();
+        {
+            let mut world = src;
+            export_bundle(&export_dir.path, &mut world).unwrap();
+        }
+
+        let db = temp_db();
+        let mut fresh = World::new();
+        import_bundle(&export_dir.path, &mut fresh, &db, false, Some("#1")).unwrap();
+
+        let inst2 = fresh
+            .objects
+            .values()
+            .find(|o| o.key == "cave1")
+            .expect("room instance re-imported");
+        assert_eq!(
+            inst2.title, None,
+            "an inheriting room must NOT gain an empty own-title override on round-trip"
+        );
+        assert_eq!(
+            fresh.resolved_title(inst2).as_deref(),
+            Some("A Cave"),
+            "the title still resolves from the archetype after round-trip"
+        );
     }
 
     #[test]

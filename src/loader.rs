@@ -192,7 +192,11 @@ pub(crate) struct AreaFile {
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct RoomDef {
     pub(crate) key: String,
-    pub(crate) title: String,
+    /// `Option` (like `ObjectDef::title`) so an archetyped room with no own
+    /// title inherits it from the archetype instead of exporting `title = ""`
+    /// and re-importing that empty string as an override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) title: Option<String>,
     #[serde(default)]
     pub(crate) description: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -583,7 +587,9 @@ pub fn load_game_dir(
             let archetype_ref = resolve_archetype(&ref_id, area_name, &room.archetype, &key_map);
             if let Some(existing) = world.get_mut(&ref_id) {
                 if existing.tags.contains(&managed) {
-                    existing.title = Some(room.title.clone());
+                    if let Some(title) = &room.title {
+                        existing.title = Some(title.clone());
+                    }
                     existing.description = room.description.clone();
                     existing.locks = room.locks.clone();
                     existing.archetype_ref = archetype_ref;
@@ -594,7 +600,10 @@ pub fn load_game_dir(
                 }
                 continue;
             }
-            let mut obj = GameObject::new(&ref_id, &room.key, Kind::Room).with_title(&room.title);
+            let mut obj = GameObject::new(&ref_id, &room.key, Kind::Room);
+            if let Some(title) = &room.title {
+                obj = obj.with_title(title);
+            }
             obj.description = room.description.clone();
             obj.tags.insert(managed.clone());
             for tag_spec in &room.tags {
