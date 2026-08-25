@@ -230,8 +230,23 @@ declare function emit_radius(ref: ObjectRef, radius: number, messages: { [number
 --- Use for game-specific UI panels (combat, quests, inventory display, etc.).
 declare function emit_data(ref: ObjectRef, channel: string, data: any): ()
 
---- Move an object to a new location (room or container).
-declare function move_object(ref: ObjectRef, destination: ObjectRef): ()
+type MoveOpts = {
+    announce: boolean?,
+    fire_hooks: boolean?,
+}
+
+--- Move an object to a new location (room or container). By default this is a
+--- silent relocation. Pass { announce = true } to emit "X leaves." / "X
+--- arrives." to the rooms involved, and/or { fire_hooks = true } to run the
+--- on_leave/on_move/on_enter hooks afterward with the moved object as the
+--- actor. Hooks run after the move commits and do NOT evaluate can_enter/
+--- can_traverse denial — scripted moves are unrestricted (lock-respecting
+--- movement is the player `go` path).
+declare function move_object(ref: ObjectRef, destination: ObjectRef, opts: MoveOpts?): ()
+
+--- Replace an object's alias keywords (the extra names it answers to) with a
+--- new list. Entries are trimmed; blanks are dropped.
+declare function set_aliases(ref: ObjectRef, aliases: { string }): ()
 
 --- Add a tag to an object. Use "category:key" format.
 declare function set_tag(ref: ObjectRef, spec: string): ()
@@ -241,6 +256,15 @@ declare function unset_tag(ref: ObjectRef, spec: string): ()
 
 --- Set an object's owner. Errors if the owner ref doesn't exist.
 declare function set_owner(ref: ObjectRef, owner: ObjectRef): ()
+
+--- Attach a Lock DSL expression to one of an object's hooks (e.g. "can_enter",
+--- "get", "traverse"). Predicates: perm(), has_tag(), has_attr(),
+--- in_inventory(), is_kind(), is_owner(), time_between(), with AND/OR/NOT.
+declare function set_lock(ref: ObjectRef, hook: string, expr: string): ()
+
+--- Remove the lock from one of an object's hooks (the inverse of set_lock).
+--- A no-op if that hook carries no lock.
+declare function clear_lock(ref: ObjectRef, hook: string): ()
 
 --- Point an object at an existing archetype (or nil to clear the delegation).
 --- The object then inherits the archetype's title/description/attrs/tags/script
@@ -266,6 +290,19 @@ declare function destroy(ref: ObjectRef): ()
 --- loud opt-out. Returns the same ref. A no-op on an object that isn't an
 --- instance.
 declare function clone(ref: ObjectRef): string
+
+type CloneOpts = {
+    location: ObjectRef?,
+    owner: ObjectRef?,
+}
+
+--- Deep-copy an existing object into a fresh dbref: title, description, attrs,
+--- attr-schema, tags, aliases, locks, script, libs, and archetype. system:*
+--- tags and the file-key are stripped, so the copy is always a plain player
+--- object (never treated as managed/locked/global). Defaults location and
+--- owner to the source's; override via opts. Returns the new ref. Distinct
+--- from clone(), which flattens an archetype instance in place.
+declare function clone_object(src: ObjectRef, opts: CloneOpts?): string
 
 --- Fire a hook on another object. The triggered hook runs after this
 --- script's intents are applied. Use for connected machinery, puzzles,
@@ -296,6 +333,15 @@ type CreateExitOpts = {
 
 --- Create an exit between two rooms. Returns the new exit's ref_id.
 declare function create_exit(opts: CreateExitOpts): string
+
+type UpdateExitOpts = {
+    direction: string?,
+    destination: ObjectRef?,
+}
+
+--- Retarget and/or rename an existing exit. `direction` renames the exit (its
+--- key); `destination` repoints it. An omitted field is left unchanged.
+declare function update_exit(ref: ObjectRef, opts: UpdateExitOpts): ()
 
 --- Set an object's whole behavior script — one Luau chunk that defines its
 --- hooks as top-level functions (on_enter, on_leave, cmd_<name>, ...) sharing

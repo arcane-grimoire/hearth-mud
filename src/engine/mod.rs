@@ -4002,6 +4002,10 @@ impl Engine {
 
     fn deliver_effects(&mut self, effects: &[Effect], actor_ref: &str) {
         let mut triggers = Vec::new();
+        // Scripted moves whose `fire_hooks` flag is set — deferred to after the
+        // effects loop (like triggers) so hook re-entrancy stays out of the
+        // loop. Each is (mover, old_room, new_room).
+        let mut moves: Vec<(String, Option<String>, String)> = Vec::new();
         for effect in effects {
             match effect {
                 Effect::ToActor { target, message } => self.send_to_actor_ref(target, message),
@@ -4036,6 +4040,23 @@ impl Engine {
                 }
                 Effect::TriggerHook { target, hook, data } => {
                     triggers.push((target.clone(), hook.clone(), data.clone()));
+                }
+                Effect::MovedObject { mover, old_room, new_room, announce, fire_hooks } => {
+                    if *announce {
+                        let name = self
+                            .world
+                            .get(mover)
+                            .map(|o| self.world.display_name(o))
+                            .unwrap_or_else(|| mover.clone());
+                        let exclude = vec![mover.clone()];
+                        if let Some(old) = old_room {
+                            self.send_to_room(old, &format!("{} leaves.", name), &exclude);
+                        }
+                        self.send_to_room(new_room, &format!("{} arrives.", name), &exclude);
+                    }
+                    if *fire_hooks {
+                        moves.push((mover.clone(), old_room.clone(), new_room.clone()));
+                    }
                 }
                 Effect::EmitNearby { room, x, y, radius, message, exclude } => {
                     let r2 = radius * radius;
@@ -4130,6 +4151,19 @@ impl Engine {
                 && let Some(obj) = self.world.get_mut(&target) {
                     obj.attrs.remove("_trigger_data");
                 }
+        }
+        // Event-aware move choreography, with the moved object as actor — the
+        // same on_leave/on_move/on_enter sequence (plus global hooks) that
+        // `cmd_go` runs, minus the pre-move lock/deny checks (scripted moves
+        // are unrestricted). Fired after the relocation has committed.
+        for (mover, old_room, new_room) in moves {
+            if let Some(old) = &old_room {
+                let _ = self.fire_hook(old, "on_leave", &mover, Some(old), None);
+                self.fire_global_hooks("on_leave", &mover, Some(old), None);
+            }
+            let _ = self.fire_hook(&mover, "on_move", &mover, Some(&new_room), None);
+            let _ = self.fire_hook(&new_room, "on_enter", &mover, Some(&new_room), None);
+            self.fire_global_hooks("on_enter", &mover, Some(&new_room), None);
         }
     }
 
@@ -6948,8 +6982,20 @@ fn describe_intent(intent: &softcode::Intent, world: &World) -> String {
         Intent::EmitRoom { room, message, .. } => {
             format!("emit to room {}: {:?}", label(room), clip(message))
         }
-        Intent::Move { target, destination } => {
+        Intent::Move { target, destination, .. } => {
             format!("move {} → {}", label(target), label(destination))
+        }
+        Intent::SetAliases { target, .. } => format!("set aliases of {}", label(target)),
+        Intent::UpdateExit { target, direction, destination } => {
+            let dir = direction.as_deref().unwrap_or("(unchanged)");
+            match destination {
+                Some(d) => format!("update exit {} dir '{}' → {}", label(target), dir, label(d)),
+                None => format!("update exit {} dir '{}'", label(target), dir),
+            }
+        }
+        Intent::ClearLock { target, hook } => format!("clear lock {}/{}", label(target), hook),
+        Intent::CloneObject { ref_id, source, .. } => {
+            format!("clone {} → {}", label(source), ref_id)
         }
         Intent::SetTag { target, tag } => {
             format!("tag {} +{}:{}", label(target), tag.category, tag.key)

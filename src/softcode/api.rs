@@ -1357,11 +1357,111 @@ pub fn install<'scope, 'env>(
     let b = Rc::clone(&batch);
     env.set(
         "move_object",
-        scope.create_function(move |_, (r, dest): (Value, Value)| {
+        scope.create_function(move |_, (r, dest, opts): (Value, Value, Option<Table>)| {
             let target = ref_of(&r)?;
             let destination = ref_of(&dest)?;
-            b.borrow_mut().push(Intent::Move { target, destination });
+            // Optional third arg: { announce = bool, fire_hooks = bool }.
+            // Absent or nil → a bare, silent relocation (the original behavior).
+            let (announce, fire_hooks) = match opts {
+                Some(t) => (
+                    t.get::<Option<bool>>("announce")?.unwrap_or(false),
+                    t.get::<Option<bool>>("fire_hooks")?.unwrap_or(false),
+                ),
+                None => (false, false),
+            };
+            b.borrow_mut().push(Intent::Move {
+                target,
+                destination,
+                announce,
+                fire_hooks,
+            });
             Ok(())
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
+        "set_aliases",
+        scope.create_function(move |_, (r, aliases): (Value, Vec<String>)| {
+            let target = ref_of(&r)?;
+            b.borrow_mut().push(Intent::SetAliases { target, aliases });
+            Ok(())
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
+        "update_exit",
+        scope.create_function(move |_, (r, opts): (Value, Table)| {
+            let target = ref_of(&r)?;
+            let direction: Option<String> = opts
+                .get::<Option<String>>("direction")?
+                .filter(|s| !s.trim().is_empty());
+            let destination = match opts.get::<Option<Value>>("destination")? {
+                Some(Value::Nil) | None => None,
+                Some(v) => Some(ref_of(&v)?),
+            };
+            b.borrow_mut().push(Intent::UpdateExit {
+                target,
+                direction,
+                destination,
+            });
+            Ok(())
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
+        "set_lock",
+        scope.create_function(move |_, (r, hook, expr): (Value, String, String)| {
+            let target = ref_of(&r)?;
+            b.borrow_mut().push(Intent::SetLock { target, hook, expr });
+            Ok(())
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
+        "clear_lock",
+        scope.create_function(move |_, (r, hook): (Value, String)| {
+            let target = ref_of(&r)?;
+            b.borrow_mut().push(Intent::ClearLock { target, hook });
+            Ok(())
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    let dbref = Rc::clone(&dbref_counter);
+    env.set(
+        "clone_object",
+        scope.create_function(move |_, (src, opts): (Value, Option<Table>)| {
+            let source = ref_of(&src)?;
+            let ref_id = {
+                let id = dbref.get() + 1;
+                dbref.set(id);
+                format!("#{}", id)
+            };
+            let (location, owner) = match opts {
+                Some(t) => {
+                    let location = match t.get::<Option<Value>>("location")? {
+                        Some(Value::Nil) | None => None,
+                        Some(v) => Some(ref_of(&v)?),
+                    };
+                    let owner = match t.get::<Option<Value>>("owner")? {
+                        Some(Value::Nil) | None => None,
+                        Some(v) => Some(ref_of(&v)?),
+                    };
+                    (location, owner)
+                }
+                None => (None, None),
+            };
+            b.borrow_mut().push(Intent::CloneObject {
+                ref_id: ref_id.clone(),
+                source,
+                location,
+                owner,
+            });
+            Ok(ref_id)
         })?,
     )?;
 

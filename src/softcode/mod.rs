@@ -58,6 +58,48 @@ pub enum Intent {
     Move {
         target: String,
         destination: String,
+        /// Announce the relocation to the rooms involved ("X leaves." /
+        /// "X arrives."). Off by default, so a bare `move_object` stays silent
+        /// exactly as before.
+        announce: bool,
+        /// After the relocation commits, fire the `on_leave`/`on_move`/
+        /// `on_enter` choreography (plus global hooks) with the moved object
+        /// as the actor. Off by default. Because apply is deferred, these run
+        /// *after* the move — they observe the already-moved world, and no
+        /// `can_enter`/`can_traverse` denial is evaluated (scripted moves stay
+        /// unrestricted, like a bare move; lock-respecting movement is the
+        /// player `go` path).
+        fire_hooks: bool,
+    },
+    /// Replace an object's alias set (the extra keywords it answers to).
+    /// Entries are trimmed and blanks dropped. Mirrors the REST `SetAliases`.
+    SetAliases {
+        target: String,
+        aliases: Vec<String>,
+    },
+    /// Retarget and/or rename an exit: its `direction` (the exit object's key)
+    /// and/or its `destination` (`target_ref`). A `None` field is left
+    /// unchanged. Mirrors the REST `UpdateExit`.
+    UpdateExit {
+        target: String,
+        direction: Option<String>,
+        destination: Option<String>,
+    },
+    /// Remove a Lock DSL expression from one of `target`'s hooks — the inverse
+    /// of [`Intent::SetLock`]. A no-op if that hook carries no lock.
+    ClearLock {
+        target: String,
+        hook: String,
+    },
+    /// Deep-copy an existing object into a fresh dbref: title, description,
+    /// attrs, attr-schema, tags, aliases, locks, script, libs, and archetype.
+    /// The clone is a plain player object — `system:*` tags and the file-key
+    /// are stripped, so it is never treated as managed/locked/global content.
+    CloneObject {
+        ref_id: String,
+        source: String,
+        location: Option<String>,
+        owner: Option<String>,
     },
     SetTag {
         target: String,
@@ -324,6 +366,18 @@ pub enum Effect {
         hook: String,
         data: Option<serde_json::Value>,
     },
+    /// Post-move choreography for a scripted `move_object` run with flags:
+    /// announce departure/arrival and/or fire the `on_leave`/`on_move`/
+    /// `on_enter` hooks, with `mover` as the acting object. Emitted by
+    /// [`Intent::Move`] after the relocation commits; expanded by the engine's
+    /// `deliver_effects`.
+    MovedObject {
+        mover: String,
+        old_room: Option<String>,
+        new_room: String,
+        announce: bool,
+        fire_hooks: bool,
+    },
     EmitNearby {
         room: String,
         x: f64,
@@ -582,7 +636,7 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                     exclude: exclude.clone(),
                 });
             }
-            Intent::Move { target, destination } => {
+            Intent::Move { target, destination, announce, fire_hooks } => {
                 // Deliberately unrestricted, unlike the other mutating
                 // intents. Requiring ownership of what you move would mean
                 // owning a player in order to teleport them, which rules out
@@ -616,10 +670,122 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                     }
                     cursor = parent;
                 }
+                let old_room = world.get(target).and_then(|o| o.location_ref.clone());
                 let obj = world
                     .get_mut(target)
                     .ok_or_else(|| format!("move_object: no object '{}'", target))?;
                 obj.location_ref = Some(destination.clone());
+                if *announce || *fire_hooks {
+                    effects.push(Effect::MovedObject {
+                        mover: target.clone(),
+                        old_room,
+                        new_room: destination.clone(),
+                        announce: *announce,
+                        fire_hooks: *fire_hooks,
+                    });
+                }
+            }
+            Intent::SetAliases { target, aliases } => {
+                if !may_modify(world, authority, target) {
+                    return Err(refuse("set_aliases", target));
+                }
+                let obj = world
+                    .get_mut(target)
+                    .ok_or_else(|| format!("set_aliases: no object '{}'", target))?;
+                obj.aliases = aliases
+                    .iter()
+                    .map(|a| a.trim().to_string())
+                    .filter(|a| !a.is_empty())
+                    .collect();
+            }
+            Intent::UpdateExit { target, direction, destination } => {
+                if !may_modify(world, authority, target) {
+                    return Err(refuse("update_exit", target));
+                }
+                if let Some(d) = destination
+                    && world.get(d).is_none()
+                {
+                    return Err(format!("update_exit: no destination '{}'", d));
+                }
+                let dir = match direction {
+                    Some(d) => {
+                        let trimmed = d.trim();
+                        if trimmed.is_empty() {
+                            return Err("update_exit: direction cannot be blank".into());
+                        }
+                        Some(trimmed.to_string())
+                    }
+                    None => None,
+                };
+                let obj = world
+                    .get_mut(target)
+                    .ok_or_else(|| format!("update_exit: no object '{}'", target))?;
+                if obj.kind != Kind::Exit {
+                    return Err(format!("update_exit: '{}' is not an exit", target));
+                }
+                if let Some(d) = dir {
+                    obj.key = d;
+                }
+                if let Some(dest) = destination {
+                    obj.target_ref = Some(dest.clone());
+                }
+            }
+            Intent::ClearLock { target, hook } => {
+                if !may_modify(world, authority, target) {
+                    return Err(refuse("clear_lock", target));
+                }
+                let obj = world
+                    .get_mut(target)
+                    .ok_or_else(|| format!("clear_lock: no object '{}'", target))?;
+                obj.locks.remove(hook);
+            }
+            Intent::CloneObject { ref_id, source, location, owner } => {
+                if at_object_quota(world, authority) {
+                    return Err(format!(
+                        "clone: object quota reached ({} objects)",
+                        OWNER_OBJECT_QUOTA
+                    ));
+                }
+                if world.get(ref_id).is_some() {
+                    return Err(format!("clone: ref '{}' already exists", ref_id));
+                }
+                let src = world
+                    .get(source)
+                    .ok_or_else(|| format!("clone: no source '{}'", source))?
+                    .clone();
+                if src.kind == Kind::Player {
+                    return Err("clone: cannot clone a player".into());
+                }
+                let loc = location.clone().or_else(|| src.location_ref.clone());
+                if let Some(l) = &loc
+                    && world.get(l).is_none()
+                {
+                    return Err(format!("clone: no location '{}'", l));
+                }
+                // Fresh GameObject (new `id` UUID + `ref_id`), then copy the
+                // source's definition + attrs across. `state` lives inside the
+                // script and rides along with it.
+                let mut obj = GameObject::new(ref_id.clone(), src.key.clone(), src.kind.clone());
+                obj.title = src.title.clone();
+                obj.description = src.description.clone();
+                obj.attrs = src.attrs.clone();
+                obj.attr_schema = src.attr_schema.clone();
+                obj.tags = src.tags.clone();
+                obj.aliases = src.aliases.clone();
+                obj.script = src.script.clone();
+                obj.libs = src.libs.clone();
+                obj.locks = src.locks.clone();
+                obj.archetype_ref = src.archetype_ref.clone();
+                obj.target_ref = src.target_ref.clone();
+                obj.location_ref = loc;
+                obj.owner_ref = owner.clone().or_else(|| authority.map(|a| a.to_string()));
+                // A clone is a fresh player object, never file-managed content:
+                // strip every `system:*` tag and the file-key so a reload won't
+                // reconcile or delete it, and it can't inherit global/locked
+                // status.
+                obj.tags.retain(|t| t.category != "system");
+                obj.attrs.remove(crate::loader::FILE_KEY_ATTR);
+                world.add_object(obj);
             }
             Intent::SetTag { target, tag } => {
                 if !may_modify(world, authority, target) {
@@ -2298,6 +2464,163 @@ mod tests {
         world.add_object(exit);
 
         world
+    }
+
+    #[test]
+    fn set_aliases_replaces_with_trimmed_nonblank_entries() {
+        let mut world = test_world();
+        let batch = IntentBatch::from_intents(vec![Intent::SetAliases {
+            target: "#5".into(),
+            aliases: vec!["blade".into(), "  sword  ".into(), "   ".into(), "".into()],
+        }]);
+        apply_batch(&mut world, &batch).unwrap();
+        let obj = world.get("#5").unwrap();
+        assert!(obj.aliases.contains("blade"));
+        assert!(obj.aliases.contains("sword"), "entries are trimmed");
+        assert_eq!(obj.aliases.len(), 2, "blank entries are dropped");
+    }
+
+    #[test]
+    fn update_exit_retargets_renames_and_validates() {
+        let mut world = test_world();
+        // #8 is "north" → #2; rename to "up" and repoint at #1.
+        apply_batch(
+            &mut world,
+            &IntentBatch::from_intents(vec![Intent::UpdateExit {
+                target: "#8".into(),
+                direction: Some("up".into()),
+                destination: Some("#1".into()),
+            }]),
+        )
+        .unwrap();
+        let exit = world.get("#8").unwrap();
+        assert_eq!(exit.key, "up");
+        assert_eq!(exit.target_ref.as_deref(), Some("#1"));
+
+        // A non-exit target is refused.
+        assert!(apply_batch(
+            &mut world,
+            &IntentBatch::from_intents(vec![Intent::UpdateExit {
+                target: "#5".into(),
+                direction: None,
+                destination: Some("#1".into()),
+            }]),
+        )
+        .is_err());
+
+        // A missing destination is refused (and the batch rolls back).
+        assert!(apply_batch(
+            &mut world,
+            &IntentBatch::from_intents(vec![Intent::UpdateExit {
+                target: "#8".into(),
+                direction: None,
+                destination: Some("#999".into()),
+            }]),
+        )
+        .is_err());
+        assert_eq!(world.get("#8").unwrap().key, "up", "the failed update left the exit unchanged");
+    }
+
+    #[test]
+    fn clear_lock_is_the_inverse_of_set_lock() {
+        let mut world = test_world();
+        apply_batch(
+            &mut world,
+            &IntentBatch::from_intents(vec![Intent::SetLock {
+                target: "#5".into(),
+                hook: "get".into(),
+                expr: "perm(admin)".into(),
+            }]),
+        )
+        .unwrap();
+        assert!(world.get("#5").unwrap().locks.contains_key("get"));
+
+        apply_batch(
+            &mut world,
+            &IntentBatch::from_intents(vec![Intent::ClearLock {
+                target: "#5".into(),
+                hook: "get".into(),
+            }]),
+        )
+        .unwrap();
+        assert!(!world.get("#5").unwrap().locks.contains_key("get"));
+    }
+
+    #[test]
+    fn clone_object_deep_copies_and_strips_system_status() {
+        let mut world = test_world();
+        // Give the source a system tag + file-key to prove they're stripped.
+        {
+            let sword = world.get_mut("#5").unwrap();
+            sword.tags.insert(Tag { category: "system".into(), key: "managed".into() });
+            sword
+                .attrs
+                .insert(crate::loader::FILE_KEY_ATTR.into(), serde_json::json!("town/sword"));
+        }
+        apply_batch(
+            &mut world,
+            &IntentBatch::from_intents(vec![Intent::CloneObject {
+                ref_id: "#100".into(),
+                source: "#5".into(),
+                location: None,
+                owner: Some("#3".into()),
+            }]),
+        )
+        .unwrap();
+        let src_id = world.get("#5").unwrap().id.clone();
+        let src_loc = world.get("#5").unwrap().location_ref.clone();
+        let clone = world.get("#100").unwrap();
+        assert_eq!(clone.title.as_deref(), Some("a rusty sword"));
+        assert_eq!(clone.attrs.get("damage"), Some(&serde_json::json!(10)));
+        assert!(clone.tags.iter().any(|t| t.category == "loot"), "gameplay tags copy");
+        assert!(!clone.tags.iter().any(|t| t.category == "system"), "system:* stripped");
+        assert!(!clone.attrs.contains_key(crate::loader::FILE_KEY_ATTR), "file-key stripped");
+        assert_ne!(clone.id, src_id, "clone gets a fresh identity");
+        assert_eq!(clone.owner_ref.as_deref(), Some("#3"), "owner override applied");
+        assert_eq!(clone.location_ref, src_loc, "location defaults to the source's");
+    }
+
+    #[test]
+    fn move_flags_emit_the_choreography_effect() {
+        let mut world = test_world();
+        // A bare move emits no MovedObject effect.
+        let effects = apply_batch(
+            &mut world,
+            &IntentBatch::from_intents(vec![Intent::Move {
+                target: "#5".into(),
+                destination: "#2".into(),
+                announce: false,
+                fire_hooks: false,
+            }]),
+        )
+        .unwrap();
+        assert!(!effects.iter().any(|e| matches!(e, Effect::MovedObject { .. })));
+
+        // A flagged move emits MovedObject carrying the rooms + flags. #5 is now
+        // in #2 (from the bare move above), moving back to #1.
+        let effects = apply_batch(
+            &mut world,
+            &IntentBatch::from_intents(vec![Intent::Move {
+                target: "#5".into(),
+                destination: "#1".into(),
+                announce: true,
+                fire_hooks: true,
+            }]),
+        )
+        .unwrap();
+        let moved = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::MovedObject { mover, old_room, new_room, announce, fire_hooks } => {
+                    Some((mover.clone(), old_room.clone(), new_room.clone(), *announce, *fire_hooks))
+                }
+                _ => None,
+            })
+            .expect("flagged move should emit a MovedObject effect");
+        assert_eq!(moved.0, "#5");
+        assert_eq!(moved.1.as_deref(), Some("#2"));
+        assert_eq!(moved.2, "#1");
+        assert!(moved.3 && moved.4);
     }
 
     #[test]
