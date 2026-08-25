@@ -773,6 +773,13 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 if src.kind == Kind::Player {
                     return Err("clone: cannot clone a player".into());
                 }
+                // Refuse cloning a locked source: the clone would be an
+                // editable copy of a file-authoritative definition (script +
+                // attrs), which forks locked code out from under the lock. The
+                // `system:locked` OWN tag, checked at every authoring surface.
+                if src.tags.iter().any(|t| t.category == "system" && t.key == "locked") {
+                    return Err(format!("clone: '{}' is locked and cannot be cloned", source));
+                }
                 let loc = location.clone().or_else(|| src.location_ref.clone());
                 if let Some(l) = &loc
                     && world.get(l).is_none()

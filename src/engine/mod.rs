@@ -101,6 +101,25 @@ pub enum ApiRequest {
     /// Replace an object's aliases (name-match aliases for items/npcs, or an
     /// exit's alt directions). Builder-gated.
     SetAliases { ref_id: String, aliases: Vec<String> },
+    /// Attach a Lock DSL expression to one of an object's hooks. Builder-gated;
+    /// refuses locked objects (see `locked_target`).
+    SetLock { ref_id: String, hook: String, expr: String },
+    /// Remove the lock from one of an object's hooks (inverse of `SetLock`).
+    ClearLock { ref_id: String, hook: String },
+    /// Deep-copy an existing object into a fresh dbref (the REST counterpart of
+    /// softcode `clone_object`). Builder-gated; strips `system:*` status and
+    /// refuses a locked source. Returns `{ ref_id }` of the new object.
+    CloneObject {
+        source: String,
+        #[serde(default)]
+        location: Option<String>,
+        #[serde(default)]
+        owner: Option<String>,
+    },
+    /// Force a player to run a command as if typed (the REST counterpart of
+    /// softcode `run_command_as`). Admin-gated; `@`-commands and `quit` are
+    /// refused on the forced path.
+    RunCommandAs { ref_id: String, command: String },
     AddTag { ref_id: String, tag: String },
     RemoveTag { ref_id: String, tag: String },
     /// `cascade`: if `ref_id` is an archetype with live instances, flatten
@@ -1122,6 +1141,8 @@ impl Engine {
             | ApiRequest::SetTitle { ref_id, .. }
             | ApiRequest::SetLocation { ref_id, .. }
             | ApiRequest::SetAliases { ref_id, .. }
+            | ApiRequest::SetLock { ref_id, .. }
+            | ApiRequest::ClearLock { ref_id, .. }
             | ApiRequest::UpdateExit { ref_id, .. }
             | ApiRequest::AddTag { ref_id, .. }
             | ApiRequest::RemoveTag { ref_id, .. }
@@ -1176,6 +1197,8 @@ impl Engine {
                 // `Eval` is arbitrary admin code with the full write API — the
                 // same gate `cmd_eval` applies for telnet (`Scope::Admin`, not
                 // just `Builder`). A token that can eval owns the server.
+                // `RunCommandAs` drives another player's session, so it's a
+                // wizard-only tool too (admin-gated like telnet `@force`).
                 if matches!(
                     &req,
                     ApiRequest::SaveWorld
@@ -1184,6 +1207,7 @@ impl Engine {
                         | ApiRequest::Export { .. }
                         | ApiRequest::PutMap { .. }
                         | ApiRequest::PutTerrain { .. }
+                        | ApiRequest::RunCommandAs { .. }
                 ) && !has_admin
                 {
                     return ApiResponse::error("Admin scope required");
@@ -1639,6 +1663,67 @@ impl Engine {
                     }
                     None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
                 }
+            }
+            ApiRequest::SetLock { ref_id, hook, expr } => {
+                if let Err(e) = locks::parse(&expr) {
+                    return ApiResponse::error(format!("Invalid lock expression: {}", e));
+                }
+                match self.world.get_mut(&ref_id) {
+                    Some(obj) => {
+                        obj.locks.insert(hook, expr);
+                        ApiResponse::ok()
+                    }
+                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
+            ApiRequest::ClearLock { ref_id, hook } => {
+                match self.world.get_mut(&ref_id) {
+                    Some(obj) => {
+                        obj.locks.remove(&hook);
+                        ApiResponse::ok()
+                    }
+                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+            }
+            ApiRequest::CloneObject { source, location, owner } => {
+                // Reuse the softcode clone path (Intent::CloneObject) so the
+                // system:*/file-key stripping and locked-source guard are shared
+                // — permission is already gated (Builder) above. Pre-mint the
+                // ref so we can return it.
+                let ref_id = self.world.next_dbref();
+                let batch = softcode::IntentBatch::from_intents(vec![softcode::Intent::CloneObject {
+                    ref_id: ref_id.clone(),
+                    source,
+                    location,
+                    owner,
+                }]);
+                match softcode::apply_batch(&mut self.world, &batch) {
+                    Ok(_) => ApiResponse::success(serde_json::json!({ "ref_id": ref_id })),
+                    Err(e) => ApiResponse::error(e),
+                }
+            }
+            ApiRequest::RunCommandAs { ref_id, command } => {
+                // Admin-gated above. Same forced-command gate as telnet `@force`.
+                if !Self::forced_command_allowed(&command) {
+                    return ApiResponse::error(
+                        "That command cannot be forced (@-commands and quit are refused).",
+                    );
+                }
+                match self.world.get(&ref_id) {
+                    Some(o) if o.kind == Kind::Player => {}
+                    Some(_) => return ApiResponse::error("Target is not a player"),
+                    None => return ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+                let Some(session_id) = self.session_for_actor(&ref_id) else {
+                    return ApiResponse::error("That player has no active session");
+                };
+                if self.force_depth >= MAX_FORCE_DEPTH {
+                    return ApiResponse::error("Forced-command depth limit reached");
+                }
+                self.force_depth += 1;
+                self.handle_game_input(&session_id, &command);
+                self.force_depth = self.force_depth.saturating_sub(1);
+                ApiResponse::ok()
             }
             ApiRequest::AddTag { ref_id, tag } => {
                 let parsed = match crate::world::Tag::parse(&tag) {
@@ -3274,6 +3359,9 @@ impl Engine {
             "@libs" => self.cmd_libs(session_id),
             "@rmlib" => self.cmd_rmlib(session_id, &actor_ref, &args),
             "@lock" => self.cmd_lock(session_id, &actor_ref, &args),
+            "@alias" => self.cmd_alias(session_id, &actor_ref, &args),
+            "@clone" => self.cmd_clone(session_id, &actor_ref, &args),
+            "@force" => self.cmd_force(session_id, &actor_ref, &args),
             "@unlock" => self.cmd_unlock(session_id, &actor_ref, &args),
             "@locks" => self.cmd_locks(session_id, &actor_ref, &args),
 
@@ -4974,13 +5062,14 @@ impl Engine {
                 "@teleport", "@name", "@program", "@programs", "@rmprogram",
                 "@tag", "@untag", "@script", "@scripts", "@rmscript",
                 "@script-interval", "@lib", "@libs", "@rmlib",
-                "@lock", "@unlock", "@locks", "@archetype",
+                "@lock", "@unlock", "@locks", "@archetype", "@alias", "@clone",
                 "@dialogue", "@test", "@reload", "@puppet", "@unpuppet", "@chown",
             ].iter().map(|s| String::from(*s)));
         }
 
         if is_admin {
             cmds.extend([
+                "@force",
                 "@grant", "@revoke", "@scopes", "@wall", "@boot",
                 "@save", "@shutdown", "@reload-world", "@maxchars",
                 "@eval", "@import", "@export",
@@ -6513,6 +6602,132 @@ impl Engine {
         } else {
             format!("No object or exit with ref '{}'.\r\n", resolved)
         }
+    }
+
+    /// `@alias <ref> = <a> <b> …` — replace an object's alias keywords.
+    /// Builder-gated, owner-checked, refuses locked objects.
+    fn cmd_alias(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Builder) {
+            return "Permission denied.\r\n".to_string();
+        }
+        let (path, alias_str) = match args.split_once('=') {
+            Some((p, a)) => (p.trim(), a.trim()),
+            None => return "Usage: @alias <ref> = <alias1> <alias2> ...\r\n".to_string(),
+        };
+        let resolved = if path == "here" {
+            match self.world.get(actor_ref).and_then(|a| a.location_ref.clone()) {
+                Some(r) => r,
+                None => return "You're nowhere.\r\n".to_string(),
+            }
+        } else {
+            path.to_string()
+        };
+        if !self.can_modify_object(session_id, actor_ref, &resolved) {
+            return "Permission denied (not owner).\r\n".to_string();
+        }
+        if self.is_ref_locked(&resolved) {
+            return format!("{}\r\n", Self::locked_error(&resolved));
+        }
+        let aliases: std::collections::HashSet<String> =
+            alias_str.split_whitespace().map(|s| s.to_string()).collect();
+        match self.world.get_mut(&resolved) {
+            Some(obj) => {
+                let n = aliases.len();
+                obj.aliases = aliases;
+                format!("Set {} alias(es) on {}.\r\n", n, resolved)
+            }
+            None => format!("No object with ref '{}'.\r\n", resolved),
+        }
+    }
+
+    /// `@clone <ref>` — deep-copy an object into a new dbref owned by the
+    /// cloner. Builder-gated; reuses the softcode clone path (strips system:*,
+    /// refuses a locked source).
+    fn cmd_clone(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Builder) {
+            return "Permission denied.\r\n".to_string();
+        }
+        let arg = args.trim();
+        if arg.is_empty() {
+            return "Usage: @clone <ref>\r\n".to_string();
+        }
+        let source = if arg == "here" {
+            match self.world.get(actor_ref).and_then(|a| a.location_ref.clone()) {
+                Some(r) => r,
+                None => return "You're nowhere.\r\n".to_string(),
+            }
+        } else {
+            arg.to_string()
+        };
+        let new_ref = self.world.next_dbref();
+        let batch = softcode::IntentBatch::from_intents(vec![softcode::Intent::CloneObject {
+            ref_id: new_ref.clone(),
+            source: source.clone(),
+            location: None,
+            owner: Some(actor_ref.to_string()),
+        }]);
+        match softcode::apply_batch(&mut self.world, &batch) {
+            Ok(_) => format!("Cloned {} → {}.\r\n", source, new_ref),
+            Err(e) => format!("{}\r\n", e),
+        }
+    }
+
+    /// `@force <player> = <command>` — run a command as another player (charm/
+    /// puppet). Admin-gated; the same forced-command gate as softcode
+    /// `run_command_as` (@-commands and quit refused, depth-bounded). The
+    /// player must be online. `<player>` is a ref or an online player's name.
+    fn cmd_force(&mut self, session_id: &str, _actor_ref: &str, args: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Admin) {
+            return "Permission denied.\r\n".to_string();
+        }
+        let (who, command) = match args.split_once('=') {
+            Some((w, c)) => (w.trim(), c.trim()),
+            None => return "Usage: @force <player> = <command>\r\n".to_string(),
+        };
+        if command.is_empty() {
+            return "Usage: @force <player> = <command>\r\n".to_string();
+        }
+        if !Self::forced_command_allowed(command) {
+            return "That command cannot be forced (@-commands and quit are refused).\r\n"
+                .to_string();
+        }
+        // Resolve the target among online players (a #ref or a name).
+        let online: Vec<String> = self
+            .sessions
+            .values()
+            .filter_map(|s| match &s.state {
+                SessionState::Playing { actor_ref, .. } => Some(actor_ref.clone()),
+                _ => None,
+            })
+            .collect();
+        let target = if who.starts_with('#') {
+            who.to_string()
+        } else {
+            match online.iter().find(|ar| {
+                self.world.get(ar).is_some_and(|o| {
+                    self.world.display_name(o).eq_ignore_ascii_case(who)
+                        || o.key.eq_ignore_ascii_case(who)
+                })
+            }) {
+                Some(r) => r.clone(),
+                None => return format!("No online player matching '{}'.\r\n", who),
+            }
+        };
+        match self.world.get(&target) {
+            Some(o) if o.kind == Kind::Player => {}
+            Some(_) => return "That's not a player.\r\n".to_string(),
+            None => return format!("No object with ref '{}'.\r\n", target),
+        }
+        let Some(target_session) = self.session_for_actor(&target) else {
+            return "That player has no active session.\r\n".to_string();
+        };
+        if self.force_depth >= MAX_FORCE_DEPTH {
+            return "Forced-command depth limit reached.\r\n".to_string();
+        }
+        self.force_depth += 1;
+        self.handle_game_input(&target_session, command);
+        self.force_depth = self.force_depth.saturating_sub(1);
+        format!("You force {} to '{}'.\r\n", target, command)
     }
 
     fn cmd_locks(&self, session_id: &str, actor_ref: &str, args: &str) -> String {
@@ -9758,6 +9973,85 @@ end
         // Forced disconnect is banned too.
         assert!(!Engine::forced_command_allowed("quit"));
         assert!(!Engine::forced_command_allowed("Q"));
+    }
+
+    /// REST parity for the new intents: clone + lock are Builder-gated and honor
+    /// the locked guard; RunCommandAs is Admin-gated and honors the forced gate.
+    #[test]
+    fn rest_clone_lock_and_force_gating() {
+        let (mut engine, admin, _) = engine_with_api_token(&[Scope::Admin]);
+
+        // A Builder (non-admin) token.
+        let builder_id = engine.accounts.create("restbuilder", "password123").unwrap().id.clone();
+        engine.accounts.grant_scope(&builder_id, Scope::Builder);
+        let builder = "rest-builder-token".to_string();
+        engine.api_tokens.insert(
+            Engine::hash_token(&builder),
+            TokenInfo { account_id: builder_id, label: "b".into(), persistent: false, expires_at: None },
+        );
+
+        let src = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&src, "widget", Kind::Item));
+
+        // CloneObject: a Builder can clone; the copy exists.
+        let resp = engine.handle_api_request(
+            ApiRequest::CloneObject { source: src.clone(), location: None, owner: None },
+            Some(builder.clone()),
+        );
+        assert!(resp.ok, "builder clone: {:?}", resp.error);
+        let new_ref = resp.data.unwrap()["ref_id"].as_str().unwrap().to_string();
+        assert!(engine.world.get(&new_ref).is_some());
+
+        // SetLock / ClearLock: Builder-gated round trip.
+        assert!(engine
+            .handle_api_request(
+                ApiRequest::SetLock { ref_id: src.clone(), hook: "get".into(), expr: "perm(admin)".into() },
+                Some(builder.clone()),
+            )
+            .ok);
+        assert!(engine.world.get(&src).unwrap().locks.contains_key("get"));
+        assert!(engine
+            .handle_api_request(
+                ApiRequest::ClearLock { ref_id: src.clone(), hook: "get".into() },
+                Some(builder.clone()),
+            )
+            .ok);
+        assert!(!engine.world.get(&src).unwrap().locks.contains_key("get"));
+
+        // Lock the source: cloning it and locking it are both refused.
+        engine
+            .world
+            .get_mut(&src)
+            .unwrap()
+            .tags
+            .insert(Tag { category: "system".into(), key: "locked".into() });
+        assert!(!engine
+            .handle_api_request(
+                ApiRequest::CloneObject { source: src.clone(), location: None, owner: None },
+                Some(builder.clone()),
+            )
+            .ok, "a locked source must not be cloneable");
+        assert!(!engine
+            .handle_api_request(
+                ApiRequest::SetLock { ref_id: src.clone(), hook: "get".into(), expr: "perm(admin)".into() },
+                Some(builder.clone()),
+            )
+            .ok, "a locked object refuses SetLock");
+
+        // RunCommandAs is Admin-only.
+        let denied = engine.handle_api_request(
+            ApiRequest::RunCommandAs { ref_id: src.clone(), command: "look".into() },
+            Some(builder),
+        );
+        assert_eq!(denied.error.as_deref(), Some("Admin scope required"));
+
+        // Even for an admin, the forced gate refuses @-commands.
+        let gated = engine.handle_api_request(
+            ApiRequest::RunCommandAs { ref_id: src, command: "@grant admin bob".into() },
+            Some(admin),
+        );
+        assert!(!gated.ok);
+        assert!(gated.error.as_deref().unwrap().contains("cannot be forced"));
     }
 
     // -- @import / @export (Stage 4) --

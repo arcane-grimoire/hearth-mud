@@ -31,6 +31,7 @@ Require the `builder` scope. Use `@` prefix (MUSH convention).
 | `@dig <title>` | Create a new room (its key is derived from the title) |
 | `@open <direction> = <room_ref>` | Create an exit from the current room |
 | `@create <title>` | Create an item in the current room (key derived from title) |
+| `@clone <ref>` | Deep-copy an object into a new one you own (refuses a locked source) |
 | `@destroy <ref>` | Destroy an object (not players, not occupied rooms) |
 
 ### Editing
@@ -39,6 +40,7 @@ Require the `builder` scope. Use `@` prefix (MUSH convention).
 |---------|-------------|
 | `@describe [<ref> =] <text>` | Set description. Defaults to current room |
 | `@name [<ref> =] <name>` | Rename an object. Defaults to current room |
+| `@alias <ref> = <a> <b> …` | Replace an object's alias keywords. Use `here` for current room |
 | `@set <ref>/<attr> = <value>` | Set an attribute. Use `here` for current room |
 | `@tag <ref> = <tag_spec>` | Add a tag. Use `here` for current room |
 | `@untag <ref> = <tag_spec>` | Remove a tag |
@@ -120,6 +122,7 @@ Require the `admin` scope.
 | `@revoke <user> <scope>` | Revoke a scope (can't revoke your own admin) |
 | `@scopes [<user>]` | View scopes for a user (default: yourself) |
 | `@wall <message>` | Broadcast a message to all online players |
+| `@force <player> = <command>` | Run a command as an online player (charm/puppet). `@`-commands and quit are refused; the command runs under the target's own scopes |
 | `@boot <user>` | Disconnect a player |
 | `@save` | Save the world and accounts to SQLite |
 | `@shutdown` | Graceful server shutdown (saves, notifies, stops) |
