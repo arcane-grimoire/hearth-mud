@@ -39,10 +39,12 @@ structured data is simply never sent to them.
   their map persists. Dynamically instantiated wilderness rooms get a fresh
   dbref each time they're generated, so a wandering mapper there won't be
   stable yet — keying those on `map` + `coords` is a planned follow-up.
-- **No environment colors yet.** Mudlet colors rooms by "environment"; wiring
-  the terrain palette into a `Terrain.Legend` GMCP package (so each terrain
-  gets a stable color) is the next step. Today rooms use Mudlet's default
-  color.
-- **Tile images** (`tile_image`/`tile_rotation` in Hearth terrain) are for a
-  graphical/web client, not Mudlet's built-in mapper, which is color-per-
-  environment only.
+- **Environment colors** work in mapped areas. On entering an area built from a
+  map template, the server sends a `Terrain.Legend` package (once per map) with
+  each terrain char's color and a stable `env_id`; the bridge registers those
+  as Mudlet custom environment colors and paints each room by its
+  `environment`. Hand-authored rooms (no map) have no terrain, so they use
+  Mudlet's default color.
+- **Tile images** (`tile_image`/`tile_rotation` in Hearth terrain) are carried
+  in the legend but are for a graphical/web client, not Mudlet's built-in
+  mapper, which is color-per-environment only.

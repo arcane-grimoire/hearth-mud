@@ -481,6 +481,9 @@ pub struct Engine {
     /// these; `map_templates` above is the parsed runtime form rebuilt from
     /// them (see `rebuild_map_templates`).
     file_sources: HashMap<String, String>,
+    /// The map name whose GMCP `Terrain.Legend` we last sent each session, so
+    /// the legend rides only map *entry*, not every move. Cleared on disconnect.
+    legend_sent_map: HashMap<String, String>,
     /// Hooks scheduled to fire in the future via `after(ticks, target, hook)`.
     scheduled_hooks: Vec<ScheduledHook>,
     /// API tokens: hash → info. Both session (ephemeral) and persistent tokens.
@@ -732,6 +735,7 @@ impl Engine {
             themes,
             map_templates,
             file_sources,
+            legend_sent_map: HashMap::new(),
             scheduled_hooks,
             api_tokens,
             force_depth: 0,
@@ -2730,6 +2734,9 @@ impl Engine {
             }
             tracing::info!(session_id, "Player disconnected");
         }
+
+        // Forget the last-sent terrain legend so a reconnect gets it fresh.
+        self.legend_sent_map.remove(session_id);
 
         let session_label = format!("session-{}", &session_id[..8]);
         self.api_tokens
@@ -5064,6 +5071,39 @@ impl Engine {
         }
     }
 
+    /// Build the GMCP `Terrain.Legend` payload for a map: each terrain char →
+    /// a stable `env_id` (1000 + its index in sorted char order, offset past
+    /// Mudlet's built-in environment ids) plus its color and presentation
+    /// fields. A terrain with no declared color defaults to neutral gray so
+    /// every entry carries one. Pure/deterministic — same map → same payload.
+    fn terrain_legend(
+        map_name: &str,
+        tmpl: &crate::map_template::MapTemplateFile,
+    ) -> serde_json::Value {
+        let mut chars: Vec<&String> = tmpl.terrain.keys().collect();
+        chars.sort();
+        let mut terrains = serde_json::Map::new();
+        for (i, ch) in chars.iter().enumerate() {
+            let def = &tmpl.terrain[*ch];
+            let mut entry = serde_json::Map::new();
+            entry.insert("env_id".into(), serde_json::json!(1000 + i as i64));
+            entry.insert(
+                "color".into(),
+                serde_json::json!(def.color.clone().unwrap_or_else(|| "#808080".into())),
+            );
+            entry.insert("passable".into(), serde_json::json!(def.passable));
+            if let Some(tp) = &def.title_prefix {
+                entry.insert("title_prefix".into(), serde_json::json!(tp));
+            }
+            if let Some(ti) = &def.tile_image {
+                entry.insert("tile_image".into(), serde_json::json!(ti));
+                entry.insert("tile_rotation".into(), serde_json::json!(def.tile_rotation.as_str()));
+            }
+            terrains.insert((*ch).clone(), serde_json::Value::Object(entry));
+        }
+        serde_json::json!({ "map": map_name, "terrains": terrains })
+    }
+
     fn send_room_data(&mut self, session_id: &str, actor_ref: &str) {
         let room_ref = match self.world.get(actor_ref).and_then(|a| a.location_ref.clone()) {
             Some(r) => r,
@@ -5129,6 +5169,7 @@ impl Engine {
 
         let attr_str = |k: &str| room.attrs.get(k).and_then(|v| v.as_str()).map(str::to_string);
         let attr_int = |k: &str| room.attrs.get(k).and_then(|v| v.as_i64());
+        let map_name = attr_str("map_name");
         if let Some(session) = self.sessions.get(session_id) {
             let _ = session.tx.send(ClientMessage::Room {
                 name: self.world.display_name(room),
@@ -5137,11 +5178,32 @@ impl Engine {
                 contents,
                 num: room_ref.clone(),
                 area: Self::room_area(room),
-                map: attr_str("map_name"),
+                map: map_name.clone(),
                 environment: attr_str("terrain"),
                 x: attr_int("map_x"),
                 y: attr_int("map_y"),
             });
+        }
+
+        // On entering a mapped area, send its terrain legend once — colors +
+        // stable env ids — so a GMCP mapper (Mudlet) can paint rooms by
+        // terrain. Rides map *entry*, not every move: deduped per session by
+        // map name (see `legend_sent_map`). Non-GMCP telnet clients drop the
+        // `Game` message; web clients receive it as a game frame.
+        if let Some(map_name) = map_name {
+            let stale = self.legend_sent_map.get(session_id) != Some(&map_name);
+            if stale
+                && let Some(tmpl) = self.map_templates.get(&map_name)
+            {
+                let data = Self::terrain_legend(&map_name, tmpl);
+                if let Some(session) = self.sessions.get(session_id) {
+                    let _ = session.tx.send(ClientMessage::Game {
+                        channel: "Terrain.Legend".into(),
+                        data,
+                    });
+                }
+                self.legend_sent_map.insert(session_id.to_string(), map_name);
+            }
         }
     }
 
@@ -10347,6 +10409,137 @@ end
         );
         assert!(!bad.ok);
         assert_eq!(bad.error.as_deref(), Some("Target is not a player or NPC"));
+    }
+
+    // -- GMCP Terrain.Legend --
+
+    #[test]
+    fn terrain_legend_assigns_stable_env_ids_and_colors() {
+        use crate::map_template::{MapHeader, MapTemplateFile, TerrainDef, TileRotation};
+        let mk = |color: Option<&str>| TerrainDef {
+            theme: "plains".into(),
+            title_prefix: None,
+            passable: true,
+            color: color.map(String::from),
+            tile_image: None,
+            tile_rotation: TileRotation::default(),
+            attrs: HashMap::new(),
+        };
+        let mut terrain = HashMap::new();
+        terrain.insert("a".to_string(), mk(Some("#3a6a2e")));
+        terrain.insert("b".to_string(), mk(None)); // no color → neutral gray
+        let tmpl = MapTemplateFile {
+            map: MapHeader { name: "iron_hills".into(), grid: "ab".into() },
+            terrain,
+            cells: HashMap::new(),
+        };
+
+        let legend = Engine::terrain_legend("iron_hills", &tmpl);
+        assert_eq!(legend["map"], "iron_hills");
+        // env_ids are 1000 + sorted-index, stable per char.
+        assert_eq!(legend["terrains"]["a"]["env_id"], 1000);
+        assert_eq!(legend["terrains"]["a"]["color"], "#3a6a2e");
+        assert_eq!(legend["terrains"]["a"]["passable"], true);
+        assert_eq!(legend["terrains"]["b"]["env_id"], 1001);
+        assert_eq!(legend["terrains"]["b"]["color"], "#808080");
+        // Deterministic across calls.
+        assert_eq!(legend, Engine::terrain_legend("iron_hills", &tmpl));
+    }
+
+    #[test]
+    fn terrain_legend_rides_map_entry_once_per_session() {
+        use crate::map_template::{MapHeader, MapTemplateFile, TerrainDef, TileRotation};
+        let db = crate::db::Database::open(Path::new(":memory:")).unwrap();
+        let config = Config::default();
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut engine = Engine::new(rx, db, &config);
+
+        let mk = |color: &str| TerrainDef {
+            theme: "plains".into(),
+            title_prefix: None,
+            passable: true,
+            color: Some(color.into()),
+            tile_image: None,
+            tile_rotation: TileRotation::default(),
+            attrs: HashMap::new(),
+        };
+        let mut terrain = HashMap::new();
+        terrain.insert("a".to_string(), mk("#3a6a2e"));
+        terrain.insert("b".to_string(), mk("#8a8a8a"));
+        engine.map_templates.insert(
+            "iron_hills".into(),
+            MapTemplateFile {
+                map: MapHeader { name: "iron_hills".into(), grid: "ab".into() },
+                terrain,
+                cells: HashMap::new(),
+            },
+        );
+
+        // Two rooms on that map, and a player standing in the first.
+        let r1 = engine.world.next_dbref();
+        let mut room1 = GameObject::new(&r1, "hill1", Kind::Room).with_title("Hill One");
+        room1.attrs.insert("map_name".into(), serde_json::json!("iron_hills"));
+        room1.attrs.insert("terrain".into(), serde_json::json!("a"));
+        engine.world.add_object(room1);
+        let r2 = engine.world.next_dbref();
+        let mut room2 = GameObject::new(&r2, "hill2", Kind::Room).with_title("Hill Two");
+        room2.attrs.insert("map_name".into(), serde_json::json!("iron_hills"));
+        room2.attrs.insert("terrain".into(), serde_json::json!("b"));
+        engine.world.add_object(room2);
+
+        let actor = engine.world.next_dbref();
+        engine
+            .world
+            .add_object(GameObject::new(&actor, "p", Kind::Player).with_location(&r1));
+
+        let (client_tx, mut client_rx) = mpsc::unbounded_channel();
+        let sid = "legend-test".to_string();
+        engine.sessions.insert(
+            sid.clone(),
+            Session {
+                tx: client_tx,
+                state: SessionState::Playing {
+                    actor_ref: actor.clone(),
+                    account_id: "acct".into(),
+                    puppet_ref: None,
+                },
+            },
+        );
+
+        // First mapped room → the legend rides along.
+        engine.send_room_data(&sid, &actor);
+        let mut first = Vec::new();
+        while let Ok(m) = client_rx.try_recv() {
+            first.push(m);
+        }
+        let legend = first
+            .iter()
+            .find_map(|m| match m {
+                ClientMessage::Game { channel, data } if channel == "Terrain.Legend" => {
+                    Some(data.clone())
+                }
+                _ => None,
+            })
+            .expect("entering a mapped room should send Terrain.Legend");
+        assert_eq!(legend["map"], "iron_hills");
+        assert_eq!(legend["terrains"]["a"]["color"], "#3a6a2e");
+
+        // Move to another room on the SAME map → no re-send (deduped).
+        if let Some(o) = engine.world.get_mut(&actor) {
+            o.location_ref = Some(r2.clone());
+        }
+        engine.send_room_data(&sid, &actor);
+        let mut second = Vec::new();
+        while let Ok(m) = client_rx.try_recv() {
+            second.push(m);
+        }
+        assert!(
+            !second.iter().any(|m| matches!(
+                m,
+                ClientMessage::Game { channel, .. } if channel == "Terrain.Legend"
+            )),
+            "same-map move must not re-send the legend"
+        );
     }
 
     // -- @import / @export (Stage 4) --

@@ -9,8 +9,13 @@
 > `environment`/`x`/`y` + exit target dbrefs) renders as JSON for web and as a
 > `Room.Info` package for GMCP telnet, and `emit_data` rides the same way; a
 > non-GMCP telnet client drops both. A Mudlet package + install notes ship in
-> `clients/mudlet/`. **Remaining: Stage 4 (Terrain.Legend colors) and Stage 6
-> (tiles).** Open question still open: wilderness rooms get fresh dbrefs per
+> `clients/mudlet/`. **Stage 4 (Terrain.Legend) is done too:** on entering a
+> mapped area the engine sends `Game { channel: "Terrain.Legend", data }` once
+> per map (deduped per session via `legend_sent_map`), giving each terrain char
+> a stable `env_id` (1000 + sorted index) + color from the map template; the
+> Mudlet package registers those as custom env colors and paints each room by
+> its `environment`. **Remaining: Stage 6 (tile images beyond the stock
+> mapper).** Open question still open: wilderness rooms get fresh dbrefs per
 > instantiation, so a wandering mapper there needs a `map`+coords stable id
 > (the payload already carries `map`/`x`/`y` for when the Mudlet side keys on
 > them).
