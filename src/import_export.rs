@@ -551,12 +551,17 @@ fn apply(
             let fk = format!("{}/{}", area.area_name, room.key);
             incoming_keys.insert(fk.clone());
             let ref_id = key_map[&fk].clone();
+            let archetype_ref = room
+                .archetype
+                .as_ref()
+                .and_then(|key| loader::resolve_key(&area.area_name, key, &key_map).ok());
             let is_new = world.get(&ref_id).is_none();
             let mut changed = is_new;
 
             if is_new {
                 let mut obj = GameObject::new(&ref_id, &room.key, Kind::Room).with_title(&room.title);
                 obj.description = room.description.clone();
+                obj.archetype_ref = archetype_ref.clone();
                 for t in &room.tags {
                     if let Ok(tag) = Tag::parse(t) {
                         obj.tags.insert(tag);
@@ -567,6 +572,10 @@ fn apply(
                 world.add_object(obj);
             } else {
                 let obj = world.get_mut(&ref_id).unwrap();
+                if obj.archetype_ref != archetype_ref {
+                    obj.archetype_ref = archetype_ref.clone();
+                    changed = true;
+                }
                 if obj.title.as_deref() != Some(room.title.as_str()) {
                     obj.title = Some(room.title.clone());
                     changed = true;
@@ -613,6 +622,12 @@ fn apply(
                 Some(loc) => Some(loader::resolve_key(&area.area_name, loc, &key_map)?),
                 None => None,
             };
+            // Resolve the declared archetype key to a dbref (cycles dropped),
+            // before the mutable borrow below. Mirrors the boot loader.
+            let archetype_ref = object
+                .archetype
+                .as_ref()
+                .and_then(|key| loader::resolve_key(&area.area_name, key, &key_map).ok());
             let is_new = world.get(&ref_id).is_none();
             let mut changed = is_new;
 
@@ -625,6 +640,7 @@ fn apply(
                 if let Some(loc) = &location_ref {
                     obj = obj.with_location(loc.clone());
                 }
+                obj.archetype_ref = archetype_ref.clone();
                 for t in &object.tags {
                     if let Ok(tag) = Tag::parse(t) {
                         obj.tags.insert(tag);
@@ -640,6 +656,10 @@ fn apply(
                     && obj.title.as_deref() != Some(title.as_str())
                 {
                     obj.title = Some(title.clone());
+                    changed = true;
+                }
+                if obj.archetype_ref != archetype_ref {
+                    obj.archetype_ref = archetype_ref.clone();
                     changed = true;
                 }
                 if obj.description != object.description {
@@ -686,6 +706,10 @@ fn apply(
             }
         }
     }
+
+    // Validate archetype delegation against the final graph (order-independent
+    // cycle handling — see `loader::break_archetype_cycles`).
+    loader::break_archetype_cycles(world);
 
     // Pass 3: exits and scripts — both may reference rooms/objects, so wait
     // until every room/object identity exists.
@@ -1289,6 +1313,10 @@ pub fn export_bundle(path: &Path, world: &mut World) -> Result<ExportReport, Str
                         tags,
                         attrs,
                         locks: obj.locks.clone(),
+                        archetype: obj
+                            .archetype_ref
+                            .as_deref()
+                            .and_then(|r| resolve_ref_to_key(r, area_name, &ref_to_key)),
                         script,
                         libs,
                     });
@@ -1313,6 +1341,10 @@ pub fn export_bundle(path: &Path, world: &mut World) -> Result<ExportReport, Str
                         description: obj.description.clone(),
                         tags,
                         locks: obj.locks.clone(),
+                        archetype: obj
+                            .archetype_ref
+                            .as_deref()
+                            .and_then(|r| resolve_ref_to_key(r, area_name, &ref_to_key)),
                         script,
                         libs,
                     });
@@ -1354,6 +1386,10 @@ pub fn export_bundle(path: &Path, world: &mut World) -> Result<ExportReport, Str
                         tags,
                         attrs,
                         locks: obj.locks.clone(),
+                        archetype: obj
+                            .archetype_ref
+                            .as_deref()
+                            .and_then(|r| resolve_ref_to_key(r, area_name, &ref_to_key)),
                         script,
                         libs,
                     });
@@ -1998,6 +2034,53 @@ mod tests {
             "module source must round-trip, got: {}",
             host.libs["greetings"].source
         );
+    }
+
+    /// An archetype relationship declared only via `archetype_ref` must
+    /// survive export → import: export resolves the parent dbref to its file
+    /// key, and import resolves it back to the (freshly assigned) dbref, so the
+    /// instance still delegates to its archetype in the new world.
+    #[test]
+    fn archetype_relationship_round_trips_through_export() {
+        let src = {
+            let mut world = World::new();
+            let goblin = world.next_dbref();
+            world.add_object(GameObject::new(&goblin, "goblin", Kind::Npc).with_title("Goblin"));
+            let grunt = world.next_dbref();
+            let mut g = GameObject::new(&grunt, "grunt", Kind::Npc);
+            g.archetype_ref = Some(goblin.clone());
+            world.add_object(g);
+            world
+        };
+
+        let export_dir = TempDir::new();
+        {
+            let mut world = src;
+            export_bundle(&export_dir.path, &mut world).unwrap();
+        }
+
+        let db = temp_db();
+        let mut fresh = World::new();
+        import_bundle(&export_dir.path, &mut fresh, &db, false, Some("#1")).unwrap();
+
+        let goblin2 = fresh
+            .objects
+            .values()
+            .find(|o| o.key == "goblin")
+            .expect("goblin archetype re-imported")
+            .ref_id
+            .clone();
+        let grunt2 = fresh
+            .objects
+            .values()
+            .find(|o| o.key == "grunt")
+            .expect("grunt instance re-imported");
+        assert_eq!(
+            grunt2.archetype_ref.as_deref(),
+            Some(goblin2.as_str()),
+            "the archetype relationship must survive export->import"
+        );
+        assert_eq!(fresh.resolved_title(grunt2).as_deref(), Some("Goblin"));
     }
 
     /// Objects created entirely in-game (no `@import` involved, no

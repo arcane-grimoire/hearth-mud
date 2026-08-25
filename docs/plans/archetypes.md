@@ -159,6 +159,27 @@ than today's inline stats, stage 1 earned its keep.
 
 ## Stage 2+ (only once stage 1 proves out)
 
+- **File-based archetype declaration — DONE.** `archetype = "area/key"` on a
+  room/object in TOML resolves to `archetype_ref` at load time (both the boot
+  loader and `@import`); `@export` round-trips it. Cycles are broken in a
+  post-pass against the *final* graph (`break_archetype_cycles`), so the guard
+  is order-independent even when a reload rewires a chain. This is the mudlib
+  foundation — base archetypes ship as file content. (Runtime *creation* of new
+  archetypes is deliberately still out; the type layer is file-first.)
+  - *Known limitations (tracked, both narrow — they don't affect a fresh
+    `archetype =` declaration, only rarer edits, and no shipped content hits
+    them yet):*
+    - **Converting an existing managed object to delegate doesn't clear its old
+      own-fields.** If a TOML edit adds `archetype =` and *drops* fields the
+      object used to define (title/attrs), the stale own-values remain and
+      shadow the inherited defaults. The real fix is making managed
+      reconciliation *file-authoritative* (replace attrs / clear a dropped
+      title), a broader change than archetypes — deferred.
+    - **A room instance can't inherit its title through export.** `RoomDef.title`
+      is a required `String`, so an archetyped room with no own title exports
+      `title = ""`, which re-imports as an override. Fix: make `RoomDef.title`
+      `Option` (as `ObjectDef.title` already is) — deferred until archetyped
+      rooms actually exist.
 - **Traits (`has-a`)** — additive components per the invariant above; unify with
   tags/`system:global`.
 - **`pass()`** — single-chain `super`; call the inherited hook from an override.

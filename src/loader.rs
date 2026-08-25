@@ -124,6 +124,10 @@ pub(crate) struct RoomDef {
     pub(crate) tags: Vec<String>,
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub(crate) locks: std::collections::HashMap<String, String>,
+    /// The archetype this room delegates to, as a file key ("area/key"), if
+    /// any — see `docs/plans/archetypes.md`. Resolved to a dbref at load time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) archetype: Option<String>,
     /// The room's behavior script (hooks as functions in one shared scope).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) script: Option<ScriptSource>,
@@ -150,6 +154,12 @@ pub(crate) struct ObjectDef {
     pub(crate) attrs: std::collections::HashMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub(crate) locks: std::collections::HashMap<String, String>,
+    /// The archetype this object delegates to, as a file key ("area/key"), if
+    /// any — see `docs/plans/archetypes.md`. Resolved to a dbref at load time;
+    /// the instance inherits the archetype's script/title/description/attrs/
+    /// tags, keeping its own overrides and state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) archetype: Option<String>,
     /// The object's behavior script (hooks as functions in one shared scope).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) script: Option<ScriptSource>,
@@ -482,11 +492,16 @@ pub fn load_game_dir(
                 .get(&file_key)
                 .cloned()
                 .expect("dbref assigned in pass 1");
+            // Resolve before the mutable borrow below (immutable borrow of
+            // `world` for the cycle check ends here); used in whichever branch
+            // runs.
+            let archetype_ref = resolve_archetype(&ref_id, area_name, &room.archetype, &key_map);
             if let Some(existing) = world.get_mut(&ref_id) {
                 if existing.tags.contains(&managed) {
                     existing.title = Some(room.title.clone());
                     existing.description = room.description.clone();
                     existing.locks = room.locks.clone();
+                    existing.archetype_ref = archetype_ref;
                     sync_managed_tags(existing, &room.tags);
                     install_script(existing, &room.script, &room.libs, base_dir)?;
                     updated += 1;
@@ -502,6 +517,7 @@ pub fn load_game_dir(
                 }
             }
             obj.locks = room.locks.clone();
+            obj.archetype_ref = archetype_ref;
             obj.attrs.insert(FILE_KEY_ATTR.into(), serde_json::json!(file_key));
             install_script(&mut obj, &room.script, &room.libs, base_dir)?;
             world.add_object(obj);
@@ -521,6 +537,7 @@ pub fn load_game_dir(
                 Some(loc) => Some(resolve_key(area_name, loc, &key_map)?),
                 None => None,
             };
+            let archetype_ref = resolve_archetype(&ref_id, area_name, &object.archetype, &key_map);
             if let Some(existing) = world.get_mut(&ref_id) {
                 if existing.tags.contains(&managed) {
                     if let Some(title) = &object.title {
@@ -530,6 +547,7 @@ pub fn load_game_dir(
                     if let Some(loc) = &location_ref {
                         existing.location_ref = Some(loc.clone());
                     }
+                    existing.archetype_ref = archetype_ref;
                     existing.attrs.extend(object.attrs.clone());
                     existing.locks = object.locks.clone();
                     sync_managed_tags(existing, &object.tags);
@@ -555,6 +573,7 @@ pub fn load_game_dir(
             obj.attrs = object.attrs.clone();
             obj.attrs.insert(FILE_KEY_ATTR.into(), serde_json::json!(file_key));
             obj.locks = object.locks.clone();
+            obj.archetype_ref = archetype_ref;
             install_script(&mut obj, &object.script, &object.libs, base_dir)?;
             world.add_object(obj);
             created += 1;
@@ -639,6 +658,11 @@ pub fn load_game_dir(
             created += 1;
         }
     }
+
+    // Validate archetype delegation against the FINAL graph, now that every
+    // file-declared `archetype_ref` is set (order-independent — see
+    // `break_archetype_cycles`).
+    break_archetype_cycles(world);
 
     tracing::info!(
         ?game_dir,
@@ -740,6 +764,56 @@ pub fn resolve_file_key(world: &World, file_key: &str) -> Option<String> {
         .values()
         .find(|o| o.attrs.get(FILE_KEY_ATTR).and_then(|v| v.as_str()) == Some(file_key))
         .map(|o| o.ref_id.clone())
+}
+
+/// Resolve a room/object's declared `archetype` file key to the dbref it was
+/// assigned in pass 1, guarding against cycles. Returns `None` (with a warning)
+/// when the key can't be resolved or would create an archetype cycle, so a bad
+/// declaration disables delegation for that object rather than failing the
+/// whole load. See `docs/plans/archetypes.md`.
+fn resolve_archetype(
+    ref_id: &str,
+    area_name: &str,
+    archetype: &Option<String>,
+    key_map: &HashMap<String, String>,
+) -> Option<String> {
+    let key = archetype.as_ref()?;
+    match resolve_key(area_name, key, key_map) {
+        Ok(arch_ref) => Some(arch_ref),
+        Err(e) => {
+            tracing::warn!(object = %ref_id, archetype = %key, error = %e, "archetype could not be resolved — ignored");
+            None
+        }
+    }
+}
+
+/// Break any archetype cycles in the FINAL graph, after all `archetype_ref`s
+/// have been set from a batch of files.
+///
+/// Cycle-checking each edge as it's set (against the partially-updated graph)
+/// is order-dependent — a reload that *rewires* an existing chain can see a
+/// stale edge and wrongly drop a valid new one. So resolution just sets the
+/// declared edges, and this pass validates the whole graph at once: any object
+/// that appears in its own ancestor chain has its `archetype_ref` cleared
+/// (loudly), which is deterministic regardless of file order.
+pub(crate) fn break_archetype_cycles(world: &mut World) {
+    let cyclic: Vec<String> = world
+        .objects
+        .values()
+        .filter_map(|o| {
+            let arch = o.archetype_ref.as_deref()?;
+            // `o` is in a cycle iff `o` is reachable from its own parent.
+            world
+                .would_cycle_archetype(&o.ref_id, arch)
+                .then(|| o.ref_id.clone())
+        })
+        .collect();
+    for ref_id in cyclic {
+        tracing::warn!(object = %ref_id, "archetype forms a cycle — delegation cleared");
+        if let Some(o) = world.get_mut(&ref_id) {
+            o.archetype_ref = None;
+        }
+    }
 }
 
 /// Resolve a file-level reference (a bare key like `"crossroads"`, or a
@@ -924,6 +998,79 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn file_declared_archetype_resolves_and_delegates() {
+        let dir = TempGameDir::new();
+        dir.write_area(
+            "bestiary",
+            "bestiary.toml",
+            r#"
+area = "bestiary"
+
+[[objects]]
+key = "goblin"
+kind = "npc"
+title = "Goblin"
+[objects.attrs]
+max_hp = 5
+[objects.script]
+source = "function on_death(this, actor, room) end"
+
+[[objects]]
+key = "grunt"
+kind = "npc"
+archetype = "bestiary/goblin"
+"#,
+        );
+
+        let mut world = World::new();
+        let result = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+        let goblin_ref = result.key_map.get("bestiary/goblin").unwrap();
+        let grunt_ref = result.key_map.get("bestiary/grunt").unwrap();
+
+        let grunt = world.get(grunt_ref).unwrap();
+        // The `archetype = "bestiary/goblin"` key resolved to the goblin's dbref.
+        assert_eq!(grunt.archetype_ref.as_deref(), Some(goblin_ref.as_str()));
+        // And the instance delegates: title/attr/hook all resolve up the chain
+        // even though the grunt declares none of its own.
+        assert_eq!(world.resolved_title(grunt).as_deref(), Some("Goblin"));
+        assert_eq!(world.resolved_attr(grunt, "max_hp"), Some(&serde_json::json!(5)));
+        assert!(crate::softcode::hooks::object_responds(&world, grunt, "on_death"));
+    }
+
+    #[test]
+    fn file_declared_archetype_cycle_is_ignored() {
+        let dir = TempGameDir::new();
+        // a -> b and b -> a would cycle; the loader must not hang, and must
+        // drop one side of the cycle rather than fail the load.
+        dir.write_area(
+            "loop",
+            "loop.toml",
+            r#"
+area = "loop"
+
+[[objects]]
+key = "a"
+kind = "item"
+archetype = "loop/b"
+
+[[objects]]
+key = "b"
+kind = "item"
+archetype = "loop/a"
+"#,
+        );
+        let mut world = World::new();
+        let result = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+        let a = world.get(result.key_map.get("loop/a").unwrap()).unwrap();
+        let b = world.get(result.key_map.get("loop/b").unwrap()).unwrap();
+        // At most one of the two edges survives — never both (that's the cycle).
+        assert!(
+            !(a.archetype_ref.is_some() && b.archetype_ref.is_some()),
+            "a cyclic archetype pair must not both resolve"
+        );
     }
 
     #[test]
