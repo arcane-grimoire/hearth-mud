@@ -145,6 +145,7 @@ docs/
   adr/                 6 architectural decision records (ADR 0001–0006)
   plans/               Pending/in-progress design docs (dbref migration, attribute schemas, client map integration)
   audits/              Point-in-time code/design audits
+  archetypes.md        Archetypes guide (is-a delegation, file-based types, hot-reload)
   commands.md          Command reference
   getting-started.md   Getting started guide
   softcode-guide.md    Softcode programming guide
