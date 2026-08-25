@@ -4414,6 +4414,10 @@ impl Engine {
             None => return format!("No account named '{}'.\r\n", username),
         };
         self.accounts.grant_scope(&account_id, scope);
+        // Persist immediately — a scope change lost to a crash before the next
+        // autosave is a silent, surprising regression (see the same save after
+        // character creation and @chown).
+        self.db.save_accounts(&self.accounts).ok();
         format!("Granted '{}' scope to {}.\r\n", scope, username)
     }
 
@@ -4436,6 +4440,7 @@ impl Engine {
                 return "You can't revoke your own admin scope.\r\n".to_string();
             }
             self.accounts.revoke_scope(&target_id, scope);
+            self.db.save_accounts(&self.accounts).ok();
             format!("Revoked '{}' scope from {}.\r\n", scope, username)
         } else {
             format!("No account named '{}'.\r\n", username)
