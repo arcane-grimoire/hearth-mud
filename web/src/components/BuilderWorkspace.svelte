@@ -597,8 +597,8 @@
   .nf-go:disabled { opacity: 0.5; cursor: default; }
   .nf-x { background: none; border: 1px solid var(--border-default, #332c22); color: var(--text-muted, #8c8378); border-radius: 6px; padding: 5px 10px; cursor: pointer; font: inherit; font-size: 12px; }
 
-  .views { display: flex; gap: 4px; padding: 8px; }
-  .view-btn { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 5px; background: var(--bg-primary, #12100c); border: 1px solid var(--border-default, #332c22); color: var(--text-secondary, #b6a888); border-radius: 6px; padding: 5px 4px; cursor: pointer; font: inherit; font-size: 11.5px; }
+  .views { display: flex; flex-wrap: wrap; gap: 4px; padding: 8px; }
+  .view-btn { flex: 1 1 auto; min-width: 62px; white-space: nowrap; display: inline-flex; align-items: center; justify-content: center; gap: 5px; background: var(--bg-primary, #12100c); border: 1px solid var(--border-default, #332c22); color: var(--text-secondary, #b6a888); border-radius: 6px; padding: 5px 4px; cursor: pointer; font: inherit; font-size: 11.5px; }
   .view-btn:hover { border-color: var(--accent-amber, #c9956b); color: var(--text-primary, #ece0c8); }
   .chips { display: flex; flex-wrap: wrap; gap: 3px; padding: 8px 8px 6px; border-bottom: 1px solid var(--border-muted, #211d16); }
   .chip { display: inline-flex; align-items: center; gap: 4px; background: var(--bg-primary, #12100c); border: 1px solid var(--border-default, #332c22); border-radius: 12px; cursor: pointer; padding: 2px 8px; color: var(--text-muted, #8c8378); font: inherit; font-size: 11px; }
