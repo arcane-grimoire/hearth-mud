@@ -106,7 +106,7 @@ src/
   softcode/
     mod.rs             Intent enum, IntentBatch, Budget, SoftcodeRuntime, bytecode cache
     api.rs             Luau-facing functions (read, write, predicates, utility, noise, rng, math, scheduling, emit_data, ink)
-    hooks.rs           32 known hooks; ObjectScript (one script per object, hooks as functions) + LibModule; derive_hooks (full_moon parser)
+    hooks.rs           36 known hooks; ObjectScript (one script per object, hooks as functions) + LibModule; derive_hooks (full_moon parser)
     ink.rs             Ink narrative runtime (bladeink), compile cache, conversation state
   world/
     mod.rs             World struct (objects HashMap, queries)
@@ -153,7 +153,8 @@ docs/
 ## Key features
 
 - **Everything is an object** — rooms, items, NPCs, players, exits all share `GameObject`
-- **32 hooks** — can_get, on_get, can_drop, on_drop, can_put, on_put, can_use, on_use, can_traverse, can_enter, on_enter, on_leave, can_look, on_look, can_say, on_say, can_see, on_move, on_destroy, on_connect, on_disconnect, on_whisper, on_emote, on_receive, on_damage, on_death, on_tick, on_startup, on_shutdown, on_reload, on_save, on_create
+- **36 hooks** — can_get, on_get, can_drop, on_drop, can_put, on_put, can_use, on_use, can_traverse, can_enter, on_enter, on_leave, can_look, on_look, can_say, on_say, can_see, on_move, on_destroy, on_connect, on_disconnect, on_whisper, on_emote, on_receive, on_damage, on_death, on_tick, on_startup, on_shutdown, on_reload, on_save, on_create, on_hour, on_day, on_dawn, on_dusk (the last four are game-clock rollovers, fired on `system:global` objects)
+- **Game clock** — optional per-game in-world time (`[clock]` config; absent = off). A monotonic `game_minute` counter advances on the tick heartbeat (`minutes_per_tick`, fractional allowed), persisted in the DB `meta` table. `get_time()` softcode reads `{ total_minutes, minute, hour, day, month, year, is_day, weekday?, month_name? }`; the engine fires `on_hour`/`on_day`/`on_dawn`/`on_dusk` on `system:global` objects on rollover (the hook reads `get_time()`); and the `game_time_between(start, end)` lock predicate uses the game hour (`time_between` stays real UTC). Calendar shape (hours/day, days/month, months/year, dawn/dusk, month/day names, epoch) is all config. See `src/clock.rs`.
 - **Object scripts** — one Luau script per object (the Godot/LPMUD model): a single chunk defines the object's hooks as top-level functions sharing one scope (helpers, constants, `require`d modules). The engine derives which hooks a script defines by parsing it with `full_moon` (`derive_hooks`), so a `function on_get(...)` inside a string literal is correctly ignored. `require`able `lib_<name>` modules are a separate concern, stored per-object in `libs` (they `return` a value, so they can't be functions in the shared script scope).
 - **Attribute schemas** — an object/archetype declares an `attr_schema` (typed descriptors: type, label, help, default, min/max/enum-values/ref-source; closed `AttrType` set in `src/attr_schema.rs` with a non-fatal `Unknown` fallback). The schema inherits down the archetype chain (`World::resolved_attr_schema`), persists + round-trips through export/import, and `examine` returns it with per-descriptor source, so the web builder renders declared attrs as typed widgets (`AttrField.svelte`: number/checkbox/enum-dropdown/color/`ref`-dropdown via `list_ref_candidates`/`list<T>` rows) instead of raw key/value boxes. Descriptive metadata only — attr values stay free-form.
 - **~85 Luau API functions** — read (21, incl. all_objects), predicates (9), write (incl. `set_script`, `set_lib`, emit_data, `set_aliases`, `update_exit`, `set_lock`/`clear_lock`, `clone_object`, `run_command_as`, and `move_object` with `announce`/`fire_hooks` flags), spatial (4), utility (5), noise (5), seeded RNG (4), coordinate math (6), grid (1), ink (7)
@@ -206,6 +207,17 @@ locked = ["std"]           # optional: file-key/area prefixes whose managed
 # cors_allowed_origins = ["https://play.example.com"]  # optional: restrict
                            # browser CORS to an allow-list in production;
                            # unset = permissive (dev only).
+
+# [clock]                  # optional in-world game clock; omit = no clock
+# minutes_per_tick = 1     # 1 tick (1s) → 1 game minute; day = 24 real min
+# hours_per_day = 24
+# days_per_month = 30
+# months_per_year = 12
+# dawn_hour = 6            # on_dawn / is_day boundary
+# dusk_hour = 20           # on_dusk boundary
+# month_names = ["Frostmoon", "Thawmoon"]   # optional
+# day_names = ["Sun", "Moon"]               # optional weekday cycle
+# start = { year = 1, month = 1, day = 1, hour = 6, minute = 0 }  # epoch
 ```
 
 **`game_dir` is always required, even with `load_world_files = false`.**

@@ -474,6 +474,24 @@ declare function ink_set_var(actor: ObjectRef, npc: ObjectRef, name: string, val
 --- call — use `get_tick`, not `get_tick()`.
 declare get_tick: number
 
+type GameTime = {
+    total_minutes: number,
+    minute: number,
+    hour: number,
+    day: number,
+    month: number,
+    year: number,
+    is_day: boolean,
+    weekday: number?,
+    day_name: string?,
+    month_name: string?,
+}
+
+--- The in-world game clock, or nil when no `[clock]` is configured. Unlike
+--- `get_tick` this is a CALL. `year`/`month`/`day` are 1-based; `hour`/`minute`
+--- 0-based; `is_day` is dawn ≤ hour < dusk. See the game clock in the docs.
+declare function get_time(): GameTime?
+
 --- Print a debug message to the server console log.
 declare function log(message: string): ()
 

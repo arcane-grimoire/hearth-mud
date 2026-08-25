@@ -141,6 +141,10 @@ internal working memory that shouldn't be visible as object attributes.
 | `on_save` | Before each world save (autosave or `@save`) | `(this, state, room)` |
 | `on_create` | When this object is first created at runtime | `(this, state, room)` |
 | `on_destroy` | Before this object is destroyed | `(this, actor, room)` |
+| `on_hour` | Game clock: the hour rolled over (on `system:global` objects) | `(this)` — read `get_time()` |
+| `on_day` | Game clock: the day rolled over | `(this)` — read `get_time()` |
+| `on_dawn` | Game clock: the hour reached `dawn_hour` | `(this)` — read `get_time()` |
+| `on_dusk` | Game clock: the hour reached `dusk_hour` | `(this)` — read `get_time()` |
 | `cmd_*` | Any name — becomes a player command | `(this, actor, room, args)` |
 
 ### Global hooks
@@ -691,7 +695,8 @@ They're simpler than `can_` hooks for common permission patterns.
 | `has_attr(key, value)` | Actor has this attribute with this value |
 | `in_inventory(tag_spec)` | Actor is carrying an object with this tag |
 | `is_kind(kind)` | Actor is this kind (player, npc, item) |
-| `time_between(start, end)` | Current UTC hour is in range |
+| `time_between(start, end)` | Current UTC (real-world) hour is in range |
+| `game_time_between(start, end)` | Current in-world clock hour is in range (false if no `[clock]`) |
 | `true` / `false` | Always allow / always deny |
 
 Combinators: `AND`, `OR`, `NOT`, parentheses.

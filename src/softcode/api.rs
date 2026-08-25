@@ -362,6 +362,7 @@ pub fn install<'scope, 'env>(
     map_templates: &'env std::collections::HashMap<String, MapTemplateFile>,
     scheduled_hooks: &'env [crate::softcode::ScheduledHook],
     tick_count: u64,
+    game_time: Option<serde_json::Value>,
     ink_runtime: &'env RefCell<ink::InkRuntime>,
 ) -> mlua::Result<Table> {
     // -- Object proxy (issue #19) --
@@ -633,6 +634,18 @@ pub fn install<'scope, 'env>(
     // -- Read API --
 
     env.set("get_tick", tick_count)?;
+
+    // get_time(): the in-world clock as a table (minute/hour/day/month/year,
+    // is_day, optional weekday/day_name/month_name), or nil when no clock is
+    // configured. A FUNCTION (unlike get_tick, a bare value). Builds a fresh
+    // table per call so a caller mutating the result can't corrupt later reads.
+    env.set(
+        "get_time",
+        scope.create_function(move |lua, ()| match &game_time {
+            Some(v) => lua.to_value(v),
+            None => Ok(Value::Nil),
+        })?,
+    )?;
 
     let mt = obj_mt.clone();
     env.set(

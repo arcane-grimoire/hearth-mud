@@ -54,6 +54,12 @@ pub const KNOWN_HOOKS: &[&str] = &[
     "on_reload",
     "on_save",
     "on_create",
+    // Game-clock rollovers — fired on `system:global` objects that define them,
+    // with the current `get_time()` table as args. See `crate::clock`.
+    "on_hour",
+    "on_day",
+    "on_dawn",
+    "on_dusk",
 ];
 
 /// Whether `name` is a hook an object script may define.

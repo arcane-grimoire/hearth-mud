@@ -11,6 +11,7 @@ pub enum LockExpr {
     IsKind(Kind),
     IsOwner,
     TimeBetween(u32, u32),
+    GameTimeBetween(u32, u32),
     And(Box<LockExpr>, Box<LockExpr>),
     Or(Box<LockExpr>, Box<LockExpr>),
     Not(Box<LockExpr>),
@@ -21,6 +22,9 @@ pub struct AccessContext<'a> {
     pub world: &'a World,
     pub account_scopes: &'a [String],
     pub target: Option<&'a GameObject>,
+    /// The current in-world clock hour, when a game clock is configured. Backs
+    /// `game_time_between()`; `None` (no clock) makes that predicate false.
+    pub game_hour: Option<u32>,
 }
 
 pub fn evaluate(expr: &LockExpr, ctx: &AccessContext) -> bool {
@@ -54,6 +58,18 @@ pub fn evaluate(expr: &LockExpr, ctx: &AccessContext) -> bool {
                 hour >= *start || hour < *end
             }
         }
+        // In-world clock, not wall-clock. False when no game clock is
+        // configured (`ctx.game_hour` is None).
+        LockExpr::GameTimeBetween(start, end) => match ctx.game_hour {
+            Some(hour) => {
+                if start <= end {
+                    hour >= *start && hour < *end
+                } else {
+                    hour >= *start || hour < *end
+                }
+            }
+            None => false,
+        },
         LockExpr::And(a, b) => evaluate(a, ctx) && evaluate(b, ctx),
         LockExpr::Or(a, b) => evaluate(a, ctx) || evaluate(b, ctx),
         LockExpr::Not(inner) => !evaluate(inner, ctx),
@@ -240,6 +256,21 @@ fn parse_atom(tokens: &[String], pos: &mut usize) -> Result<LockExpr, String> {
                 }
                 Ok(LockExpr::TimeBetween(start, end))
             }
+            "game_time_between" => {
+                if args.len() != 2 {
+                    return Err("game_time_between() takes 2 arguments".into());
+                }
+                let start: u32 = args[0]
+                    .parse()
+                    .map_err(|_| format!("Invalid hour: '{}'", args[0]))?;
+                let end: u32 = args[1]
+                    .parse()
+                    .map_err(|_| format!("Invalid hour: '{}'", args[1]))?;
+                if start > 23 || end > 23 {
+                    return Err("Hours must be 0-23".into());
+                }
+                Ok(LockExpr::GameTimeBetween(start, end))
+            }
             _ => Err(format!("Unknown lock function: '{}'", func_name)),
         }
     } else {
@@ -331,7 +362,30 @@ mod tests {
             world,
             account_scopes: scopes,
             target: None,
+            game_hour: None,
         }
+    }
+
+    #[test]
+    fn game_time_between_reads_game_hour_and_needs_a_clock() {
+        let actor = test_actor(&[], &[]);
+        let world = World::new();
+        let scopes: Vec<String> = vec![];
+        let mk = |gh: Option<u32>| AccessContext {
+            actor: &actor,
+            world: &world,
+            account_scopes: &scopes,
+            target: None,
+            game_hour: gh,
+        };
+        // Daytime window 6..20.
+        assert!(evaluate_lock_string("game_time_between(6, 20)", &mk(Some(12))).unwrap());
+        assert!(!evaluate_lock_string("game_time_between(6, 20)", &mk(Some(3))).unwrap());
+        // Overnight wrap 20..6.
+        assert!(evaluate_lock_string("game_time_between(20, 6)", &mk(Some(23))).unwrap());
+        assert!(!evaluate_lock_string("game_time_between(20, 6)", &mk(Some(12))).unwrap());
+        // No clock configured → always false, never an error.
+        assert!(!evaluate_lock_string("game_time_between(6, 20)", &mk(None)).unwrap());
     }
 
     #[test]

@@ -44,6 +44,11 @@ pub struct Config {
     /// any origin could drive the authenticated REST API. Set an explicit list
     /// (e.g. `["https://play.example.com"]`) in production.
     pub cors_allowed_origins: Option<Vec<String>>,
+    /// In-world game clock. `None` (the default) = no clock: `get_time()`
+    /// returns nil, the `on_hour`/`on_day`/`on_dawn`/`on_dusk` hooks never
+    /// fire, and `game_time_between()` locks are always false. Provide a
+    /// `[clock]` table to enable it. See `crate::clock::ClockConfig`.
+    pub clock: Option<crate::clock::ClockConfig>,
 }
 
 impl Default for Config {
@@ -61,6 +66,7 @@ impl Default for Config {
             load_world_files: true,
             locked: Vec::new(),
             cors_allowed_origins: None,
+            clock: None,
         }
     }
 }

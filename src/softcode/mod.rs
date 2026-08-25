@@ -1343,6 +1343,10 @@ pub struct SoftcodeRuntime {
     /// per-hook-fire syncs become no-ops while libs are unchanged.
     libs_dirty: std::cell::Cell<bool>,
     ink: RefCell<ink::InkRuntime>,
+    /// The current in-world clock as a `get_time()` table, set by the engine
+    /// whenever `game_minute` advances (`None` when no clock is configured).
+    /// Read at each `api::install` so `get_time()` reflects live game time.
+    current_game_time: RefCell<Option<serde_json::Value>>,
 }
 
 pub(crate) const MODULE_SOURCES_KEY: &str = "_hearth_module_sources";
@@ -1411,7 +1415,15 @@ impl SoftcodeRuntime {
             // Start dirty: nothing has been synced yet.
             libs_dirty: std::cell::Cell::new(true),
             ink: RefCell::new(ink::InkRuntime::new()),
+            current_game_time: RefCell::new(None),
         }
+    }
+
+    /// Set the in-world clock snapshot exposed to softcode as `get_time()`.
+    /// Called by the engine on each tick advance (`None` clears it when no
+    /// clock is configured).
+    pub fn set_game_time(&self, time: Option<serde_json::Value>) {
+        *self.current_game_time.borrow_mut() = time;
     }
 
     fn install_require(lua: &Lua) {
@@ -1815,6 +1827,7 @@ impl SoftcodeRuntime {
             ctx.map_templates,
             ctx.scheduled_hooks,
             ctx.tick_count,
+            self.current_game_time.borrow().clone(),
             &self.ink,
         )?;
 
@@ -1934,6 +1947,7 @@ impl SoftcodeRuntime {
                 map_templates,
                 scheduled_hooks,
                 tick_count,
+                self.current_game_time.borrow().clone(),
                 &self.ink,
             )?;
 
@@ -2289,6 +2303,7 @@ impl SoftcodeRuntime {
                         &empty_templates,
                         &[],
                         0,
+                        self.current_game_time.borrow().clone(),
                         &self.ink,
                     )?;
 

@@ -162,6 +162,25 @@ impl Database {
             .optional()
     }
 
+    /// Persist the game-clock minute counter in the `meta` table (alongside
+    /// `next_id`), so in-world time survives a restart.
+    pub fn save_game_minute(&self, minute: u64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('game_minute', ?1)",
+            [minute.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// The saved game-clock minute counter, or 0 if none was stored yet.
+    pub fn load_game_minute(&self) -> rusqlite::Result<u64> {
+        let v: Option<String> = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = 'game_minute'", [], |r| r.get(0))
+            .optional()?;
+        Ok(v.and_then(|s| s.parse().ok()).unwrap_or(0))
+    }
+
     pub fn save_accounts(&self, accounts: &AccountStore) -> rusqlite::Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("DELETE FROM accounts", [])?;

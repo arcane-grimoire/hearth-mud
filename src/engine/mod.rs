@@ -463,6 +463,14 @@ pub struct Engine {
     tick_count: u64,
     tick_secs: u64,
     autosave_secs: u64,
+    /// In-world game clock config (`None` = no clock). See `crate::clock`.
+    clock: Option<crate::clock::ClockConfig>,
+    /// Monotonic in-world minute counter (minutes since the epoch `start`),
+    /// advanced on each tick by `clock.minutes_per_tick`. Persisted in the DB
+    /// `meta` table so game time survives a restart.
+    game_minute: u64,
+    /// Fractional-minute remainder, so a `minutes_per_tick < 1` still advances.
+    game_minute_accum: f64,
     /// The configured spawn room *key* (e.g. `"town/crossroads"`), used to
     /// re-resolve `spawn_room_ref` after `@reload-world`.
     spawn_room: String,
@@ -719,6 +727,15 @@ impl Engine {
             }
         }
 
+        // Game clock: restore the counter and prime the softcode `get_time()`
+        // snapshot. No `[clock]` config → the counter is inert and get_time()
+        // stays nil.
+        let clock = config.clock.clone();
+        let game_minute = db.load_game_minute().unwrap_or(0);
+        if let Some(cfg) = &clock {
+            softcode.set_game_time(Some(cfg.to_json(game_minute)));
+        }
+
         Self {
             world,
             accounts,
@@ -729,6 +746,9 @@ impl Engine {
             tick_count: 0,
             tick_secs: config.tick_secs,
             autosave_secs: config.autosave_secs,
+            clock,
+            game_minute,
+            game_minute_accum: 0.0,
             spawn_room: config.spawn_room.clone(),
             spawn_room_ref,
             game_dir: config.game_dir.clone(),
@@ -813,9 +833,63 @@ impl Engine {
         self.do_save();
     }
 
+    /// The current in-world clock hour, when a clock is configured — backs the
+    /// `game_time_between()` lock predicate.
+    fn current_game_hour(&self) -> Option<u32> {
+        self.clock.as_ref().map(|c| c.at(self.game_minute).hour)
+    }
+
+    /// Advance the game clock by one tick's worth of minutes, refresh the
+    /// softcode `get_time()` snapshot, and fire rollover hooks. No-op without a
+    /// `[clock]` config.
+    fn advance_clock(&mut self) {
+        let Some(cfg) = self.clock.clone() else {
+            return;
+        };
+        self.game_minute_accum += cfg.minutes_per_tick;
+        let whole = self.game_minute_accum.floor();
+        if whole < 1.0 {
+            return;
+        }
+        self.game_minute_accum -= whole;
+        let whole = whole as u64;
+
+        let before = cfg.at(self.game_minute);
+        self.game_minute += whole;
+        let after = cfg.at(self.game_minute);
+
+        // Refresh the get_time() snapshot for this tick's hooks and reads.
+        self.softcode.set_game_time(Some(cfg.to_json(self.game_minute)));
+
+        // Rollover hooks fire on `system:global` objects that DEFINE them, with
+        // no actor — the hook reads the time itself via `get_time()` (already
+        // refreshed above). Collapsed to at most one fire per type per tick: a
+        // tick advancing several hours still fires on_hour once. At the default
+        // 1 min/tick a tick never spans an hour, so this is exact in practice;
+        // dawn/dusk detection lands on the exact hour, so a tick that jumps
+        // *past* dawn/dusk (very fast clocks) can skip them — acceptable for a
+        // coarse day/night signal.
+        if after.hour != before.hour {
+            self.fire_global_hooks("on_hour", "", None, None);
+        }
+        if after.abs_day != before.abs_day {
+            self.fire_global_hooks("on_day", "", None, None);
+        }
+        if after.hour == cfg.dawn_hour && before.hour != cfg.dawn_hour {
+            self.fire_global_hooks("on_dawn", "", None, None);
+        }
+        if after.hour == cfg.dusk_hour && before.hour != cfg.dusk_hour {
+            self.fire_global_hooks("on_dusk", "", None, None);
+        }
+    }
+
     fn do_tick(&mut self) {
         self.tick_count += 1;
         let tick = self.tick_count;
+
+        // Advance the in-world clock first, so on_tick hooks reading get_time()
+        // see this tick's time, then fire any rollover hooks.
+        self.advance_clock();
         let tick_budget = std::time::Duration::from_millis(500);
         let mut ran = 0u32;
 
@@ -1069,6 +1143,11 @@ impl Engine {
                 "Scheduled hooks saved"
             ),
             Err(e) => tracing::error!(error = %e, "Failed to save scheduled hooks"),
+        }
+        if self.clock.is_some()
+            && let Err(e) = self.db.save_game_minute(self.game_minute)
+        {
+            tracing::error!(error = %e, "Failed to save game clock");
         }
     }
 
@@ -6294,6 +6373,7 @@ impl Engine {
             world: &self.world,
             account_scopes: &scopes,
             target: target_ref.and_then(|r| self.world.get(r)),
+            game_hour: self.current_game_hour(),
         };
         match locks::evaluate_lock_string(expr_str, &ctx) {
             Ok(result) => Some(result),
@@ -10340,6 +10420,79 @@ end
         );
         assert!(!gated.ok);
         assert!(gated.error.as_deref().unwrap().contains("cannot be forced"));
+    }
+
+    /// Build an engine with a fast game clock (1 game-hour per tick) plus a
+    /// `system:global` object whose rollover hooks record what happened.
+    fn clock_engine() -> (Engine, String) {
+        let config = Config {
+            clock: Some(crate::clock::ClockConfig {
+                minutes_per_tick: 60.0,
+                ..crate::clock::ClockConfig::default()
+            }),
+            ..Config::default()
+        };
+        let db = crate::db::Database::open(Path::new(":memory:")).unwrap();
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut engine = Engine::new(rx, db, &config);
+        let gref = engine.world.next_dbref();
+        let mut g = GameObject::new(&gref, "worldclock", Kind::Item);
+        g.tags.insert(Tag { category: "system".into(), key: "global".into() });
+        crate::softcode::hooks::set_script(
+            &mut g,
+            "function on_hour(this, actor, room)\n\
+               local t = get_time()\n\
+               set_attr(this, \"hour\", t.hour)\n\
+               set_attr(this, \"hours_fired\", (get_attr(this, \"hours_fired\") or 0) + 1)\n\
+             end\n\
+             function on_dawn(this)\n set_attr(this, \"dawned\", true)\n end\n\
+             function on_dusk(this)\n set_attr(this, \"dusked\", true)\n end\n\
+             function on_day(this)\n set_attr(this, \"days\", (get_attr(this, \"days\") or 0) + 1)\n end\n"
+                .to_string(),
+        );
+        engine.world.add_object(g);
+        (engine, gref)
+    }
+
+    #[test]
+    fn game_clock_advances_and_fires_rollovers_with_get_time() {
+        let (mut engine, gref) = clock_engine();
+        // Six ticks → 06:00. on_hour fired each tick; dawn (hour 6) fired once.
+        for _ in 0..6 {
+            engine.do_tick();
+        }
+        let g = engine.world.get(&gref).unwrap();
+        assert_eq!(g.attrs.get("hour").and_then(|v| v.as_i64()), Some(6), "get_time().hour inside on_hour");
+        assert_eq!(g.attrs.get("hours_fired").and_then(|v| v.as_i64()), Some(6));
+        assert_eq!(g.attrs.get("dawned").and_then(|v| v.as_bool()), Some(true), "on_dawn fired at hour 6");
+        assert!(g.attrs.get("days").is_none(), "no day rollover yet");
+
+        // Advance to hour 24 → day rolls to day 2 (on_day once), dusk (20) fired.
+        for _ in 6..24 {
+            engine.do_tick();
+        }
+        let g = engine.world.get(&gref).unwrap();
+        assert_eq!(g.attrs.get("days").and_then(|v| v.as_i64()), Some(1), "on_day fired once at the day boundary");
+        assert_eq!(g.attrs.get("dusked").and_then(|v| v.as_bool()), Some(true), "on_dusk fired at hour 20");
+    }
+
+    #[test]
+    fn get_time_is_nil_without_a_clock() {
+        // Default config has no [clock]; a global on_tick sees get_time() == nil.
+        let db = crate::db::Database::open(Path::new(":memory:")).unwrap();
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut engine = Engine::new(rx, db, &Config::default());
+        let gref = engine.world.next_dbref();
+        let mut g = GameObject::new(&gref, "probe", Kind::Item);
+        g.tags.insert(Tag { category: "system".into(), key: "global".into() });
+        crate::softcode::hooks::set_script(
+            &mut g,
+            "function on_tick(this, state, room)\n set_attr(this, \"nilclock\", get_time() == nil)\n end\n".to_string(),
+        );
+        engine.world.add_object(g);
+        engine.do_tick();
+        let g = engine.world.get(&gref).unwrap();
+        assert_eq!(g.attrs.get("nilclock").and_then(|v| v.as_bool()), Some(true));
     }
 
     /// `run_command_as` drives NPCs through the session-less dispatch: a forced
