@@ -2065,6 +2065,9 @@ pub fn install<'scope, 'env>(
                     t.set("tile_image", image.clone())?;
                     t.set("tile_rotation", def.tile_rotation.as_str())?;
                 }
+                if let Some(archetype) = &def.archetype {
+                    t.set("archetype", archetype.clone())?;
+                }
                 if !def.attrs.is_empty() {
                     let attrs = lua.create_table()?;
                     for (k, v) in &def.attrs {

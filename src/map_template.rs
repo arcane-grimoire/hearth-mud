@@ -62,6 +62,16 @@ pub struct TerrainDef {
     /// faces (north = unrotated). Purely a rendering hint, like `tile_image`.
     #[serde(default)]
     pub tile_rotation: TileRotation,
+    /// Optional archetype for squares of this terrain: an `"area/key"` file key
+    /// pointing at an object whose hooks — `can_enter`, `can_traverse`,
+    /// `on_enter`, `on_leave`, `on_tick`, `on_look`, or any custom `on_*` fired
+    /// via `trigger()` (e.g. `on_combat`) — every instantiated square of this
+    /// terrain delegates to via `archetype_ref`. Lets a game define
+    /// terrain-driven behavior once ("lava burns", "deep water blocks") instead
+    /// of per-square; a specific square can still override a hook. Resolved to a
+    /// dbref at `instantiate` time. See docs/plans/archetypes.md.
+    #[serde(default)]
+    pub archetype: Option<String>,
     /// Game-defined custom attributes. Any key on a `[terrain.X]` block that
     /// isn't one of the named fields above is captured here and stamped onto
     /// every room of that terrain as a `terrain_<key>` attribute, so game
@@ -461,6 +471,21 @@ pub fn instantiate(
                     .and_then(|ov| ov.description.clone())
                     .unwrap_or_else(|| default_room_description(theme));
 
+                // Terrain-driven behavior: squares of a terrain with an
+                // `archetype` delegate their hooks to it (resolved to a dbref
+                // here). A specific square can still override.
+                let archetype = match &terrain.archetype {
+                    Some(key) => Some(crate::loader::resolve_file_key(world, key).ok_or_else(
+                        || {
+                            format!(
+                                "map_template '{}': terrain '{}' archetype '{}' not found at ({},{})",
+                                name, terrain_key, key, x, y
+                            )
+                        },
+                    )?),
+                    None => None,
+                };
+
                 intents.push(Intent::Spawn {
                     ref_id: ref_id.clone(),
                     key: format!("map_{}_{}_{}", name, x, y),
@@ -469,7 +494,7 @@ pub fn instantiate(
                     description: Some(description),
                     location,
                     owner: None,
-                    archetype: None,
+                    archetype,
                 });
 
                 ref_id
@@ -636,11 +661,11 @@ mod tests {
         let mut terrain = HashMap::new();
         terrain.insert(
             "f".to_string(),
-            TerrainDef { theme: "forest".into(), title_prefix: Some("Forest".into()), passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), attrs: HashMap::new() },
+            TerrainDef { theme: "forest".into(), title_prefix: Some("Forest".into()), passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), archetype: None, attrs: HashMap::new() },
         );
         terrain.insert(
             "r".to_string(),
-            TerrainDef { theme: "river".into(), title_prefix: Some("River".into()), passable: false, color: None, tile_image: None, tile_rotation: TileRotation::default(), attrs: HashMap::new() },
+            TerrainDef { theme: "river".into(), title_prefix: Some("River".into()), passable: false, color: None, tile_image: None, tile_rotation: TileRotation::default(), archetype: None, attrs: HashMap::new() },
         );
         MapTemplateFile {
             map: MapHeader { name: "test_map".into(), grid: grid.to_string() },
@@ -722,17 +747,17 @@ mod tests {
         let mut palette = HashMap::new();
         palette.insert(
             "f".to_string(),
-            TerrainDef { theme: "forest".into(), title_prefix: None, passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), attrs: HashMap::new() },
+            TerrainDef { theme: "forest".into(), title_prefix: None, passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), archetype: None, attrs: HashMap::new() },
         );
         palette.insert(
             "m".to_string(),
-            TerrainDef { theme: "mountain".into(), title_prefix: None, passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), attrs: HashMap::new() },
+            TerrainDef { theme: "mountain".into(), title_prefix: None, passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), archetype: None, attrs: HashMap::new() },
         );
 
         let mut map_terrain = HashMap::new();
         map_terrain.insert(
             "f".to_string(),
-            TerrainDef { theme: "swamp".into(), title_prefix: None, passable: false, color: None, tile_image: None, tile_rotation: TileRotation::default(), attrs: HashMap::new() },
+            TerrainDef { theme: "swamp".into(), title_prefix: None, passable: false, color: None, tile_image: None, tile_rotation: TileRotation::default(), archetype: None, attrs: HashMap::new() },
         );
         let tmpl = MapTemplateFile {
             map: MapHeader { name: "m".into(), grid: "f".into() },
@@ -755,7 +780,7 @@ mod tests {
         let mut terrain = HashMap::new();
         terrain.insert(
             "m".to_string(),
-            TerrainDef { theme: "forest".into(), title_prefix: None, passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), attrs },
+            TerrainDef { theme: "forest".into(), title_prefix: None, passable: true, color: None, tile_image: None, tile_rotation: TileRotation::default(), archetype: None, attrs },
         );
         let tmpl = MapTemplateFile {
             map: MapHeader { name: "test_map".into(), grid: "m".into() },
@@ -778,6 +803,84 @@ mod tests {
         assert_eq!(stamped.get("terrain_is_high_ground"), Some(&&serde_json::json!(true)));
         // The bare, unprefixed key is never stamped — the namespace is required.
         assert!(!stamped.contains_key("movement_cost"));
+    }
+
+    #[test]
+    fn terrain_archetype_delegates_every_square_to_the_resolved_ref() {
+        // An archetype object addressable by file key ("world/lava") that a
+        // terrain's squares should delegate their hooks to.
+        let mut world = World::new();
+        let arch_ref = world.next_dbref();
+        let mut arch = GameObject::new(&arch_ref, "lava", Kind::Room).with_title("Lava");
+        arch.attrs.insert(crate::loader::FILE_KEY_ATTR.into(), serde_json::json!("world/lava"));
+        world.add_object(arch);
+
+        let mut terrain = HashMap::new();
+        terrain.insert(
+            "l".to_string(),
+            TerrainDef {
+                theme: "forest".into(),
+                title_prefix: None,
+                passable: true,
+                color: None,
+                tile_image: None,
+                tile_rotation: TileRotation::default(),
+                archetype: Some("world/lava".into()),
+                attrs: HashMap::new(),
+            },
+        );
+        let tmpl = MapTemplateFile {
+            map: MapHeader { name: "m".into(), grid: "ll".into() },
+            terrain,
+            cells: HashMap::new(),
+        };
+        let themes = sample_themes();
+        // db_start well past the archetype's dbref; anchor on the archetype room.
+        let result = instantiate(&tmpl, &themes, &world, 100, &arch_ref).unwrap();
+
+        let archetypes: Vec<Option<String>> = result
+            .intents
+            .iter()
+            .filter_map(|i| match i {
+                Intent::Spawn { kind: Kind::Room, archetype, .. } => Some(archetype.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(archetypes.len(), 2, "two passable squares");
+        assert!(
+            archetypes.iter().all(|a| a.as_deref() == Some(arch_ref.as_str())),
+            "every square delegates to the terrain archetype: {:?}",
+            archetypes
+        );
+    }
+
+    #[test]
+    fn terrain_archetype_with_unresolvable_key_is_an_error() {
+        let mut terrain = HashMap::new();
+        terrain.insert(
+            "l".to_string(),
+            TerrainDef {
+                theme: "forest".into(),
+                title_prefix: None,
+                passable: true,
+                color: None,
+                tile_image: None,
+                tile_rotation: TileRotation::default(),
+                archetype: Some("world/nope".into()),
+                attrs: HashMap::new(),
+            },
+        );
+        let tmpl = MapTemplateFile {
+            map: MapHeader { name: "m".into(), grid: "l".into() },
+            terrain,
+            cells: HashMap::new(),
+        };
+        let world = World::new();
+        let err = match instantiate(&tmpl, &sample_themes(), &world, 1, "#1") {
+            Err(e) => e,
+            Ok(_) => panic!("expected an error for an unresolvable terrain archetype"),
+        };
+        assert!(err.contains("archetype 'world/nope' not found"), "unexpected: {}", err);
     }
 
     #[test]
