@@ -128,6 +128,12 @@ pub struct CellOverride {
     /// Overrides the terrain's default passability for this one cell.
     #[serde(default)]
     pub passable: Option<bool>,
+    /// Delegate THIS square to a specific archetype (`"area/key"`), overriding
+    /// the terrain's default `archetype` for this cell only — a special tile
+    /// (a boss lava vent among ordinary lava). Resolved like the terrain
+    /// archetype; only applies to freshly-spawned cells, not `fixed_room`.
+    #[serde(default)]
+    pub archetype: Option<String>,
     #[serde(default)]
     pub objects: Vec<CellObject>,
     #[serde(default)]
@@ -471,15 +477,19 @@ pub fn instantiate(
                     .and_then(|ov| ov.description.clone())
                     .unwrap_or_else(|| default_room_description(theme));
 
-                // Terrain-driven behavior: squares of a terrain with an
-                // `archetype` delegate their hooks to it (resolved to a dbref
-                // here). A specific square can still override.
-                let archetype = match &terrain.archetype {
+                // Terrain-driven behavior: squares delegate their hooks to an
+                // archetype (resolved to a dbref here). A per-cell override
+                // wins over the terrain default, so a single tile can be
+                // special among its terrain.
+                let archetype_key = cell_override
+                    .and_then(|ov| ov.archetype.as_deref())
+                    .or(terrain.archetype.as_deref());
+                let archetype = match archetype_key {
                     Some(key) => Some(crate::loader::resolve_file_key(world, key).ok_or_else(
                         || {
                             format!(
-                                "map_template '{}': terrain '{}' archetype '{}' not found at ({},{})",
-                                name, terrain_key, key, x, y
+                                "map_template '{}': archetype '{}' at ({},{}) not found",
+                                name, key, x, y
                             )
                         },
                     )?),
@@ -855,6 +865,69 @@ mod tests {
     }
 
     #[test]
+    fn cell_archetype_override_wins_over_terrain_archetype() {
+        let mut world = World::new();
+        let lava = world.next_dbref();
+        let mut o = GameObject::new(&lava, "lava", Kind::Room);
+        o.attrs.insert(crate::loader::FILE_KEY_ATTR.into(), serde_json::json!("world/lava"));
+        world.add_object(o);
+        let boss = world.next_dbref();
+        let mut b = GameObject::new(&boss, "boss", Kind::Room);
+        b.attrs.insert(crate::loader::FILE_KEY_ATTR.into(), serde_json::json!("world/boss"));
+        world.add_object(b);
+
+        let mut terrain = HashMap::new();
+        terrain.insert(
+            "l".into(),
+            TerrainDef {
+                theme: "forest".into(),
+                title_prefix: None,
+                passable: true,
+                color: None,
+                tile_image: None,
+                tile_rotation: TileRotation::default(),
+                archetype: Some("world/lava".into()),
+                attrs: HashMap::new(),
+            },
+        );
+        let mut cells = HashMap::new();
+        cells.insert(
+            "1,0".into(),
+            CellOverride {
+                title: None,
+                description: None,
+                fixed_room: None,
+                lock: None,
+                archetype: Some("world/boss".into()),
+                passable: None,
+                objects: Vec::new(),
+                encounters: Vec::new(),
+            },
+        );
+        let tmpl = MapTemplateFile {
+            map: MapHeader { name: "m".into(), grid: "ll".into() },
+            terrain,
+            cells,
+        };
+        let result = instantiate(&tmpl, &sample_themes(), &world, 100, &lava).unwrap();
+
+        let spawns: Vec<(String, Option<String>)> = result
+            .intents
+            .iter()
+            .filter_map(|i| match i {
+                Intent::Spawn { kind: Kind::Room, key, archetype, .. } => {
+                    Some((key.clone(), archetype.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let cell00 = spawns.iter().find(|(k, _)| k.ends_with("_0_0")).expect("cell 0,0");
+        let cell10 = spawns.iter().find(|(k, _)| k.ends_with("_1_0")).expect("cell 1,0");
+        assert_eq!(cell00.1.as_deref(), Some(lava.as_str()), "ordinary square → terrain archetype");
+        assert_eq!(cell10.1.as_deref(), Some(boss.as_str()), "overridden square → cell archetype");
+    }
+
+    #[test]
     fn terrain_archetype_with_unresolvable_key_is_an_error() {
         let mut terrain = HashMap::new();
         terrain.insert(
@@ -880,7 +953,7 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("expected an error for an unresolvable terrain archetype"),
         };
-        assert!(err.contains("archetype 'world/nope' not found"), "unexpected: {}", err);
+        assert!(err.contains("archetype 'world/nope'"), "unexpected: {}", err);
     }
 
     #[test]
@@ -893,6 +966,7 @@ mod tests {
                 description: None,
                 fixed_room: None,
                 lock: None,
+                archetype: None,
                 passable: Some(true),
                 objects: Vec::new(),
                 encounters: Vec::new(),
@@ -915,6 +989,7 @@ mod tests {
                 description: None,
                 fixed_room: Some("town/crossroads".into()),
                 lock: None,
+                archetype: None,
                 passable: None,
                 objects: Vec::new(),
                 encounters: Vec::new(),
@@ -950,6 +1025,7 @@ mod tests {
                 description: None,
                 fixed_room: None,
                 lock: None,
+                archetype: None,
                 passable: None,
                 objects: Vec::new(),
                 encounters: Vec::new(),
