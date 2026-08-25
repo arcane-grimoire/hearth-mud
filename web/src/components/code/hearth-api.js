@@ -93,7 +93,7 @@ export const API_FUNCTIONS = [
   ['instantiate_map', 'instantiate_map(name)', 'Build rooms from a map template.'],
   ['get_map_template', 'get_map_template(name)', 'Read a map template.'],
   ['grid_move', 'grid_move(actor, map, dir)', 'Move an actor one cell (n/s/e/w) on a map grid using its _x/_y attrs; honors passability and fires the terrain archetype’s on_leave/on_enter as the mover. Returns { ok, moved, x, y, terrain } / blocked { moved=false, reason="off_grid"|"impassable", x, y, terrain? } / { ok=false, reason="no_map"|"bad_dir"|"no_position" }.'],
-  ['grid_can_move', 'grid_can_move(actor, map, dir)', 'Peek: would grid_move succeed in dir, without moving? Same passability logic. Returns { ok, can, reason?, x, y, terrain? } — build exit lists with this so they agree with grid_move.'],
+  ['grid_can_move', 'grid_can_move(map, x, y, dir)', 'Peek from an explicit cell: could you step in dir from (x, y)? Same passability logic as grid_move. Returns { ok, can, reason?, x, y, terrain? } — build exit lists with this so they agree with grid_move by construction.'],
   ['generate_dungeon', 'generate_dungeon(seed, config?)', 'Procedurally build a dungeon from a seed; returns the entrance ref.'],
   ['destroy_dungeon', 'destroy_dungeon(ref)', 'Tear down a generated dungeon.'],
   ['ink_start', 'ink_start(actor, npc, opts?)', 'Begin/resume an Ink conversation between actor and npc.'],

@@ -350,13 +350,12 @@ fn attrs_pairs_state(lua: &Lua, world: &World, r: &str) -> mlua::Result<Table> {
     Ok(state)
 }
 
-/// One resolved outcome of a 2D-grid step. `x`/`y` on the blocked variants are
-/// the *attempted* target cell, so a caller never re-derives the direction math
-/// or terrain. Shared by `grid_move` and `grid_can_move` so the two can never
-/// disagree about passability.
+/// One resolved outcome of a 2D-grid step from an explicit cell. `x`/`y` on the
+/// blocked variants are the *attempted* target cell, so a caller never
+/// re-derives the direction math or terrain. Shared by `grid_move` and
+/// `grid_can_move` so the two can never disagree about passability.
 enum GridStep {
     BadDir,
-    NoPosition,
     OffGrid { x: i64, y: i64 },
     Impassable { x: i64, y: i64, terrain: String },
     Ok {
@@ -367,30 +366,31 @@ enum GridStep {
     },
 }
 
-/// Resolve a cardinal step for `actor` on `template`, reading the actor's
-/// `_x`/`_y` attrs and applying terrain/cell passability. Pure — mutates
+/// Resolve a cardinal step from cell `(x, y)` on `template`, applying
+/// terrain/cell passability. Pure — takes an explicit position (so a peek can
+/// resolve any cell, not just the actor's), reads no world state, mutates
 /// nothing. Unknown terrain char → impassable (fail closed); a known terrain
 /// with no explicit `passable` defaults passable (TerrainDef default).
+/// Canonical direction → (dx, dy) for grid movement. `None` for an unknown
+/// direction so both `grid_move` and `resolve_grid_step` agree on what's valid.
+fn dir_delta(dir: &str) -> Option<(i64, i64)> {
+    match dir.to_lowercase().as_str() {
+        "n" | "north" => Some((0, -1)),
+        "s" | "south" => Some((0, 1)),
+        "e" | "east" => Some((1, 0)),
+        "w" | "west" => Some((-1, 0)),
+        _ => None,
+    }
+}
+
 fn resolve_grid_step(
-    world: &World,
     template: &crate::map_template::MapTemplateFile,
-    actor: &str,
+    x: i64,
+    y: i64,
     dir: &str,
 ) -> GridStep {
-    let (dx, dy): (i64, i64) = match dir.to_lowercase().as_str() {
-        "n" | "north" => (0, -1),
-        "s" | "south" => (0, 1),
-        "e" | "east" => (1, 0),
-        "w" | "west" => (-1, 0),
-        _ => return GridStep::BadDir,
-    };
-    // Position must be seeded — a missing `_x`/`_y` is a caller bug, reported
-    // loudly rather than silently starting at the origin.
-    let obj = world.get(actor);
-    let ax = obj.and_then(|o| o.attrs.get("_x")).and_then(|v| v.as_i64());
-    let ay = obj.and_then(|o| o.attrs.get("_y")).and_then(|v| v.as_i64());
-    let (Some(x), Some(y)) = (ax, ay) else {
-        return GridStep::NoPosition;
+    let Some((dx, dy)) = dir_delta(dir) else {
+        return GridStep::BadDir;
     };
     let (nx, ny) = (x + dx, y + dy);
     let grid = template.parse_grid();
@@ -2082,14 +2082,27 @@ pub fn install<'scope, 'env>(
                 result.set("reason", "no_map")?;
                 return Ok(result);
             };
-            match resolve_grid_step(world, template, &actor, &dir) {
+            // A malformed direction is a caller bug regardless of position, so
+            // catch it before the position read.
+            if dir_delta(&dir).is_none() {
+                result.set("ok", false)?;
+                result.set("reason", "bad_dir")?;
+                return Ok(result);
+            }
+            // Current cell from the actor's COMMITTED `_x`/`_y`; a missing one
+            // is a caller bug, reported loudly rather than starting at origin.
+            let obj = world.get(&actor);
+            let ax = obj.and_then(|o| o.attrs.get("_x")).and_then(|v| v.as_i64());
+            let ay = obj.and_then(|o| o.attrs.get("_y")).and_then(|v| v.as_i64());
+            let (Some(px), Some(py)) = (ax, ay) else {
+                result.set("ok", false)?;
+                result.set("reason", "no_position")?;
+                return Ok(result);
+            };
+            match resolve_grid_step(template, px, py, &dir) {
                 GridStep::BadDir => {
                     result.set("ok", false)?;
                     result.set("reason", "bad_dir")?;
-                }
-                GridStep::NoPosition => {
-                    result.set("ok", false)?;
-                    result.set("reason", "no_position")?;
                 }
                 GridStep::OffGrid { x, y } => {
                     result.set("ok", true)?;
@@ -2160,13 +2173,15 @@ pub fn install<'scope, 'env>(
         })?,
     )?;
 
-    // Peek: would `grid_move` succeed in `dir`, without moving? Uses the SAME
-    // `resolve_grid_step`, so an exit list built from this can never disagree
-    // with the actual step. Returns { ok, can, reason?, x, y, terrain? }.
+    // Peek from an EXPLICIT cell: would a step in `dir` from `(x, y)` succeed?
+    // Position-parameterized (not actor-keyed) so a game can test every
+    // neighbor of any cell — e.g. build the exit list for the cell it's about
+    // to render — without depending on the actor's committed `_x`/`_y`. Uses the
+    // SAME `resolve_grid_step` as the move, so the two never disagree about
+    // passability. Returns { ok, can, reason?, x, y, terrain? }.
     env.set(
         "grid_can_move",
-        scope.create_function(move |lua, (actor, map_name, dir): (Value, String, String)| {
-            let actor = ref_of(&actor)?;
+        scope.create_function(move |lua, (map_name, x, y, dir): (String, i64, i64, String)| {
             let result = lua.create_table()?;
             let Some(template) = map_templates.get(&map_name) else {
                 result.set("ok", false)?;
@@ -2174,16 +2189,11 @@ pub fn install<'scope, 'env>(
                 result.set("reason", "no_map")?;
                 return Ok(result);
             };
-            match resolve_grid_step(world, template, &actor, &dir) {
+            match resolve_grid_step(template, x, y, &dir) {
                 GridStep::BadDir => {
                     result.set("ok", false)?;
                     result.set("can", false)?;
                     result.set("reason", "bad_dir")?;
-                }
-                GridStep::NoPosition => {
-                    result.set("ok", false)?;
-                    result.set("can", false)?;
-                    result.set("reason", "no_position")?;
                 }
                 GridStep::OffGrid { x, y } => {
                     result.set("ok", true)?;

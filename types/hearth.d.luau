@@ -407,12 +407,23 @@ type GridMoveResult = {
 --- reason="bad_dir" (never throws).
 declare function grid_move(actor: ObjectRef, map: string, dir: string): GridMoveResult
 
---- Would `grid_move(actor, map, dir)` succeed, WITHOUT moving? Uses the same
---- passability logic, so an exit list built by peeking each direction agrees
---- with the actual step by construction. Returns `{ ok, can, reason?, x, y,
---- terrain? }` — `can=true` means the step would move; otherwise `reason` says
---- why ("off_grid"/"impassable"/"bad_dir"/"no_position"/"no_map").
-declare function grid_can_move(actor: ObjectRef, map: string, dir: string): GridMoveResult
+type GridCanMoveResult = {
+    ok: boolean,        -- false only for a bad request (reason "no_map"|"bad_dir")
+    can: boolean,       -- true if a step from (x,y) in dir would move
+    reason: string?,    -- "no_map" | "bad_dir" | "off_grid" | "impassable"
+    x: number?,         -- the target cell (present unless bad_dir/no_map)
+    y: number?,
+    terrain: string?,   -- terrain char of the target (present on can + impassable)
+}
+
+--- Peek from an EXPLICIT cell: would a step in `dir` from `(x, y)` on the named
+--- map succeed, WITHOUT moving anything? Position-parameterized (not
+--- actor-keyed) so a game can test every neighbor of any cell — e.g. build the
+--- exit list for the cell it's about to render — independent of the actor's
+--- committed `_x`/`_y`. Uses the same passability logic as `grid_move`, so the
+--- two never disagree. `can=true` means a step would move; otherwise `reason`
+--- says why ("off_grid"/"impassable"/"bad_dir"/"no_map").
+declare function grid_can_move(map: string, x: number, y: number, dir: string): GridCanMoveResult
 
 -- ═══════════════════════════════════════
 -- MAP TEMPLATES

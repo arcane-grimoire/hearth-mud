@@ -3163,18 +3163,24 @@ mod tests {
                 )
                 .expect("eval")
         };
+        // Position-parameterized: peek from an explicit cell, no actor needed.
         // East from (0,0) → (1,0) 'a' passable: can=true, and it never moves.
-        let r = ret(r##"return tostring(grid_can_move("#3","m","east").can)"##);
+        let r = ret(r##"return tostring(grid_can_move("m", 0, 0, "east").can)"##);
         assert_eq!(r.returned.as_deref(), Some("true"));
         assert!(r.batch.intents.is_empty(), "a peek must not push any intents");
-        // West → off the grid.
+        // West from (0,0) → off the grid.
         assert_eq!(
-            ret(r##"return grid_can_move("#3","m","west").reason"##).returned.as_deref(),
+            ret(r##"return grid_can_move("m", 0, 0, "west").reason"##).returned.as_deref(),
             Some("off_grid")
+        );
+        // East from (1,0) → (2,0) 'x' impassable — peeking a different cell.
+        assert_eq!(
+            ret(r##"return grid_can_move("m", 1, 0, "east").reason"##).returned.as_deref(),
+            Some("impassable")
         );
         // Bad direction is a reason, not a thrown error.
         assert_eq!(
-            ret(r##"return grid_can_move("#3","m","up").reason"##).returned.as_deref(),
+            ret(r##"return grid_can_move("m", 0, 0, "up").reason"##).returned.as_deref(),
             Some("bad_dir")
         );
     }
