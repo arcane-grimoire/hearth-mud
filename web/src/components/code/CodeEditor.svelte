@@ -305,7 +305,17 @@
         ],
       }),
     });
-    return () => view?.destroy();
+    // The editor lives in a flex column whose width changes when the docked
+    // side panel (Preview-fire / Help) opens or is dragged — a resize with no
+    // window `resize` event. Re-measure on container resize so CodeMirror
+    // recomputes its gutter width, wrapping, and scroll instead of keeping a
+    // stale layout (which shows as a clipped gutter / mis-indented lines).
+    let ro;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => view?.requestMeasure());
+      ro.observe(host);
+    }
+    return () => { ro?.disconnect(); view?.destroy(); };
   });
 
   // Push external value changes (switching hooks) into the editor.
@@ -331,7 +341,11 @@
 <div class="cm-host" bind:this={host}></div>
 
 <style>
-  .cm-host { height: 100%; min-height: 0; overflow: hidden; }
-  .cm-host :global(.cm-editor) { height: 100%; }
+  .cm-host { height: 100%; width: 100%; min-width: 0; min-height: 0; overflow: hidden; }
+  /* Pin the editor to the host so a container shrink can't leave it wider than
+     its column (which reads as a clipped gutter / shifted lines); horizontal
+     overflow stays inside CodeMirror's own scroller. */
+  .cm-host :global(.cm-editor) { height: 100%; width: 100%; max-width: 100%; }
+  .cm-host :global(.cm-scroller) { overflow-x: auto; }
   .cm-host :global(.cm-editor.cm-focused) { outline: none; }
 </style>
