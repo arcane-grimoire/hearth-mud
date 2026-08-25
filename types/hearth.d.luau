@@ -387,23 +387,32 @@ type InstantiateMapResult = {
 declare function instantiate_map(name: string): InstantiateMapResult
 
 type GridMoveResult = {
-    ok: boolean,        -- false only when the map is unknown (reason="no_map")
-    moved: boolean?,    -- true if the actor moved; false when blocked
-    reason: string?,    -- "no_map" | "blocked"
-    x: number?,         -- new cell (present when moved)
+    ok: boolean,        -- false for a bad request: reason "no_map"|"bad_dir"|"no_position"
+    moved: boolean?,    -- true if moved; false when blocked (off_grid/impassable)
+    reason: string?,    -- "no_map" | "bad_dir" | "no_position" | "off_grid" | "impassable"
+    x: number?,         -- the ATTEMPTED cell (present on move AND on off_grid/impassable)
     y: number?,
-    terrain: string?,   -- terrain char of the new cell (present when moved)
+    terrain: string?,   -- terrain char of that cell (present on move + impassable)
 }
 
 --- Move `actor` one cell in `dir` ("n"/"north"/"s"/"e"/"w"/…) on the named map
 --- template, using the actor's `_x`/`_y` attrs as its position — the 2D-grid
 --- "wilderness" model, where the whole grid lives in ONE room and there is NO
---- room per cell. Honors terrain/cell passability (impassable or off-grid →
---- moved=false) and, on a successful step, fires the terrain's `on_leave`
---- (old cell) and `on_enter` (new cell) hooks on that terrain's `archetype`
---- object, if it declares one — so terrain behavior ("lava burns") is defined
---- once per terrain, not per square. Updates `_x`/`_y` on the actor.
+--- room per cell. Honors terrain/cell passability and, on a successful step,
+--- fires the terrain's `on_leave` (old cell) and `on_enter` (new cell) hooks on
+--- that terrain's `archetype` object (as the moving actor), if it declares one —
+--- so terrain behavior ("lava burns") is defined once per terrain, not per
+--- square. Updates `_x`/`_y`. Blocked results carry the attempted `x`/`y` (and
+--- `terrain` when known); unset `_x`/`_y` → reason="no_position"; a bad `dir` →
+--- reason="bad_dir" (never throws).
 declare function grid_move(actor: ObjectRef, map: string, dir: string): GridMoveResult
+
+--- Would `grid_move(actor, map, dir)` succeed, WITHOUT moving? Uses the same
+--- passability logic, so an exit list built by peeking each direction agrees
+--- with the actual step by construction. Returns `{ ok, can, reason?, x, y,
+--- terrain? }` — `can=true` means the step would move; otherwise `reason` says
+--- why ("off_grid"/"impassable"/"bad_dir"/"no_position"/"no_map").
+declare function grid_can_move(actor: ObjectRef, map: string, dir: string): GridMoveResult
 
 -- ═══════════════════════════════════════
 -- MAP TEMPLATES

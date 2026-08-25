@@ -2292,6 +2292,7 @@ impl SoftcodeRuntime {
         file_name: &str,
         world: Option<&World>,
         this_ref: Option<&str>,
+        map_templates: &HashMap<String, crate::map_template::MapTemplateFile>,
         budget: Budget,
     ) -> Result<TestFileResult, SoftcodeError> {
         let test_names = self.discover_test_names(source, file_name)?;
@@ -2308,8 +2309,6 @@ impl SoftcodeRuntime {
             self.install_budget(budget);
 
             let empty_themes: HashMap<String, crate::theme::Theme> = HashMap::new();
-            let empty_templates: HashMap<String, crate::map_template::MapTemplateFile> =
-                HashMap::new();
 
             let run_result: mlua::Result<()> = self.lua.scope(|scope| {
                 let env = self.lua.create_table()?;
@@ -2328,7 +2327,7 @@ impl SoftcodeRuntime {
                         None,
                         Rc::clone(&dbref_counter),
                         &empty_themes,
-                        &empty_templates,
+                        map_templates,
                         &[],
                         0,
                         self.current_game_time.borrow().clone(),
@@ -3030,6 +3029,13 @@ mod tests {
     ) {
         use crate::map_template::{MapHeader, MapTemplateFile, TerrainDef, TileRotation};
         let mut world = test_world();
+        // Seed the player's grid position (grid_move refuses unset _x/_y with
+        // reason="no_position").
+        {
+            let a = world.get_mut("#3").unwrap();
+            a.attrs.insert("_x".into(), serde_json::json!(0));
+            a.attrs.insert("_y".into(), serde_json::json!(0));
+        }
         // A terrain archetype object addressable by file key.
         let arch = world.next_dbref();
         let mut o = GameObject::new(&arch, "lava", Kind::Room);
@@ -3135,6 +3141,42 @@ mod tests {
         assert!(!moved(&run(&w2, r##"return grid_move("#3","m","east")"##)), "east into 'x' is blocked");
         // Sanity: from (1,0), west → (0,0) passable → DOES move.
         assert!(moved(&run(&w2, r##"return grid_move("#3","m","west")"##)), "west into 'a' moves");
+    }
+
+    #[test]
+    fn grid_can_move_peeks_without_moving() {
+        let (world, _arch, templates) = grid_move_world_and_templates();
+        let runtime = SoftcodeRuntime::new();
+        let ret = |src: &str| {
+            runtime
+                .run_eval(
+                    &world,
+                    src,
+                    "#3",
+                    Some("#1"),
+                    Budget::default(),
+                    counter(&world),
+                    &test_themes(),
+                    &templates,
+                    &[],
+                    0,
+                )
+                .expect("eval")
+        };
+        // East from (0,0) → (1,0) 'a' passable: can=true, and it never moves.
+        let r = ret(r##"return tostring(grid_can_move("#3","m","east").can)"##);
+        assert_eq!(r.returned.as_deref(), Some("true"));
+        assert!(r.batch.intents.is_empty(), "a peek must not push any intents");
+        // West → off the grid.
+        assert_eq!(
+            ret(r##"return grid_can_move("#3","m","west").reason"##).returned.as_deref(),
+            Some("off_grid")
+        );
+        // Bad direction is a reason, not a thrown error.
+        assert_eq!(
+            ret(r##"return grid_can_move("#3","m","up").reason"##).returned.as_deref(),
+            Some("bad_dir")
+        );
     }
 
     #[test]
@@ -4946,6 +4988,7 @@ mod tests {
                 "assertions.test.luau",
                 None,
                 None,
+                &test_map_templates(),
                 Budget::default(),
             )
             .expect("test runner should not error");
@@ -4971,6 +5014,7 @@ mod tests {
                 "fail.test.luau",
                 None,
                 None,
+                &test_map_templates(),
                 Budget::default(),
             )
             .expect("test runner should not error");
@@ -5002,6 +5046,7 @@ mod tests {
                 "integration.test.luau",
                 Some(&world),
                 None,
+                &test_map_templates(),
                 Budget::default(),
             )
             .expect("test runner should not error");
@@ -5015,7 +5060,8 @@ mod tests {
         let game_dir = std::env::var("HEARTH_GAME_DIR")
             .ok()
             .or_else(|| {
-                let candidate = std::path::Path::new("../the-last-stag-mud/world");
+                // The game's content dir (the repo restructured `world/` → `game/`).
+                let candidate = std::path::Path::new("../the-last-stag-mud/game");
                 candidate.exists().then(|| candidate.to_string_lossy().to_string())
             });
         let game_dir = match game_dir {
@@ -5027,6 +5073,27 @@ mod tests {
         };
 
         let game_path = std::path::Path::new(&game_dir);
+
+        // Build the map templates the same way the engine does at boot
+        // (palette-merged), so integration tests can exercise `grid_move` /
+        // `get_map_template` against the game's real maps.
+        let mut map_sources: HashMap<String, String> = HashMap::new();
+        if let Ok(c) = std::fs::read_to_string(game_path.join("terrain.toml")) {
+            map_sources.insert("terrain.toml".to_string(), c);
+        }
+        if let Ok(entries) = std::fs::read_dir(game_path.join("maps")) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.extension().is_some_and(|x| x == "toml")
+                    && let Ok(c) = std::fs::read_to_string(&p)
+                    && let Some(name) = p.file_name().and_then(|n| n.to_str())
+                {
+                    map_sources.insert(format!("maps/{}", name), c);
+                }
+            }
+        }
+        let map_templates = crate::map_template::build_templates_from_sources(&map_sources);
+
         let runtime = SoftcodeRuntime::new();
         // Wire the game dir into the Ink runtime so file-based dialogue
         // (`ink_start(actor, npc, { file = "..." })`) is exercisable from
@@ -5055,6 +5122,7 @@ mod tests {
                 &tf.relative,
                 world.as_ref(),
                 None,
+                &map_templates,
                 Budget::default(),
             );
             match result {

@@ -350,6 +350,80 @@ fn attrs_pairs_state(lua: &Lua, world: &World, r: &str) -> mlua::Result<Table> {
     Ok(state)
 }
 
+/// One resolved outcome of a 2D-grid step. `x`/`y` on the blocked variants are
+/// the *attempted* target cell, so a caller never re-derives the direction math
+/// or terrain. Shared by `grid_move` and `grid_can_move` so the two can never
+/// disagree about passability.
+enum GridStep {
+    BadDir,
+    NoPosition,
+    OffGrid { x: i64, y: i64 },
+    Impassable { x: i64, y: i64, terrain: String },
+    Ok {
+        from: (i64, i64),
+        to: (i64, i64),
+        old_terrain: Option<String>,
+        new_terrain: String,
+    },
+}
+
+/// Resolve a cardinal step for `actor` on `template`, reading the actor's
+/// `_x`/`_y` attrs and applying terrain/cell passability. Pure — mutates
+/// nothing. Unknown terrain char → impassable (fail closed); a known terrain
+/// with no explicit `passable` defaults passable (TerrainDef default).
+fn resolve_grid_step(
+    world: &World,
+    template: &crate::map_template::MapTemplateFile,
+    actor: &str,
+    dir: &str,
+) -> GridStep {
+    let (dx, dy): (i64, i64) = match dir.to_lowercase().as_str() {
+        "n" | "north" => (0, -1),
+        "s" | "south" => (0, 1),
+        "e" | "east" => (1, 0),
+        "w" | "west" => (-1, 0),
+        _ => return GridStep::BadDir,
+    };
+    // Position must be seeded — a missing `_x`/`_y` is a caller bug, reported
+    // loudly rather than silently starting at the origin.
+    let obj = world.get(actor);
+    let ax = obj.and_then(|o| o.attrs.get("_x")).and_then(|v| v.as_i64());
+    let ay = obj.and_then(|o| o.attrs.get("_y")).and_then(|v| v.as_i64());
+    let (Some(x), Some(y)) = (ax, ay) else {
+        return GridStep::NoPosition;
+    };
+    let (nx, ny) = (x + dx, y + dy);
+    let grid = template.parse_grid();
+    let terrain_at = |cx: i64, cy: i64| -> Option<String> {
+        if cx < 0 || cy < 0 {
+            return None;
+        }
+        let (cx, cy) = (cx as usize, cy as usize);
+        if cy >= grid.height || cx >= grid.width {
+            return None;
+        }
+        grid.cells[cy][cx].map(|c| c.to_string())
+    };
+    let Some(new_terrain) = terrain_at(nx, ny) else {
+        return GridStep::OffGrid { x: nx, y: ny };
+    };
+    let passable = template
+        .cells
+        .get(&format!("{},{}", nx, ny))
+        .and_then(|o| o.passable)
+        .or_else(|| template.terrain.get(&new_terrain).map(|t| t.passable))
+        .unwrap_or(false);
+    if !passable {
+        return GridStep::Impassable { x: nx, y: ny, terrain: new_terrain };
+    }
+    GridStep::Ok {
+        from: (x, y),
+        to: (nx, ny),
+        old_terrain: terrain_at(x, y),
+        new_terrain,
+    }
+}
+
 pub fn install<'scope, 'env>(
     lua: &Lua,
     scope: &'scope Scope<'scope, 'env>,
@@ -1990,129 +2064,150 @@ pub fn install<'scope, 'env>(
     // player's position is `_x`/`_y` attrs, terrain comes from a map template —
     // there is NO room per cell). Moves the actor one cell in `dir`, honoring
     // terrain/cell passability, and fires the terrain's `on_leave`/`on_enter`
-    // hooks (on its `archetype`, if any) so a game can attach terrain behavior
-    // ("lava burns") without a room per square. Returns a table:
-    //   { ok=false, reason="no_map" }              -- unknown map
-    //   { ok=true, moved=false, reason="blocked" } -- impassable / off-grid
-    //   { ok=true, moved=true, x, y, terrain }     -- moved
+    // hooks (on its `archetype`, if any) as the moving actor. Returns a table:
+    //   { ok=false, reason="no_map"|"bad_dir"|"no_position" }
+    //   { ok=true, moved=false, reason="off_grid",   x, y }
+    //   { ok=true, moved=false, reason="impassable", x, y, terrain }
+    //   { ok=true, moved=true, x, y, terrain }
+    // Blocked results carry the attempted cell (and terrain when known) so a
+    // caller never re-derives the direction math or terrain lookup.
     let b = Rc::clone(&batch);
     env.set(
         "grid_move",
         scope.create_function(move |lua, (actor, map_name, dir): (Value, String, String)| {
             let actor = ref_of(&actor)?;
             let result = lua.create_table()?;
-
-            let (dx, dy): (i64, i64) = match dir.to_lowercase().as_str() {
-                "n" | "north" => (0, -1),
-                "s" | "south" => (0, 1),
-                "e" | "east" => (1, 0),
-                "w" | "west" => (-1, 0),
-                other => {
-                    return Err(mlua::Error::RuntimeError(format!(
-                        "grid_move: unknown direction '{}' (use n/s/e/w)",
-                        other
-                    )));
-                }
-            };
-
             let Some(template) = map_templates.get(&map_name) else {
                 result.set("ok", false)?;
                 result.set("reason", "no_map")?;
                 return Ok(result);
             };
-            let grid = template.parse_grid();
-
-            let cur = |key: &str| -> i64 {
-                world
-                    .get(&actor)
-                    .and_then(|o| o.attrs.get(key))
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0)
-            };
-            let (x, y) = (cur("_x"), cur("_y"));
-            let (nx, ny) = (x + dx, y + dy);
-
-            // Terrain char at a cell (None = off-grid or a gap).
-            let terrain_at = |cx: i64, cy: i64| -> Option<String> {
-                if cx < 0 || cy < 0 {
-                    return None;
+            match resolve_grid_step(world, template, &actor, &dir) {
+                GridStep::BadDir => {
+                    result.set("ok", false)?;
+                    result.set("reason", "bad_dir")?;
                 }
-                let (cx, cy) = (cx as usize, cy as usize);
-                if cy >= grid.height || cx >= grid.width {
-                    return None;
+                GridStep::NoPosition => {
+                    result.set("ok", false)?;
+                    result.set("reason", "no_position")?;
                 }
-                grid.cells[cy][cx].map(|c| c.to_string())
-            };
+                GridStep::OffGrid { x, y } => {
+                    result.set("ok", true)?;
+                    result.set("moved", false)?;
+                    result.set("reason", "off_grid")?;
+                    result.set("x", x)?;
+                    result.set("y", y)?;
+                }
+                GridStep::Impassable { x, y, terrain } => {
+                    result.set("ok", true)?;
+                    result.set("moved", false)?;
+                    result.set("reason", "impassable")?;
+                    result.set("x", x)?;
+                    result.set("y", y)?;
+                    result.set("terrain", terrain)?;
+                }
+                GridStep::Ok { from, to, old_terrain, new_terrain } => {
+                    let (x, y) = from;
+                    let (nx, ny) = to;
+                    // Resolve a terrain's hook host (its `archetype` → dbref).
+                    let arch_of = |tkey: &str| -> Option<String> {
+                        template
+                            .terrain
+                            .get(tkey)
+                            .and_then(|t| t.archetype.as_deref())
+                            .and_then(|k| crate::loader::resolve_file_key(world, k))
+                    };
+                    let mut batch = b.borrow_mut();
+                    batch.push(Intent::SetAttr {
+                        target: actor.clone(),
+                        key: "_x".into(),
+                        value: serde_json::json!(nx),
+                    });
+                    batch.push(Intent::SetAttr {
+                        target: actor.clone(),
+                        key: "_y".into(),
+                        value: serde_json::json!(ny),
+                    });
+                    // on_leave the old terrain, on_enter the new — deferred
+                    // TriggerHooks fired as the moving actor, cell in the data.
+                    if let Some(ot) = &old_terrain
+                        && let Some(host) = arch_of(ot)
+                    {
+                        batch.push(Intent::Trigger {
+                            target: host,
+                            hook: "on_leave".into(),
+                            data: Some(serde_json::json!({ "x": x, "y": y, "map": map_name, "terrain": ot })),
+                            actor: Some(actor.clone()),
+                        });
+                    }
+                    if let Some(host) = arch_of(&new_terrain) {
+                        batch.push(Intent::Trigger {
+                            target: host,
+                            hook: "on_enter".into(),
+                            data: Some(serde_json::json!({ "x": nx, "y": ny, "map": map_name, "terrain": new_terrain })),
+                            actor: Some(actor.clone()),
+                        });
+                    }
+                    drop(batch);
+                    result.set("ok", true)?;
+                    result.set("moved", true)?;
+                    result.set("x", nx)?;
+                    result.set("y", ny)?;
+                    result.set("terrain", new_terrain)?;
+                }
+            }
+            Ok(result)
+        })?,
+    )?;
 
-            let Some(new_terrain) = terrain_at(nx, ny) else {
-                result.set("ok", true)?;
-                result.set("moved", false)?;
-                result.set("reason", "blocked")?;
+    // Peek: would `grid_move` succeed in `dir`, without moving? Uses the SAME
+    // `resolve_grid_step`, so an exit list built from this can never disagree
+    // with the actual step. Returns { ok, can, reason?, x, y, terrain? }.
+    env.set(
+        "grid_can_move",
+        scope.create_function(move |lua, (actor, map_name, dir): (Value, String, String)| {
+            let actor = ref_of(&actor)?;
+            let result = lua.create_table()?;
+            let Some(template) = map_templates.get(&map_name) else {
+                result.set("ok", false)?;
+                result.set("can", false)?;
+                result.set("reason", "no_map")?;
                 return Ok(result);
             };
-            // Passability: a cell override wins, else the terrain's default,
-            // else impassable (unknown terrain never lets you through).
-            let passable = template
-                .cells
-                .get(&format!("{},{}", nx, ny))
-                .and_then(|o| o.passable)
-                .or_else(|| template.terrain.get(&new_terrain).map(|t| t.passable))
-                .unwrap_or(false);
-            if !passable {
-                result.set("ok", true)?;
-                result.set("moved", false)?;
-                result.set("reason", "blocked")?;
-                return Ok(result);
+            match resolve_grid_step(world, template, &actor, &dir) {
+                GridStep::BadDir => {
+                    result.set("ok", false)?;
+                    result.set("can", false)?;
+                    result.set("reason", "bad_dir")?;
+                }
+                GridStep::NoPosition => {
+                    result.set("ok", false)?;
+                    result.set("can", false)?;
+                    result.set("reason", "no_position")?;
+                }
+                GridStep::OffGrid { x, y } => {
+                    result.set("ok", true)?;
+                    result.set("can", false)?;
+                    result.set("reason", "off_grid")?;
+                    result.set("x", x)?;
+                    result.set("y", y)?;
+                }
+                GridStep::Impassable { x, y, terrain } => {
+                    result.set("ok", true)?;
+                    result.set("can", false)?;
+                    result.set("reason", "impassable")?;
+                    result.set("x", x)?;
+                    result.set("y", y)?;
+                    result.set("terrain", terrain)?;
+                }
+                GridStep::Ok { to, new_terrain, .. } => {
+                    result.set("ok", true)?;
+                    result.set("can", true)?;
+                    result.set("x", to.0)?;
+                    result.set("y", to.1)?;
+                    result.set("terrain", new_terrain)?;
+                }
             }
-
-            // Resolve a terrain's hook host (its `archetype` file key → dbref).
-            let arch_of = |tkey: &str| -> Option<String> {
-                template
-                    .terrain
-                    .get(tkey)
-                    .and_then(|t| t.archetype.as_deref())
-                    .and_then(|k| crate::loader::resolve_file_key(world, k))
-            };
-
-            let mut batch = b.borrow_mut();
-            batch.push(Intent::SetAttr {
-                target: actor.clone(),
-                key: "_x".into(),
-                value: serde_json::json!(nx),
-            });
-            batch.push(Intent::SetAttr {
-                target: actor.clone(),
-                key: "_y".into(),
-                value: serde_json::json!(ny),
-            });
-            // on_leave the old terrain, on_enter the new — fired after the move
-            // commits (deferred TriggerHook), with the moving actor as the
-            // ambient actor and the cell in the trigger data.
-            if let Some(old_terrain) = terrain_at(x, y)
-                && let Some(host) = arch_of(&old_terrain)
-            {
-                batch.push(Intent::Trigger {
-                    target: host,
-                    hook: "on_leave".into(),
-                    data: Some(serde_json::json!({ "x": x, "y": y, "map": map_name, "terrain": old_terrain })),
-                    actor: Some(actor.clone()),
-                });
-            }
-            if let Some(host) = arch_of(&new_terrain) {
-                batch.push(Intent::Trigger {
-                    target: host,
-                    hook: "on_enter".into(),
-                    data: Some(serde_json::json!({ "x": nx, "y": ny, "map": map_name, "terrain": new_terrain })),
-                    actor: Some(actor.clone()),
-                });
-            }
-            drop(batch);
-
-            result.set("ok", true)?;
-            result.set("moved", true)?;
-            result.set("x", nx)?;
-            result.set("y", ny)?;
-            result.set("terrain", new_terrain)?;
             Ok(result)
         })?,
     )?;

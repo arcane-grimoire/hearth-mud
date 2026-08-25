@@ -2400,6 +2400,7 @@ impl Engine {
                         &tf.relative,
                         world.as_ref(),
                         None,
+                        &self.map_templates,
                         softcode::Budget::default(),
                     ) {
                         Ok(fr) => {
@@ -7071,6 +7072,7 @@ impl Engine {
             &format!("{} (embedded)", ref_id),
             Some(&self.world),
             Some(ref_id),
+            &self.map_templates,
             softcode::Budget::default(),
         ))
     }
@@ -7154,6 +7156,7 @@ impl Engine {
                 arg,
                 world.as_ref(),
                 None,
+                &self.map_templates,
                 softcode::Budget::default(),
             );
             Self::render_test_result(&mut out, arg, result, &mut passed, &mut failed);
@@ -7180,6 +7183,7 @@ impl Engine {
                 &tf.relative,
                 world.as_ref(),
                 None,
+                &self.map_templates,
                 softcode::Budget::default(),
             );
             Self::render_test_result(&mut out, &tf.relative, result, &mut passed, &mut failed);
