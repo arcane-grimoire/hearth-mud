@@ -111,8 +111,11 @@ async fn run_server(config_path: String) {
     });
     let web_addr = config.web_addr.clone();
     let web_tx = engine_tx.clone();
+    let cors_allowed_origins = config.cors_allowed_origins.clone();
     let web_handle = tokio::spawn(async move {
-        if let Err(e) = net::start_web(&web_addr, web_tx, game_web_dir.as_deref()).await {
+        if let Err(e) =
+            net::start_web(&web_addr, web_tx, game_web_dir.as_deref(), cors_allowed_origins).await
+        {
             tracing::error!(error = %e, "Web server failed");
         }
     });

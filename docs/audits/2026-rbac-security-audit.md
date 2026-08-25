@@ -4,22 +4,29 @@ Audit of the authentication and authorization model: `src/accounts.rs`,
 `src/net/web.rs`, the REST/token path in `src/engine/mod.rs`, and the telnet
 command gates. Findings dated 2026-08-23.
 
-## Verification status (2026-08-25)
+## Resolution status (2026-08-25)
 
-Re-checked every finding against the current tree. Only the locking work
-landed since the audit; the rest stand.
+The high/medium findings were fixed on 2026-08-25 (commit follows this doc).
+The design choice for H1 (keep Builder broad, hard-guard the `system:global`
+surface — not full ownership enforcement) and M2 (require a token for reads)
+was made deliberately; see the notes on each finding.
 
 | # | Finding | Status |
 |---|---------|--------|
-| H1 | Builder can rewrite any object / system rules object | **Partially mitigated** — the `system:locked` guard now makes file-authoritative objects read-only to every authoring surface, and games lock `std/*` (rules + base archetypes) via `locked = [...]`. The *ownership* dimension is still open: a Builder can still edit any non-locked object, including other players' items. See H1 note below. |
-| H2 | `hash_token` uses `DefaultHasher` | **Open** — still `DefaultHasher` (`engine/mod.rs` `hash_token`). |
-| M1 | No rate limiting on authentication | **Open** — no throttle/backoff on telnet or API login. |
-| M2 | Unauthenticated world enumeration | **Open (narrowed)** — `Examine` and `ListPrograms` were correctly pulled out of the public `is_read` set and are now Builder-gated, but `ListRooms`/`ListObjects`/`ListExits` (and `ListHooks`) are still anonymous and still ignore `system:hidden` / `can_see`. |
-| M3 | `CorsLayer::permissive()` on every route | **Open** — still unconditional (`web.rs`), no config flag. |
-| L1–L4 | Notes | **Unchanged** — still applicable. |
+| H1 | Builder can rewrite any object / system rules object | **Fixed (scoped).** Two layers now: the pre-existing `system:locked` guard makes file-authoritative objects (`std/*`) read-only to authoring, and a new guard makes the **`system:global` command surface admin-only to author** — a non-admin Builder can neither edit a `system:global` object nor add/remove that tag (`handle_api_request`, `is_ref_global`). `system:managed` content stays Builder-editable by design (that is the in-game building model). Full per-object ownership enforcement was **deliberately not** adopted (MUD-traditional broad building kept). |
+| H2 | `hash_token` uses `DefaultHasher` | **Fixed.** Now SHA-256 (`sha2` crate). Existing tokens (old digests) simply stop matching, so those sessions re-authenticate once. |
+| M1 | No rate limiting on authentication | **Fixed.** Per-username failed-login throttle in `handle_login_password` (`login_failures`): 5 failures → 30 s lockout, checked before Argon2 runs, so login can't be used as a CPU-DoS amplifier. Cleared on success or when the window elapses. |
+| M2 | Unauthenticated world enumeration | **Fixed.** `ListRooms`/`ListObjects`/`ListExits` now require a valid token (any authenticated account, not Builder). `ListHooks` stays public (static engine vocabulary, not world data); `Examine`/`ListPrograms` remain Builder-gated as before. |
+| M3 | `CorsLayer::permissive()` on every route | **Fixed.** `cors_allowed_origins` config allow-list (`web.rs`); permissive only when unset (dev), with a startup warning. |
+| L1–L4 | Notes | **Unchanged** — still applicable (see below). |
 
-Net: **H2, M1, M2, M3 remain open**; H1 is partially addressed by the locking
-system but its ownership recommendation is not yet implemented.
+Tests: `world_reads_require_a_token_but_not_builder` (M2) and
+`only_admins_can_author_the_system_global_surface` (H1) in `src/engine/mod.rs`.
+M1's timing-based throttle is covered by inspection, not a unit test.
+
+The **L-level notes below are unchanged** and remain open follow-ups (token
+lifetimes, the near-dead `Puppeteer` scope, `@grant` audit trail / last-admin
+lockout).
 
 ## Model summary
 
@@ -74,17 +81,19 @@ if not, add:
 
 This touches the domain model ("who owns what"), so it likely warrants an ADR.
 
-> **Update (2026-08-25): partially mitigated.** The `system:locked` guard
-> (`is_ref_locked` / `locked_target` in `handle_api_request`, config-driven
-> `locked = [prefixes]`) now makes file-authoritative objects read-only across
-> the whole authoring surface — `SetProgram`/`SetScript`, `SetAttribute`,
-> `AddTag`/`RemoveTag`, `DeleteObject`, etc. A game that locks its `std/*`
-> tier (The Last Stag does) blocks the specific "rewrite the `system:global`
-> rules object" and "delete managed content" attacks above. **Still open:**
-> the *ownership* rule (recommendation 1) — a Builder can still edit any
-> object that is *not* locked, including other players' items — and the
-> tag-based hard guard (recommendation 2) is realized only for objects a
-> game opts into locking, not for `system:global`/`system:managed` by tag.
+> **Resolution (2026-08-25): fixed, scoped to the global surface.**
+> Recommendation 2 is implemented directly: `handle_api_request` refuses any
+> non-admin write to a `system:global` object (`is_ref_global`, resolved up the
+> archetype chain) and refuses a non-admin `AddTag`/`RemoveTag` of
+> `system:global`, so the command-injection path above is closed regardless of
+> whether a game opts into locking. This composes with the pre-existing
+> `system:locked` guard (`is_ref_locked` / `locked_target`, config-driven
+> `locked = [prefixes]`) that makes file-authoritative `std/*` objects
+> read-only to authoring. Recommendation 1 (full per-object ownership
+> enforcement) was **deliberately declined**: broad Builder world-editing is
+> kept (MUD-traditional), and `system:managed` content stays Builder-editable
+> because that *is* the in-game building model — the code tier is protected by
+> locking, the global surface by admin-gating, not by ownership.
 
 ### H2. Token hashing uses `DefaultHasher` (non-cryptographic)
 

@@ -38,6 +38,12 @@ pub struct Config {
     /// only the authoring surface. See `docs/plans/archetypes.md`. Typically
     /// `["std", "system"]`: the code tier is locked, world content is live.
     pub locked: Vec<String>,
+    /// Allow-list of browser origins permitted to call the web/API server
+    /// cross-origin. `None`/empty (the default) uses a permissive CORS policy,
+    /// which is fine for local development but risky in deployment — a page on
+    /// any origin could drive the authenticated REST API. Set an explicit list
+    /// (e.g. `["https://play.example.com"]`) in production. See RBAC audit M3.
+    pub cors_allowed_origins: Option<Vec<String>>,
 }
 
 impl Default for Config {
@@ -54,6 +60,7 @@ impl Default for Config {
             max_characters: 3,
             load_world_files: true,
             locked: Vec::new(),
+            cors_allowed_origins: None,
         }
     }
 }

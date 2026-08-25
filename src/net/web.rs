@@ -6,7 +6,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use tokio::sync::mpsc;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 
@@ -30,16 +30,46 @@ pub async fn start_web(
     addr: &str,
     engine_tx: mpsc::UnboundedSender<EngineMessage>,
     game_web_dir: Option<&str>,
+    cors_allowed_origins: Option<Vec<String>>,
 ) -> std::io::Result<()> {
     let state = AppState {
         engine_tx: engine_tx.clone(),
+    };
+
+    // RBAC audit M3: permissive CORS is fine for local development but lets a
+    // page on any origin drive the authenticated API. When the config supplies
+    // an allow-list, restrict `Access-Control-Allow-Origin` to it.
+    let cors = match cors_allowed_origins {
+        Some(origins) if !origins.is_empty() => {
+            let parsed: Vec<axum::http::HeaderValue> = origins
+                .iter()
+                .filter_map(|o| match o.parse() {
+                    Ok(v) => Some(v),
+                    Err(_) => {
+                        tracing::warn!(origin = %o, "Ignoring invalid CORS origin");
+                        None
+                    }
+                })
+                .collect();
+            tracing::info!(?origins, "CORS restricted to configured origins");
+            CorsLayer::new()
+                .allow_origin(parsed)
+                .allow_methods(Any)
+                .allow_headers(Any)
+        }
+        _ => {
+            tracing::warn!(
+                "CORS is permissive (any origin) — set cors_allowed_origins in hearth.toml for production"
+            );
+            CorsLayer::permissive()
+        }
     };
 
     let base = Router::new()
         .route("/ws", get(ws_handler))
         .route("/api", post(api_handler))
         .with_state(state)
-        .layer(CorsLayer::permissive());
+        .layer(cors);
 
     let web_dir = game_web_dir
         .map(std::path::Path::new)

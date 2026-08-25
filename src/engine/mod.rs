@@ -435,6 +435,12 @@ pub struct Engine {
     scheduled_hooks: Vec<ScheduledHook>,
     /// API tokens: hash → info. Both session (ephemeral) and persistent tokens.
     api_tokens: HashMap<String, TokenInfo>,
+    /// Recent failed-login tracking per lowercased username:
+    /// `(consecutive_failures, first_failure_at)`. Used to throttle repeated
+    /// bad passwords so Argon2 verification can't be used as a CPU-DoS
+    /// amplifier and to slow online guessing (RBAC audit M1). Cleared on a
+    /// successful login or once the lockout window elapses.
+    login_failures: HashMap<String, (u32, std::time::Instant)>,
     /// Content hashes from the last load/reload, used to skip unchanged files.
     file_hashes: HashMap<std::path::PathBuf, String>,
     max_characters: u8,
@@ -673,6 +679,7 @@ impl Engine {
             file_sources,
             scheduled_hooks,
             api_tokens,
+            login_failures: HashMap::new(),
             file_hashes,
             max_characters: config.max_characters,
             locked_prefixes: config.locked.clone(),
@@ -1005,11 +1012,16 @@ impl Engine {
         }
     }
 
+    /// Hash of an API token as stored in the DB and looked up on each request.
+    /// SHA-256, not `DefaultHasher` — this is a stored-credential digest, so it
+    /// must be a cryptographic one-way function (RBAC audit H2). Changing the
+    /// algorithm invalidates any tokens hashed by the old one, so those
+    /// sessions must re-authenticate once.
     fn hash_token(token: &str) -> String {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        token.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        format!("{:x}", hasher.finalize())
     }
 
     fn now_secs() -> u64 {
@@ -1075,74 +1087,24 @@ impl Engine {
         // only calls it from the Editor/Admin panels, both reachable only
         // after login — by the time either can open, `setToken` has already
         // stored a real token, so requiring one here doesn't break it.
-        let is_read = matches!(
+        // `ListHooks` is static engine vocabulary (the known-hooks schema), not
+        // world data, so it stays public — it leaks nothing (see
+        // `list_hooks_is_public_and_matches_the_engine_vocabulary`).
+        let is_public_read = matches!(&req, ApiRequest::ListHooks);
+
+        // World reads enumerate live rooms/objects/exits — they leak area
+        // layout and, bypassing `system:hidden`/`can_see`, hidden content, so
+        // they require a valid token (any authenticated account, not just
+        // Builder). RBAC audit M2.
+        let is_world_read = matches!(
             &req,
             ApiRequest::ListRooms
                 | ApiRequest::ListObjects { .. }
                 | ApiRequest::ListExits { .. }
-                | ApiRequest::ListHooks
         );
 
-        // Populated for authenticated writes — the account performing this
-        // request, threaded down to `SetProgram`/`RemoveProgram` below as
-        // the program-version `author` (see
-        // docs/plans/program-authoring.md Stage 3's "Author": "API
-        // SetProgram — account_id, resolved in the auth block").
-        let mut acting_account: Option<String> = None;
-
-        if !is_read {
-            let account_id = token
-                .as_deref()
-                .map(Self::hash_token)
-                .and_then(|hash| self.api_tokens.get(&hash))
-                .filter(|info| !Self::is_token_expired(info))
-                .map(|info| info.account_id.clone());
-
-            let account_id = match account_id {
-                Some(id) => id,
-                None => return ApiResponse::error("Authentication required"),
-            };
-
-            let has_builder = self
-                .accounts
-                .get(&account_id)
-                .map(|a| a.has_scope(Scope::Builder))
-                .unwrap_or(false);
-
-            if !has_builder {
-                return ApiResponse::error("Builder scope required");
-            }
-
-            // `Eval` is arbitrary admin code with the full write API — the
-            // same gate `cmd_eval` applies for telnet (`Scope::Admin`, not
-            // just `Builder`). A token that can eval owns the server.
-            if matches!(
-                &req,
-                ApiRequest::SaveWorld
-                    | ApiRequest::Eval { .. }
-                    | ApiRequest::Import { .. }
-                    | ApiRequest::Export { .. }
-                    | ApiRequest::PutMap { .. }
-                    | ApiRequest::PutTerrain { .. }
-            ) {
-                let has_admin = self
-                    .accounts
-                    .get(&account_id)
-                    .map(|a| a.has_scope(Scope::Admin))
-                    .unwrap_or(false);
-                if !has_admin {
-                    return ApiResponse::error("Admin scope required");
-                }
-            }
-
-            acting_account = Some(account_id);
-        }
-
-        // Locked-definition guard: an object stamped `system:locked` is
-        // file-authoritative and refuses authoring edits at every REST entry
-        // point that mutates a specific object's definition. Runtime state
-        // (softcode intents via `apply_batch`) is deliberately NOT gated here
-        // — only the authoring surface. See `is_object_locked`.
+        // The specific object a request mutates, if any — used by both the
+        // `system:global` guard and the locked-definition guard below.
         let locked_target: Option<&str> = match &req {
             ApiRequest::SetAttribute { ref_id, .. }
             | ApiRequest::SetDescription { ref_id, .. }
@@ -1162,6 +1124,94 @@ impl Engine {
             | ApiRequest::InkSave { ref_id, .. } => Some(ref_id.as_str()),
             _ => None,
         };
+
+        // Populated for authenticated writes — the account performing this
+        // request, threaded down to `SetProgram`/`RemoveProgram` below as
+        // the program-version `author` (see
+        // docs/plans/program-authoring.md Stage 3's "Author": "API
+        // SetProgram — account_id, resolved in the auth block").
+        let mut acting_account: Option<String> = None;
+
+        if !is_public_read {
+            let account_id = token
+                .as_deref()
+                .map(Self::hash_token)
+                .and_then(|hash| self.api_tokens.get(&hash))
+                .filter(|info| !Self::is_token_expired(info))
+                .map(|info| info.account_id.clone());
+
+            let account_id = match account_id {
+                Some(id) => id,
+                None => return ApiResponse::error("Authentication required"),
+            };
+
+            if !is_world_read {
+                let has_builder = self
+                    .accounts
+                    .get(&account_id)
+                    .map(|a| a.has_scope(Scope::Builder))
+                    .unwrap_or(false);
+
+                if !has_builder {
+                    return ApiResponse::error("Builder scope required");
+                }
+
+                let has_admin = self
+                    .accounts
+                    .get(&account_id)
+                    .map(|a| a.has_scope(Scope::Admin))
+                    .unwrap_or(false);
+
+                // `Eval` is arbitrary admin code with the full write API — the
+                // same gate `cmd_eval` applies for telnet (`Scope::Admin`, not
+                // just `Builder`). A token that can eval owns the server.
+                if matches!(
+                    &req,
+                    ApiRequest::SaveWorld
+                        | ApiRequest::Eval { .. }
+                        | ApiRequest::Import { .. }
+                        | ApiRequest::Export { .. }
+                        | ApiRequest::PutMap { .. }
+                        | ApiRequest::PutTerrain { .. }
+                ) && !has_admin
+                {
+                    return ApiResponse::error("Admin scope required");
+                }
+
+                // RBAC audit H1: the `system:global` command surface is
+                // admin-only to *author*. A `system:global` object's `cmd_*`
+                // hooks run for every player regardless of location, so letting
+                // a non-admin Builder rewrite one — or promote any object into
+                // one via the tag — is privilege escalation into every player's
+                // command path. Runtime state (softcode intents via
+                // `apply_batch`) is deliberately not gated; only authoring is.
+                // `system:managed` content stays Builder-editable (that is the
+                // in-game building model) — the code tier is protected by
+                // `system:locked` instead.
+                if !has_admin {
+                    if let Some(ref_id) = locked_target
+                        && self.is_ref_global(ref_id)
+                    {
+                        return ApiResponse::error("system:global objects are admin-only to edit");
+                    }
+                    if let ApiRequest::AddTag { tag, .. } | ApiRequest::RemoveTag { tag, .. } = &req
+                        && tag.as_str() == "system:global"
+                    {
+                        return ApiResponse::error(
+                            "Only admins can set or remove the system:global tag",
+                        );
+                    }
+                }
+            }
+
+            acting_account = Some(account_id);
+        }
+
+        // Locked-definition guard: an object stamped `system:locked` is
+        // file-authoritative and refuses authoring edits at every REST entry
+        // point that mutates a specific object's definition. Runtime state
+        // (softcode intents via `apply_batch`) is deliberately NOT gated here
+        // — only the authoring surface. See `is_object_locked`.
         if let Some(ref_id) = locked_target
             && self.is_ref_locked(ref_id)
         {
@@ -2657,11 +2707,36 @@ impl Engine {
 
         self.send_echo_on(session_id);
 
+        // RBAC audit M1: throttle repeated failed logins per username before
+        // spending Argon2 CPU, so login can't be used as a DoS amplifier and
+        // online guessing is slowed. The window resets after LOCKOUT elapses or
+        // on any successful login.
+        const MAX_FAILURES: u32 = 5;
+        const LOCKOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        let fail_key = username.to_lowercase();
+        if let Some((count, first)) = self.login_failures.get(&fail_key)
+            && *count >= MAX_FAILURES
+        {
+            if first.elapsed() < LOCKOUT {
+                self.send(
+                    session_id,
+                    "Too many failed attempts. Try again shortly.\r\nUsername: ",
+                );
+                if let Some(session) = self.sessions.get_mut(session_id) {
+                    session.state = SessionState::PromptUsername;
+                }
+                return;
+            }
+            // Window elapsed — forget the failures and let this attempt run.
+            self.login_failures.remove(&fail_key);
+        }
+
         match self.accounts.authenticate(&username, input) {
             Ok(account) => {
                 let account_id = account.id.clone();
                 let characters = account.characters.clone();
                 let active_character = account.active_character.clone().unwrap_or_default();
+                self.login_failures.remove(&fail_key);
 
                 // Kick any existing sessions for this account
                 let stale: Vec<String> = self
@@ -2691,6 +2766,11 @@ impl Engine {
                 }
             }
             Err(msg) => {
+                let entry = self
+                    .login_failures
+                    .entry(fail_key)
+                    .or_insert((0, std::time::Instant::now()));
+                entry.0 += 1;
                 self.send(session_id, &format!("{}\r\nUsername: ", msg));
                 if let Some(session) = self.sessions.get_mut(session_id) {
                     session.state = SessionState::PromptUsername;
@@ -6460,6 +6540,19 @@ impl Engine {
         self.world.get(ref_id).is_some_and(Self::is_object_locked)
     }
 
+    /// Whether an object resolves the `system:global` tag — own or inherited
+    /// up its archetype chain (a shared "rules" object), matching how command
+    /// dispatch resolves it (`DerivedIndexes::build`). Its `cmd_*`/`on_*` hooks
+    /// run for every player, so authoring it is admin-only (RBAC audit H1).
+    fn is_ref_global(&self, ref_id: &str) -> bool {
+        self.world.get(ref_id).is_some_and(|o| {
+            self.world
+                .resolved_tags(o)
+                .iter()
+                .any(|t| t.category == "system" && t.key == "global")
+        })
+    }
+
     fn locked_error(ref_id: &str) -> String {
         format!(
             "{} is locked (system:locked) — edit the file and @reload-world",
@@ -9443,6 +9536,90 @@ end
 
         let authenticated = engine.handle_api_request(ApiRequest::Examine { ref_id }, Some(token));
         assert!(authenticated.ok, "{:?}", authenticated.error);
+    }
+
+    /// RBAC audit M2: room/object/exit enumeration leaks area layout and, by
+    /// ignoring `system:hidden`/`can_see`, hidden content — so it requires a
+    /// valid token, though any authenticated account (not Builder) suffices.
+    /// `ListHooks` (static engine vocabulary) stays public.
+    #[test]
+    fn world_reads_require_a_token_but_not_builder() {
+        let (mut engine, _admin, _) = engine_with_api_token(&[Scope::Admin]);
+
+        // A second, Player-only account (subsequent accounts get Player only)
+        // with its own token.
+        let player_id = engine.accounts.create("plainplayer", "password123").unwrap().id.clone();
+        let player_token = "player-token".to_string();
+        engine.api_tokens.insert(
+            Engine::hash_token(&player_token),
+            TokenInfo { account_id: player_id, label: "p".into(), persistent: false, expires_at: None },
+        );
+
+        let anon = engine.handle_api_request(ApiRequest::ListRooms, None);
+        assert!(!anon.ok, "world enumeration must not be anonymous");
+        assert_eq!(anon.error.as_deref(), Some("Authentication required"));
+
+        let as_player =
+            engine.handle_api_request(ApiRequest::ListRooms, Some(player_token));
+        assert!(as_player.ok, "a plain Player token must suffice to read: {:?}", as_player.error);
+
+        let hooks = engine.handle_api_request(ApiRequest::ListHooks, None);
+        assert!(hooks.ok, "ListHooks is static schema and must stay public");
+    }
+
+    /// RBAC audit H1: a `system:global` object's `cmd_*` hooks run for every
+    /// player, so a non-admin Builder must not rewrite one or promote an object
+    /// into one — but ordinary objects stay Builder-editable (the guard is
+    /// narrow; content editing is unaffected).
+    #[test]
+    fn only_admins_can_author_the_system_global_surface() {
+        let (mut engine, admin, _) = engine_with_api_token(&[Scope::Admin]);
+
+        let builder_id =
+            engine.accounts.create("plainbuilder", "password123").unwrap().id.clone();
+        engine.accounts.grant_scope(&builder_id, Scope::Builder);
+        let builder_token = "builder-token".to_string();
+        engine.api_tokens.insert(
+            Engine::hash_token(&builder_token),
+            TokenInfo { account_id: builder_id, label: "b".into(), persistent: false, expires_at: None },
+        );
+
+        // A global "rules" object and an ordinary object.
+        let global_ref = engine.world.next_dbref();
+        let mut global = GameObject::new(&global_ref, "rules", Kind::Item);
+        global.tags.insert(Tag { category: "system".into(), key: "global".into() });
+        engine.world.add_object(global);
+
+        let plain_ref = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&plain_ref, "widget", Kind::Item));
+
+        // Builder cannot rewrite the global object...
+        let denied = engine.handle_api_request(
+            ApiRequest::SetAttribute { ref_id: global_ref.clone(), key: "pwned".into(), value: serde_json::json!(true) },
+            Some(builder_token.clone()),
+        );
+        assert_eq!(denied.error.as_deref(), Some("system:global objects are admin-only to edit"));
+
+        // ...but the admin can.
+        let allowed = engine.handle_api_request(
+            ApiRequest::SetAttribute { ref_id: global_ref, key: "ok".into(), value: serde_json::json!(1) },
+            Some(admin),
+        );
+        assert!(allowed.ok, "admin must still author the global object: {:?}", allowed.error);
+
+        // Builder cannot promote a plain object into the global surface...
+        let escalate = engine.handle_api_request(
+            ApiRequest::AddTag { ref_id: plain_ref.clone(), tag: "system:global".into() },
+            Some(builder_token.clone()),
+        );
+        assert_eq!(escalate.error.as_deref(), Some("Only admins can set or remove the system:global tag"));
+
+        // ...but editing an ordinary object still works.
+        let normal = engine.handle_api_request(
+            ApiRequest::SetAttribute { ref_id: plain_ref, key: "color".into(), value: serde_json::json!("red") },
+            Some(builder_token),
+        );
+        assert!(normal.ok, "builder editing a non-global object must still work: {:?}", normal.error);
     }
 
     // -- @import / @export (Stage 4) --
