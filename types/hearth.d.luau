@@ -200,6 +200,12 @@ declare function set_val(ref: ObjectRef, attr_key: string, ...: any): ()
 --- Remove an attribute from an object.
 declare function unset_attr(ref: ObjectRef, key: string): ()
 
+--- Remove this instance's OWN override of `key` so it inherits the
+--- archetype's value again (MOO `clear_property`) — see
+--- docs/plans/archetypes.md. Same effect as unset_attr; use this name when
+--- the intent is "revert to the archetype", not "delete the attribute".
+declare function clear_attr(ref: ObjectRef, key: string): ()
+
 --- Move `amount` of a numeric attribute `key` from one object to another.
 declare function transfer_attr(from: ObjectRef, to: ObjectRef, key: string, amount: number): ()
 
@@ -260,6 +266,16 @@ declare function clone(ref: ObjectRef): string
 --- chain reactions. The optional data table is passed to the hook as `args`.
 --- e.g. trigger("area/dungeon/item/gate", "on_activate")
 declare function trigger(ref: ObjectRef, hook: string, data: any?): ()
+
+--- Available ONLY inside a hook body (an archetype delegation feature — see
+--- docs/plans/archetypes.md): call the inherited version of the CURRENT
+--- hook — the next archetype ancestor above the one whose code is running
+--- that defines it (MOO pass() / Smalltalk super). Bound to the same
+--- this/actor/room and IntentBatch as the calling hook. With no `args`,
+--- forwards this call's own args unchanged; with `args`, forwards that
+--- instead. Returns the ancestor hook's return value, or nil if no ancestor
+--- defines this hook (a safe no-op).
+declare function pass(args: string?): any
 
 --- Spawn a new object in the world. Returns the new object's ref_id.
 --- kind defaults to "item". Cannot spawn "player" kind.

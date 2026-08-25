@@ -349,6 +349,38 @@ pub fn resolve_script<'a>(
     None
 }
 
+/// The script that should run for `hook` if it were `pass()`-ed from
+/// `from_ref` — the first archetype ancestor **above** `from_ref` (never
+/// `from_ref` itself) whose script defines `hook`. This is [`resolve_script`]
+/// with the starting point shifted up one level: `resolve_script` may return
+/// `from_ref`'s own script; this never does, because `pass()` inside a hook
+/// running *as* `from_ref` means "the next definer up from here," not "here
+/// again." Returns `None` when there is no such ancestor (a safe `pass()`
+/// no-op) — see docs/plans/archetypes.md's Stage 2 `pass()` section.
+pub fn resolve_script_above<'a>(
+    world: &'a World,
+    from_ref: &str,
+    hook: &str,
+) -> Option<(&'a ObjectScript, &'a str)> {
+    let obj = world.get(from_ref)?;
+    let mut next = obj.archetype_ref.clone();
+    let mut visited: HashSet<String> = HashSet::new();
+    visited.insert(obj.ref_id.clone());
+    while let Some(aref) = next {
+        if !visited.insert(aref.clone()) || visited.len() > MAX_ARCHETYPE_DEPTH {
+            break;
+        }
+        let Some(anc) = world.get(&aref) else { break };
+        if let Some(s) = get_script(anc)
+            && s.defines(hook)
+        {
+            return Some((s, anc.ref_id.as_str()));
+        }
+        next = anc.archetype_ref.clone();
+    }
+    None
+}
+
 /// Whether `obj` responds to `hook` — its own script, or an archetype
 /// ancestor's. The boolean counterpart to [`resolve_script`], for call sites
 /// that only need to know "does this fire" without the script itself (tick

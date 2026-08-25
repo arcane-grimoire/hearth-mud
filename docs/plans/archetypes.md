@@ -182,8 +182,18 @@ than today's inline stats, stage 1 earned its keep.
       rooms actually exist.
 - **Traits (`has-a`)** — additive components per the invariant above; unify with
   tags/`system:global`.
-- **`pass()`** — single-chain `super`; call the inherited hook from an override.
-- **`clear_attr`** — revert an override to inheriting (MOO `clear_property`).
+- **`pass()` — DONE.** Inside a hook, `pass(...)` runs the next archetype
+  ancestor's definition of the SAME hook, bound to the same `this`/`actor`/
+  `room` and sharing the outer hook's `IntentBatch` and budget — single-chain
+  `super`/MOO `pass()`. `hooks::resolve_script_above` finds the next definer
+  above a given ref; `SoftcodeRuntime::run_hook_level` (`src/softcode/mod.rs`)
+  runs it and installs a fresh `pass` bound to that level's own resolving
+  ref, so nested `pass()` recurses further up on its own. No ancestor
+  definer, or no args given, are both safe (a no-op returning nil; forwards
+  the calling hook's own args unless `pass` is given explicit ones).
+- **`clear_attr` — DONE.** An alias for the existing `unset_attr` intent,
+  named for the archetype-facing reading ("revert to inheriting" vs. "delete
+  the attr") — see `src/softcode/api.rs`.
 - **Authoring surface** — `@archetype`, builder "N instances / which fields are
   overridden", the "where does this hook come from" inspector view.
 - **`@export` / declared attrs** — ties into `docs/plans/attribute-schema.md`;

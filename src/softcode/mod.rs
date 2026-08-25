@@ -1102,6 +1102,32 @@ const MODULE_LOADING_KEY: &str = "_hearth_module_loading";
 /// Stage 2.
 pub(crate) const USER_LIB_SOURCES_KEY: &str = "_hearth_user_lib_sources";
 
+/// Level-invariant context for one hook run — the same `this`/`actor`/
+/// `room`, world, and shared machinery whether [`SoftcodeRuntime::run_hook`]
+/// is running the outermost resolved script or an ancestor reached via
+/// `pass()`. What DOES vary per level — the script, which ref it resolved
+/// from, and the forwarded args — are separate parameters to
+/// [`SoftcodeRuntime::run_hook_level`], not fields here.
+struct HookRunCtx<'a> {
+    world: &'a World,
+    batch: Rc<RefCell<IntentBatch>>,
+    dbref_counter: Rc<Cell<u64>>,
+    themes: &'a HashMap<String, Theme>,
+    map_templates: &'a HashMap<String, crate::map_template::MapTemplateFile>,
+    scheduled_hooks: &'a [ScheduledHook],
+    tick_count: u64,
+    default_location: Option<String>,
+    hook: String,
+    this_ref: String,
+    actor_ref: String,
+    room_ref: Option<String>,
+    is_tick: bool,
+    /// `on_tick`'s persistent state table — `None` for every other hook.
+    /// Created once by [`SoftcodeRuntime::run_hook`] and reused at every
+    /// `pass()` level (never delegated — see docs/plans/archetypes.md).
+    state_tbl: Option<mlua::Table>,
+}
+
 impl SoftcodeRuntime {
     pub fn new() -> Self {
         let lua = Lua::new();
@@ -1353,12 +1379,28 @@ impl SoftcodeRuntime {
     /// then the `hook`-named function is looked up and invoked. For `on_tick`
     /// hooks the signature is `(this, state, room)` — `state` is the object's
     /// mutable state table, persisted between runs and shared by all hooks.
+    ///
+    /// `resolving_ref` is the ref `script` actually came from — `this_ref`
+    /// itself, or the archetype ancestor `hooks::resolve_script` found it on.
+    /// It seeds the hook body's `pass()` (installed by
+    /// [`Self::run_hook_level`]): calling `pass()` looks for the next
+    /// archetype ancestor **above** `resolving_ref` that defines `hook`
+    /// (`hooks::resolve_script_above`), runs that script's chunk in a fresh
+    /// env bound to the SAME `this`/`actor`/`room` and the SAME
+    /// `IntentBatch` (one hook run, one batch), and calls its `hook`
+    /// function — forwarding this level's args unless `pass` is given
+    /// explicit ones. No ancestor definer means `pass()` is a no-op
+    /// returning nil. Each level's `pass` closure is bound to that level's
+    /// own resolving ref, so a `pass()`-ed ancestor can itself `pass()`
+    /// further up the chain — see [`Self::run_hook_level`] for the mlua
+    /// mechanics.
     #[allow(clippy::too_many_arguments)]
     pub fn run_hook(
         &self,
         world: &World,
         script: &ObjectScript,
         hook: &str,
+        resolving_ref: &str,
         this_ref: &str,
         actor_ref: &str,
         room_ref: Option<&str>,
@@ -1388,81 +1430,64 @@ impl SoftcodeRuntime {
                 .and_then(|a| a.location_ref.clone())
         });
         let is_tick = hook == "on_tick";
-        let state_capture: Rc<RefCell<HashMap<String, serde_json::Value>>> =
-            Rc::new(RefCell::new(HashMap::new()));
-        let state_writer = Rc::clone(&state_capture);
+
+        // `on_tick`'s `state` table, and the `HookRunCtx` that carries it and
+        // every other level-invariant piece `pass()` needs, are built BEFORE
+        // entering `self.lua.scope` below. `run_hook_level`'s `pass` closures
+        // borrow `ctx` for the scope's own 'env lifetime, which is fixed at
+        // the `.scope()` call itself — nothing created only *inside* its
+        // closure could ever satisfy that, so `ctx` has to live out here.
+        // Plain Lua values like a `Table` don't need `Scope` to create (only
+        // functions/userdata holding borrowed Rust data do), so building the
+        // state table out here is safe.
+        let state_tbl: Option<mlua::Table> = if is_tick {
+            let t = self.lua.create_table().map_err(classify_lua_error)?;
+            for (k, v) in &script.state {
+                let lv = self.lua.to_value(v).map_err(classify_lua_error)?;
+                t.set(k.clone(), lv).map_err(classify_lua_error)?;
+            }
+            Some(t)
+        } else {
+            None
+        };
+
+        let ctx = HookRunCtx {
+            world,
+            batch: Rc::clone(&batch),
+            dbref_counter: Rc::clone(&dbref_counter),
+            themes,
+            map_templates,
+            scheduled_hooks,
+            tick_count,
+            default_location,
+            hook: hook.to_string(),
+            this_ref: this_ref.to_string(),
+            actor_ref: actor_ref.to_string(),
+            room_ref: room_ref.map(|s| s.to_string()),
+            is_tick,
+            // `state_tbl` is never delegated (docs/plans/archetypes.md), so
+            // every `pass()` level shares this SAME table — whichever
+            // ancestor's code happens to be running still reads/writes the
+            // *instance's* own state.
+            state_tbl: state_tbl.clone(),
+        };
 
         let run_result: mlua::Result<LuaValue> = self.lua.scope(|scope| {
-            let env = self.lua.create_table()?;
-            api::install_stdlib(&self.lua, &env)?;
-            let obj_mt = api::install(
-                &self.lua,
+            self.run_hook_level(
                 scope,
-                &env,
-                world,
-                Rc::clone(&batch),
-                default_location.clone(),
-                Rc::clone(&dbref_counter),
-                themes,
-                map_templates,
-                scheduled_hooks,
-                tick_count,
-                &self.ink,
-            )?;
-
-            let compiled = self.get_or_compile(&script.source, hook)
-                .map_err(|e| e.clone())?;
-            compiled.set_environment(env.clone())?;
-            compiled.call::<()>(())?;
-
-            let func: Option<mlua::Function> = env.get(hook)?;
-            let func = match func {
-                Some(f) => f,
-                None => return Ok(LuaValue::Nil),
-            };
-
-            let this_val =
-                api::object_to_value(&self.lua, world, this_ref, Some(&obj_mt))?;
-
-            if is_tick {
-                let state_tbl = self.lua.create_table()?;
-                for (k, v) in &script.state {
-                    state_tbl.set(k.clone(), self.lua.to_value(v)?)?;
-                }
-                let room_val = match room_ref.or(default_location.as_deref()) {
-                    Some(r) => {
-                        api::object_to_value(&self.lua, world, r, Some(&obj_mt))?
-                    }
-                    None => LuaValue::Nil,
-                };
-                let ret = func.call::<LuaValue>((this_val, state_tbl.clone(), room_val))?;
-                // Read state back before scope ends
-                let mut map = state_writer.borrow_mut();
-                for pair in state_tbl.pairs::<String, LuaValue>() {
-                    if let Ok((k, v)) = pair
-                        && let Ok(json_val) = self.lua.from_value::<serde_json::Value>(v) {
-                            map.insert(k, json_val);
-                        }
-                }
-                Ok(ret)
-            } else {
-                let actor_val =
-                    api::object_to_value(&self.lua, world, actor_ref, Some(&obj_mt))?;
-                let room_val = match room_ref.or(default_location.as_deref()) {
-                    Some(r) => {
-                        api::object_to_value(&self.lua, world, r, Some(&obj_mt))?
-                    }
-                    None => LuaValue::Nil,
-                };
-                let ret = match args {
-                    Some(a) => func.call::<LuaValue>((this_val, actor_val, room_val, a.to_string()))?,
-                    None => func.call::<LuaValue>((this_val, actor_val, room_val))?,
-                };
-                Ok(ret)
-            }
+                &ctx,
+                script,
+                resolving_ref.to_string(),
+                args.map(|s| s.to_string()),
+            )
         });
 
         self.lua.remove_interrupt();
+        // `ctx` (and its `Rc::clone`s of `batch`/`dbref_counter`) is no
+        // longer needed once the scope above has returned — drop it so the
+        // `Rc::try_unwrap(batch)` below actually gets the cheap path instead
+        // of always falling back to a clone.
+        drop(ctx);
 
         let ret = match run_result {
             Ok(v) => v,
@@ -1473,25 +1498,128 @@ impl SoftcodeRuntime {
             .map(|cell| cell.into_inner())
             .unwrap_or_else(|rc| rc.borrow().clone());
 
-        // `Rc::try_unwrap` only succeeds when this is the last reference.
-        // `state_writer` (the clone used inside the `lua.scope` closure
-        // above) is captured *by reference*, not by value — closures only
-        // capture what a use actually requires, and `.borrow_mut()` needs
-        // just `&state_writer` — so it's still alive here as a local
-        // variable in this function, and `try_unwrap` always sees a strong
-        // count of (at least) 2. Read through the `Rc` instead of assuming
-        // exclusive ownership, matching how `batch` is unwrapped above;
-        // `unwrap_or_default()` here would silently discard every write a
-        // tick made to `state`, which is exactly the bug this replaced.
-        let state = Rc::try_unwrap(state_capture)
-            .map(|cell| cell.into_inner())
-            .unwrap_or_else(|rc| rc.borrow().clone());
+        // Read `state` back now that the scope (and every `pass()` level
+        // that may have written into `state_tbl`) has finished running.
+        let mut state = HashMap::new();
+        if let Some(t) = &state_tbl {
+            for pair in t.pairs::<String, LuaValue>() {
+                if let Ok((k, v)) = pair
+                    && let Ok(json_val) = self.lua.from_value::<serde_json::Value>(v) {
+                        state.insert(k, json_val);
+                    }
+            }
+        }
 
         Ok(ProgramResult {
             batch,
             denied: matches!(ret, LuaValue::Boolean(false)),
             state,
         })
+    }
+
+    /// Run `hook` on the instance named in `ctx`, using `script` (already
+    /// resolved by the caller) as if it were the script found at
+    /// `resolving_ref`. [`Self::run_hook`] calls this once, at the ref its
+    /// own `hooks::resolve_script` resolved. The `pass` function installed
+    /// here calls it again — at the next archetype ancestor above the
+    /// *current* `resolving_ref` — when the running hook calls `pass()`, so
+    /// this is naturally recursive: each level's `pass` closure captures its
+    /// own `resolving_ref` and, given a further `pass()`, searches from
+    /// there, not from the top. Everything but `script`/`resolving_ref`/
+    /// `args` is level-invariant (same `this`/`actor`/`room`, same
+    /// `IntentBatch`, same budget — one logical hook run) and lives in
+    /// `ctx`.
+    ///
+    /// Each level gets its OWN fresh env (a fresh `api::install`, a fresh
+    /// chunk run) — an ancestor's helpers/constants don't leak into a
+    /// descendant's env or vice versa, matching how two unrelated objects'
+    /// scripts never share a scope either. Only `this`/`actor`/`room` (via
+    /// `ctx`) and the batch are shared.
+    #[allow(clippy::too_many_arguments)]
+    fn run_hook_level<'scope, 'env>(
+        &'env self,
+        scope: &'scope mlua::Scope<'scope, 'env>,
+        ctx: &'env HookRunCtx<'env>,
+        script: &ObjectScript,
+        resolving_ref: String,
+        args: Option<String>,
+    ) -> mlua::Result<LuaValue> {
+        let env = self.lua.create_table()?;
+        api::install_stdlib(&self.lua, &env)?;
+        let obj_mt = api::install(
+            &self.lua,
+            scope,
+            &env,
+            ctx.world,
+            Rc::clone(&ctx.batch),
+            ctx.default_location.clone(),
+            Rc::clone(&ctx.dbref_counter),
+            ctx.themes,
+            ctx.map_templates,
+            ctx.scheduled_hooks,
+            ctx.tick_count,
+            &self.ink,
+        )?;
+
+        // `pass()` — invoke the inherited version of THIS hook: the next
+        // archetype ancestor above `resolving_ref` that defines it (never
+        // `resolving_ref` itself — see `hooks::resolve_script_above`).
+        // Bound per-invocation to `resolving_ref`, so an ancestor reached
+        // via `pass()` gets its OWN `pass` that searches further up, not
+        // back to where this level started. With no such ancestor, `pass()`
+        // is a safe no-op returning nil. `explicit_args`, if given,
+        // overrides what this level forwards; otherwise this level's own
+        // `args` are forwarded unchanged (nil forwards nil).
+        let from_ref = resolving_ref.clone();
+        let outer_args = args.clone();
+        let pass_fn = scope.create_function(move |_lua, explicit_args: Option<String>| {
+            match hooks::resolve_script_above(ctx.world, &from_ref, &ctx.hook) {
+                None => Ok(LuaValue::Nil),
+                Some((anc_script, anc_ref)) => {
+                    let anc_script = anc_script.clone();
+                    let anc_ref = anc_ref.to_string();
+                    let use_args = explicit_args.or_else(|| outer_args.clone());
+                    self.run_hook_level(scope, ctx, &anc_script, anc_ref, use_args)
+                }
+            }
+        })?;
+        env.set("pass", pass_fn)?;
+
+        let compiled = self
+            .get_or_compile(&script.source, &ctx.hook)
+            .map_err(|e| e.clone())?;
+        compiled.set_environment(env.clone())?;
+        compiled.call::<()>(())?;
+
+        let func: Option<mlua::Function> = env.get(ctx.hook.as_str())?;
+        let func = match func {
+            Some(f) => f,
+            None => return Ok(LuaValue::Nil),
+        };
+
+        let this_val = api::object_to_value(&self.lua, ctx.world, &ctx.this_ref, Some(&obj_mt))?;
+
+        if ctx.is_tick {
+            let state_tbl = ctx
+                .state_tbl
+                .clone()
+                .expect("on_tick run must carry a state table");
+            let room_val = match ctx.room_ref.as_deref().or(ctx.default_location.as_deref()) {
+                Some(r) => api::object_to_value(&self.lua, ctx.world, r, Some(&obj_mt))?,
+                None => LuaValue::Nil,
+            };
+            func.call::<LuaValue>((this_val, state_tbl, room_val))
+        } else {
+            let actor_val = api::object_to_value(&self.lua, ctx.world, &ctx.actor_ref, Some(&obj_mt))?;
+            let room_val = match ctx.room_ref.as_deref().or(ctx.default_location.as_deref()) {
+                Some(r) => api::object_to_value(&self.lua, ctx.world, r, Some(&obj_mt))?,
+                None => LuaValue::Nil,
+            };
+            match args {
+                Some(a) => func.call::<LuaValue>((this_val, actor_val, room_val, a)),
+                None => func.call::<LuaValue>((this_val, actor_val, room_val)),
+            }
+        }
     }
 
     /// Run a one-shot `@eval` script — an admin running arbitrary Luau
@@ -2060,6 +2188,7 @@ mod tests {
                 world,
                 &script,
                 &program.hook,
+                this_ref, // resolving_ref — the test script always plays "this object's own"
                 this_ref,
                 actor_ref,
                 room_ref,

@@ -237,7 +237,19 @@ fn resolve_attr<'a>(
 ) -> Option<&'a serde_json::Value> {
     match batch.pending_attr(target, key) {
         Some(Some(v)) => Some(v),
-        Some(None) => None, // pending unset
+        // Pending unset/clear removes the instance's OWN value, so the
+        // effective value becomes whatever the archetype chain provides —
+        // matching what a read returns after the batch commits (`get_attr`
+        // resolves up the chain, and the own value is gone). Resolve from the
+        // archetype up, skipping the instance's own (being unset). Not a hard
+        // miss — that's the bug `clear_attr`'s "revert to inheriting" fixes.
+        // A non-archetyped object has nothing above, so this is `None` (nil),
+        // exactly as before.
+        Some(None) => world
+            .get(target)
+            .and_then(|o| o.archetype_ref.as_deref())
+            .and_then(|a| world.get(a))
+            .and_then(|anc| world.resolved_attr(anc, key)),
         // Instance-first, then up the archetype chain (World::resolved_attr)
         // — see docs/plans/archetypes.md. A pending write on the instance
         // always wins (handled above); an unwritten attr falls through to
@@ -1136,6 +1148,24 @@ pub fn install<'scope, 'env>(
     let b = Rc::clone(&batch);
     env.set(
         "unset_attr",
+        scope.create_function(move |_, (r, key): (Value, String)| {
+            let target = ref_of(&r)?;
+            b.borrow_mut().push(Intent::UnsetAttr { target, key });
+            Ok(())
+        })?,
+    )?;
+
+    // `clear_attr` is the archetype-facing name for the exact same intent as
+    // `unset_attr` (MOO `clear_property`): remove this instance's OWN
+    // attribute override so `get_attr`/`this.attrs`, which already resolve
+    // instance-first-then-up-the-chain (see docs/plans/archetypes.md), fall
+    // through to the archetype's value again. "Clear the override so it
+    // inherits again" reads differently from "delete this attr" even though
+    // the write is identical — hence the alias rather than reusing
+    // `unset_attr` in authored code.
+    let b = Rc::clone(&batch);
+    env.set(
+        "clear_attr",
         scope.create_function(move |_, (r, key): (Value, String)| {
             let target = ref_of(&r)?;
             b.borrow_mut().push(Intent::UnsetAttr { target, key });
@@ -2152,9 +2182,11 @@ mod tests {
     /// scope; that needs the future introspection endpoint.
     ///
     /// "Registered" spans every install site: `env.set("name", …)` here (the
-    /// per-script sandbox env) plus `lua.globals().set("name", …)` in
-    /// noise.rs and grid.rs (true globals). All three files are scanned only
-    /// up to their `#[cfg(test)]` so test code can't register phantom names.
+    /// per-script sandbox env) and in `mod.rs` (`pass`, installed per-hook by
+    /// `run_hook_level` rather than in this file's shared `install`) plus
+    /// `lua.globals().set("name", …)` in noise.rs and grid.rs (true globals).
+    /// All four files are scanned only up to their `#[cfg(test)]` so test
+    /// code can't register phantom names.
     ///
     /// Known fragility: this is a textual scan for literal quoted names after
     /// `env.set(` / `globals().set(`. If a function is ever registered via a
@@ -2164,6 +2196,7 @@ mod tests {
     fn help_panel_api_reference_matches_installed_functions() {
         use std::collections::BTreeSet;
         let api_rs = include_str!("api.rs");
+        let softcode_mod_rs = include_str!("mod.rs");
         let noise_rs = include_str!("../noise.rs");
         let grid_rs = include_str!("../grid.rs");
         let js = include_str!("../../web/src/components/code/hearth-api.js");
@@ -2188,11 +2221,27 @@ mod tests {
             names
         }
 
-        // Registered: env functions here, plus the noise/grid globals. The
-        // globals scan keys off `globals()` then the following `.set("name"`,
-        // so unrelated `.set(` calls (e.g. grid.rs result-table builders) that
-        // aren't preceded by `globals()` are ignored.
+        // Registered: env functions here, plus the noise/grid globals, plus
+        // `pass` — installed per-hook by mod.rs's `run_hook_level` rather
+        // than through this file's shared `install` (it needs the resolving
+        // ref `install` doesn't have). Scoped to just that function's body,
+        // not all of mod.rs: mod.rs also `env.set`s names that are NOT part
+        // of the softcode API surface (run_eval's `actor`, run_tests'
+        // `ctx`/`assert_*` test-harness globals) — a blanket scan of the
+        // whole file would wrongly demand those show up in the Help panel
+        // and LSP types too. The globals scan keys off `globals()` then the
+        // following `.set("name"`, so unrelated `.set(` calls (e.g. grid.rs
+        // result-table builders) that aren't preceded by `globals()` are
+        // ignored.
         let mut registered = quoted_after(api_rs, "env.set(");
+        let run_hook_level_body = softcode_mod_rs
+            .split("fn run_hook_level")
+            .nth(1)
+            .expect("run_hook_level missing from mod.rs")
+            .split("\n    pub fn run_eval")
+            .next()
+            .expect("run_eval missing from mod.rs (used as run_hook_level's end marker)");
+        registered.extend(quoted_after(run_hook_level_body, "env.set("));
         for src in [noise_rs, grid_rs] {
             let body = src.split("#[cfg(test)]").next().unwrap();
             let mut rest = body;

@@ -890,6 +890,7 @@ impl Engine {
                 &self.world,
                 &script,
                 hook_name,
+                &resolving_ref,
                 this_ref,
                 this_ref,
                 room_ref.as_deref(),
@@ -2019,6 +2020,7 @@ impl Engine {
                     &self.world,
                     &script,
                     &hook,            // hook to fire
+                    &ref_id,          // resolving_ref — this synthetic script plays ref_id's own
                     &ref_id,          // this
                     &actor,           // actor
                     room.as_deref(),  // room
@@ -3551,6 +3553,7 @@ impl Engine {
                 &self.world,
                 &script,
                 hook_name,
+                &resolving_ref,
                 this_ref,
                 actor_ref,
                 room_ref,
@@ -7429,6 +7432,284 @@ mod tests {
             engine.world.get(&instance_ref).and_then(|o| o.location_ref.clone()),
             Some(actor_ref.clone()),
             "the instance (not the archetype) should have moved into the actor's inventory"
+        );
+    }
+
+    // -- Stage 2: clear_attr / pass() — docs/plans/archetypes.md --
+
+    /// `clear_attr` removes an instance's OWN attribute override so
+    /// `get_attr` falls back to the archetype's value again — the exact
+    /// effect `unset_attr` already has, under the archetype-facing name (MOO
+    /// `clear_property`).
+    #[test]
+    fn clear_attr_reverts_instance_override_to_inherited_value() {
+        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        let archetype_ref = engine.world.next_dbref();
+        let mut archetype = GameObject::new(&archetype_ref, "goblin", Kind::Npc)
+            .with_location(&room_ref);
+        archetype.attrs.insert("hp".into(), serde_json::json!(10));
+        engine.world.add_object(archetype);
+
+        let instance_ref = engine.world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "goblin1", Kind::Npc)
+            .with_location(&room_ref);
+        instance.archetype_ref = Some(archetype_ref.clone());
+        instance.attrs.insert("hp".into(), serde_json::json!(3));
+        engine.world.add_object(instance);
+
+        // The override wins while it's set.
+        let out = engine.cmd_eval(
+            &session_id,
+            &actor_ref,
+            &format!(r#"return get_attr("{}", "hp")"#, instance_ref),
+        );
+        assert!(out.contains("=> 3"), "override should win: {}", out);
+
+        let out = engine.cmd_eval(
+            &session_id,
+            &actor_ref,
+            &format!(r#"clear_attr("{}", "hp")"#, instance_ref),
+        );
+        assert!(out.starts_with("OK."), "unexpected output: {}", out);
+
+        assert!(
+            engine.world.get(&instance_ref).unwrap().attrs.get("hp").is_none(),
+            "clear_attr must remove the instance's OWN attr"
+        );
+        let out = engine.cmd_eval(
+            &session_id,
+            &actor_ref,
+            &format!(r#"return get_attr("{}", "hp")"#, instance_ref),
+        );
+        assert!(out.contains("=> 10"), "get_attr should fall through to the archetype's value: {}", out);
+    }
+
+    #[test]
+    fn clear_attr_then_read_in_the_same_run_sees_the_inherited_value() {
+        // Regression: within ONE hook run, `clear_attr` then `get_attr` on the
+        // same key must return the archetype's value (the override is gone),
+        // not nil — the pending unset must fall through the chain, matching the
+        // post-commit read.
+        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        let archetype_ref = engine.world.next_dbref();
+        let mut archetype = GameObject::new(&archetype_ref, "goblin", Kind::Npc).with_location(&room_ref);
+        archetype.attrs.insert("hp".into(), serde_json::json!(10));
+        engine.world.add_object(archetype);
+
+        let instance_ref = engine.world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "goblin1", Kind::Npc).with_location(&room_ref);
+        instance.archetype_ref = Some(archetype_ref.clone());
+        instance.attrs.insert("hp".into(), serde_json::json!(3));
+        engine.world.add_object(instance);
+
+        let out = engine.cmd_eval(
+            &session_id,
+            &actor_ref,
+            &format!(r#"clear_attr("{r}", "hp"); return get_attr("{r}", "hp")"#, r = instance_ref),
+        );
+        assert!(
+            out.contains("=> 10"),
+            "same-run read after clear_attr must see the inherited value, not nil: {}",
+            out
+        );
+    }
+
+    /// Two-level chain: a child's `on_death` runs, calls `pass()`, and the
+    /// archetype's `on_death` runs too — bound to the SAME instance, so both
+    /// side effects land on the child, not the archetype.
+    #[test]
+    fn pass_runs_both_the_instance_and_the_archetypes_hook() {
+        let (mut engine, _session_id, actor_ref) = test_engine_with_session(true);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        let archetype_ref = engine.world.next_dbref();
+        let mut archetype = GameObject::new(&archetype_ref, "monster", Kind::Npc)
+            .with_location(&room_ref);
+        hooks::set_script(
+            &mut archetype,
+            r#"function on_death(this, actor, room) set_attr(this, "parent_ran", true) end"#
+                .to_string(),
+        );
+        engine.world.add_object(archetype);
+
+        let instance_ref = engine.world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "goblin1", Kind::Npc)
+            .with_location(&room_ref);
+        instance.archetype_ref = Some(archetype_ref.clone());
+        hooks::set_script(
+            &mut instance,
+            r#"
+                function on_death(this, actor, room)
+                    set_attr(this, "child_ran", true)
+                    pass()
+                end
+            "#
+            .to_string(),
+        );
+        engine.world.add_object(instance);
+
+        let result = engine.fire_hook(&instance_ref, "on_death", &actor_ref, Some(&room_ref), None);
+        assert!(result.is_ok(), "hook should run: {:?}", result.err());
+
+        let instance = engine.world.get(&instance_ref).unwrap();
+        assert_eq!(instance.attrs.get("child_ran"), Some(&serde_json::json!(true)), "the instance's own on_death should have run");
+        assert_eq!(instance.attrs.get("parent_ran"), Some(&serde_json::json!(true)), "pass() should have run the archetype's on_death, bound to the instance");
+
+        assert!(
+            engine.world.get(&archetype_ref).unwrap().attrs.get("parent_ran").is_none(),
+            "the archetype itself must be untouched — pass() binds `this` to the instance"
+        );
+    }
+
+    /// Three-level chain where the middle level ALSO calls `pass()`: all
+    /// three definitions run, each `pass()` searching further up from where
+    /// IT resolved rather than back to the top.
+    #[test]
+    fn pass_chains_through_a_three_level_archetype_hierarchy() {
+        let (mut engine, _session_id, actor_ref) = test_engine_with_session(true);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        let grandparent_ref = engine.world.next_dbref();
+        let mut grandparent = GameObject::new(&grandparent_ref, "creature", Kind::Npc)
+            .with_location(&room_ref);
+        hooks::set_script(
+            &mut grandparent,
+            r#"function on_death(this, actor, room) set_attr(this, "grandparent_ran", true) end"#
+                .to_string(),
+        );
+        engine.world.add_object(grandparent);
+
+        let parent_ref = engine.world.next_dbref();
+        let mut parent = GameObject::new(&parent_ref, "monster", Kind::Npc)
+            .with_location(&room_ref);
+        parent.archetype_ref = Some(grandparent_ref.clone());
+        hooks::set_script(
+            &mut parent,
+            r#"
+                function on_death(this, actor, room)
+                    set_attr(this, "parent_ran", true)
+                    pass()
+                end
+            "#
+            .to_string(),
+        );
+        engine.world.add_object(parent);
+
+        let instance_ref = engine.world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "goblin1", Kind::Npc)
+            .with_location(&room_ref);
+        instance.archetype_ref = Some(parent_ref.clone());
+        hooks::set_script(
+            &mut instance,
+            r#"
+                function on_death(this, actor, room)
+                    set_attr(this, "child_ran", true)
+                    pass()
+                end
+            "#
+            .to_string(),
+        );
+        engine.world.add_object(instance);
+
+        let result = engine.fire_hook(&instance_ref, "on_death", &actor_ref, Some(&room_ref), None);
+        assert!(result.is_ok(), "hook should run: {:?}", result.err());
+
+        let instance = engine.world.get(&instance_ref).unwrap();
+        assert_eq!(instance.attrs.get("child_ran"), Some(&serde_json::json!(true)));
+        assert_eq!(instance.attrs.get("parent_ran"), Some(&serde_json::json!(true)));
+        assert_eq!(instance.attrs.get("grandparent_ran"), Some(&serde_json::json!(true)));
+    }
+
+    /// `pass()` with no ancestor defining the hook is a safe no-op that
+    /// returns nil — it must not error, and the calling hook keeps running
+    /// after it.
+    #[test]
+    fn pass_with_no_ancestor_definer_is_a_safe_noop() {
+        let (mut engine, _session_id, actor_ref) = test_engine_with_session(true);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        // No archetype_ref at all — nothing to walk up to.
+        let instance_ref = engine.world.next_dbref();
+        let mut instance = GameObject::new(&instance_ref, "lonely_goblin", Kind::Npc)
+            .with_location(&room_ref);
+        hooks::set_script(
+            &mut instance,
+            r#"
+                function on_death(this, actor, room)
+                    local result = pass()
+                    set_attr(this, "pass_returned_nil", result == nil)
+                    set_attr(this, "ran_after_pass", true)
+                end
+            "#
+            .to_string(),
+        );
+        engine.world.add_object(instance);
+
+        let result = engine.fire_hook(&instance_ref, "on_death", &actor_ref, Some(&room_ref), None);
+        assert!(result.is_ok(), "pass() with no ancestor must not error: {:?}", result.err());
+
+        let instance = engine.world.get(&instance_ref).unwrap();
+        assert_eq!(instance.attrs.get("pass_returned_nil"), Some(&serde_json::json!(true)));
+        assert_eq!(instance.attrs.get("ran_after_pass"), Some(&serde_json::json!(true)));
+    }
+
+    /// `pass()` forwards the calling hook's own args by default, but an
+    /// explicit argument to `pass(...)` overrides what gets forwarded.
+    #[test]
+    fn pass_forwards_args_by_default_and_explicit_args_override() {
+        let (mut engine, _session_id, actor_ref) = test_engine_with_session(true);
+        let room_ref = engine.spawn_room_ref.clone();
+
+        let archetype_ref = engine.world.next_dbref();
+        let mut archetype = GameObject::new(&archetype_ref, "monster", Kind::Npc)
+            .with_location(&room_ref);
+        hooks::set_script(
+            &mut archetype,
+            r#"function on_use(this, actor, room, args) set_attr(this, "parent_args", args) end"#
+                .to_string(),
+        );
+        engine.world.add_object(archetype);
+
+        // Default: pass() with no args forwards this hook's own args.
+        let default_ref = engine.world.next_dbref();
+        let mut default_instance = GameObject::new(&default_ref, "goblin_default", Kind::Npc)
+            .with_location(&room_ref);
+        default_instance.archetype_ref = Some(archetype_ref.clone());
+        hooks::set_script(
+            &mut default_instance,
+            r#"function on_use(this, actor, room, args) pass() end"#.to_string(),
+        );
+        engine.world.add_object(default_instance);
+
+        let result = engine.fire_hook(&default_ref, "on_use", &actor_ref, Some(&room_ref), Some("original"));
+        assert!(result.is_ok(), "hook should run: {:?}", result.err());
+        assert_eq!(
+            engine.world.get(&default_ref).unwrap().attrs.get("parent_args"),
+            Some(&serde_json::json!("original")),
+            "pass() with no args should forward this call's own args"
+        );
+
+        // Explicit: pass("overridden") wins over the forwarded args.
+        let explicit_ref = engine.world.next_dbref();
+        let mut explicit_instance = GameObject::new(&explicit_ref, "goblin_explicit", Kind::Npc)
+            .with_location(&room_ref);
+        explicit_instance.archetype_ref = Some(archetype_ref.clone());
+        hooks::set_script(
+            &mut explicit_instance,
+            r#"function on_use(this, actor, room, args) pass("overridden") end"#.to_string(),
+        );
+        engine.world.add_object(explicit_instance);
+
+        let result = engine.fire_hook(&explicit_ref, "on_use", &actor_ref, Some(&room_ref), Some("original"));
+        assert!(result.is_ok(), "hook should run: {:?}", result.err());
+        assert_eq!(
+            engine.world.get(&explicit_ref).unwrap().attrs.get("parent_args"),
+            Some(&serde_json::json!("overridden")),
+            "explicit pass(args) should override the forwarded args"
         );
     }
 
