@@ -57,7 +57,7 @@ Require the `builder` scope. Use `@` prefix (MUSH convention).
 | `@reload <ref>` | Re-validate and re-enable the object's script (e.g. after fixing a syntax error that disabled it) |
 | `@test #<ref>` | Run the `test_*` functions embedded in that object's own script (`ctx.this` is the object) |
 | `@test <file>` | Run one `.test.luau` file (relative to `game_dir`) |
-| `@test` | Run every `.test.luau` file plus every object with embedded `test_*` functions |
+| `@test` | Run every `.test.luau` file (embedded object tests are run per-object with `@test #<ref>`) |
 
 An object has one script — a single Luau chunk that defines its hooks as
 top-level functions (`function on_get(this, actor, room) ... end`,

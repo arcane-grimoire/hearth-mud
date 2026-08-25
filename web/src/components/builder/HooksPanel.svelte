@@ -4,6 +4,9 @@
   import FileCodeIcon from '@lucide/svelte/icons/file-code';
   import PackageIcon from '@lucide/svelte/icons/package';
   import TrashIcon from '@lucide/svelte/icons/trash-2';
+  import PlayIcon from '@lucide/svelte/icons/play';
+  import CheckIcon from '@lucide/svelte/icons/check';
+  import XIcon from '@lucide/svelte/icons/x';
   import { api } from '../../lib/api.js';
   import { loadHooks, hookOptions, isValidHookName } from '../../lib/hooks.js';
 
@@ -65,6 +68,31 @@
     onopenlib(n); // opens a fresh module editor; Save creates it
   }
 
+  // Run the `test_*` functions embedded in THIS object's script (co-located
+  // tests — see docs/commands.md). `ctx.this` is bound to the object, so its
+  // tests exercise itself. Results render inline below the hook list.
+  let testResult = $state(null); // { passed, failed, tests, error }
+  let testing = $state(false);
+  async function runTests() {
+    testing = true;
+    const res = await api('run_tests', { ref_id: obj.ref_id });
+    testing = false;
+    if (res?.ok) {
+      const file = (res.data?.files || [])[0] || { tests: [] };
+      testResult = {
+        passed: res.data?.passed ?? 0,
+        failed: res.data?.failed ?? 0,
+        tests: file.tests || [],
+        error: file.error || null,
+      };
+    } else {
+      testResult = null;
+      showFlash(res?.error || 'Test run failed', { tone: 'danger' });
+    }
+  }
+  // Drop stale results when the selected object changes.
+  $effect(() => { obj?.ref_id; testResult = null; });
+
   let confirmClear = $state(false);
   async function clearScript() {
     const res = await api('clear_script', { ref_id: obj.ref_id });
@@ -78,6 +106,13 @@
   <section class="sec">
     <div class="sec-h">
       <span class="sec-lbl">Script</span>
+      {#if obj?.has_script}
+        <Tooltip text="Run the test_* functions in this object's script">
+          <button class="run-tests" onclick={runTests} disabled={testing}>
+            <PlayIcon size={12} /> {testing ? 'Running…' : 'Test'}
+          </button>
+        </Tooltip>
+      {/if}
       {#if locked}
         <span class="lock-pill" title="Defined in a source file — edit the file and @reload-world">🔒 read-only</span>
       {:else if obj?.has_script}
@@ -123,6 +158,26 @@
       <button class="open-all" onclick={() => onopen(null)}>Open script — it defines no recognized hooks yet →</button>
     {:else}
       <div class="none">No script yet. Add a hook above to start one.</div>
+    {/if}
+
+    {#if testResult}
+      <div class="tests">
+        <div class="tsum">
+          <span class="pill pass">{testResult.passed} passed</span>
+          {#if testResult.failed}<span class="pill fail">{testResult.failed} failed</span>{/if}
+          {#if !testResult.tests.length && !testResult.error}
+            <span class="tnone">no <code>test_*</code> functions in this script</span>
+          {/if}
+        </div>
+        {#if testResult.error}<pre class="terr">{testResult.error}</pre>{/if}
+        {#each testResult.tests as t (t.name)}
+          <div class="trow" class:fail={!t.passed}>
+            <span class="ti" data-ok={t.passed}>{#if t.passed}<CheckIcon size={11} />{:else}<XIcon size={11} />{/if}</span>
+            <span class="tn">{t.name}</span>
+            {#if !t.passed && t.error}<pre class="terr">{t.error}</pre>{/if}
+          </div>
+        {/each}
+      </div>
     {/if}
 
     {#if inheritedHooks.length}
@@ -221,4 +276,24 @@
   .cancel { background: none; border: none; color: var(--text-muted, #8c8378); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 4px; flex: none; }
   .none { color: var(--text-muted, #8c8378); font-style: italic; font-size: 12px; padding: 4px 2px; }
   .lock-pill { flex: none; font-size: 11px; color: var(--accent-amber, #c9956b); background: color-mix(in srgb, var(--accent-amber, #c9956b) 14%, transparent); border: 1px solid color-mix(in srgb, var(--accent-amber, #c9956b) 35%, transparent); border-radius: 999px; padding: 1px 8px; }
+
+  .run-tests { display: inline-flex; align-items: center; gap: 4px; flex: none; background: none; border: 1px solid var(--border-default, #332c22); color: var(--text-secondary, #b6a888); border-radius: 6px; padding: 3px 9px; cursor: pointer; font: inherit; font-size: 11.5px; }
+  .run-tests:hover:not(:disabled) { color: var(--accent-green, #8fb877); border-color: color-mix(in srgb, var(--accent-green, #8fb877) 45%, transparent); }
+  .run-tests:disabled { opacity: 0.55; cursor: default; }
+  .run-tests :global(svg) { flex: none; }
+
+  .tests { display: flex; flex-direction: column; gap: 4px; margin-top: 2px; padding: 8px 9px; background: var(--bg-inset, #12100c); border: 1px solid var(--border-default, #332c22); border-radius: 8px; }
+  .tsum { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .pill { font-size: 11px; border-radius: 999px; padding: 1px 8px; border: 1px solid transparent; }
+  .pill.pass { color: var(--accent-green, #8fb877); background: color-mix(in srgb, var(--accent-green, #8fb877) 14%, transparent); border-color: color-mix(in srgb, var(--accent-green, #8fb877) 35%, transparent); }
+  .pill.fail { color: var(--accent-red, #e06c75); background: color-mix(in srgb, var(--accent-red, #e06c75) 14%, transparent); border-color: color-mix(in srgb, var(--accent-red, #e06c75) 35%, transparent); }
+  .tnone { font-size: 11.5px; color: var(--text-muted, #8c8378); font-style: italic; }
+  .tnone code { font-family: var(--font-mono, ui-monospace, monospace); font-style: normal; }
+  .trow { display: flex; align-items: center; gap: 6px; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; color: var(--text-secondary, #b6a888); flex-wrap: wrap; }
+  .trow .ti { line-height: 0; flex: none; }
+  .trow .ti[data-ok="true"] :global(svg) { color: var(--accent-green, #8fb877); }
+  .trow .ti[data-ok="false"] :global(svg) { color: var(--accent-red, #e06c75); }
+  .trow.fail .tn { color: var(--accent-red, #e06c75); }
+  .trow .tn { flex: 1 1 auto; min-width: 0; }
+  .terr { flex-basis: 100%; margin: 2px 0 4px 17px; padding: 6px 8px; background: color-mix(in srgb, var(--accent-red, #e06c75) 8%, transparent); border-left: 2px solid var(--accent-red, #e06c75); border-radius: 3px; font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--text-secondary, #b6a888); white-space: pre-wrap; overflow-x: auto; }
 </style>

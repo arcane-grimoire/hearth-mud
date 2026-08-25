@@ -163,7 +163,7 @@ docs/
 - **Containers** — items can hold other items via `item:container` tag, `put X in Y` / `get X from Y`, capacity limits, nested inventory display, circular containment prevention
 - **Lock DSL** — perm(), has_tag(), has_attr(), in_inventory(), is_kind(), is_owner(), time_between(), AND/OR/NOT
 - **Timers** — `after(ticks, ref, hook, data?)` with DB persistence, `cancel_after()`, `get_timers()`, data payloads
-- **Softcode testing** — `.test.luau` files *or* `test_*` functions co-located in an object's own script (run against itself via `@test #<ref>` / REST `RunTests {ref_id}`, `ctx.this` bound to the object); assert_eq/assert_true/etc., unit mode (lib modules) and integration mode (full API + world); `@test` (no arg) runs every file plus a sweep of every object with embedded tests; `cargo test` harness
+- **Softcode testing** — `.test.luau` files *or* `test_*` functions co-located in an object's own script (run against itself via `@test #<ref>` / REST `RunTests {ref_id}`, `ctx.this` bound to the object); assert_eq/assert_true/etc., unit mode (lib modules) and integration mode (full API + world); `@test` (no arg) runs every `.test.luau` file (embedded object tests are run per-object, not swept); `cargo test` harness
 - **Ticks** — 1s global heartbeat, per-object on_tick with persistent state, global scripts
 - **Visibility** — system:hidden tag + can_see hook
 - **Global commands** — system:global tag on objects makes their cmd_ hooks available everywhere

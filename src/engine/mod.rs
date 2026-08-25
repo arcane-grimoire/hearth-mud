@@ -6902,50 +6902,28 @@ impl Engine {
             return out;
         }
 
-        // `@test` (no args) — every .test.luau file (if a game_dir is
-        // configured) plus every object that defines embedded test_* functions.
-        if let Some(game_dir) = self.game_dir.clone() {
-            let game_path = std::path::Path::new(&game_dir);
-            for tf in crate::loader::discover_test_files(game_path) {
-                let world = if tf.is_lib { None } else { Some(self.world.clone()) };
-                let result = self.softcode.run_tests(
-                    &tf.source,
-                    &tf.relative,
-                    world.as_ref(),
-                    None,
-                    softcode::Budget::default(),
-                );
-                Self::render_test_result(&mut out, &tf.relative, result, &mut passed, &mut failed);
-            }
+        // `@test` (no args) — run every .test.luau file in the game dir.
+        // (Embedded object tests are run per-object with `@test #<ref>`, never
+        // swept globally.)
+        let game_dir = match &self.game_dir {
+            Some(g) => g.clone(),
+            None => return "No game_dir configured.\r\n".to_string(),
+        };
+        let game_path = std::path::Path::new(&game_dir);
+        let test_files = crate::loader::discover_test_files(game_path);
+        if test_files.is_empty() {
+            return "No .test.luau files found.\r\n".to_string();
         }
-        // Object sweep: run embedded tests on every scripted object, reporting
-        // only those that actually define test_* functions.
-        let mut scripted: Vec<String> = self
-            .world
-            .objects
-            .values()
-            .filter(|o| o.script.is_some())
-            .map(|o| o.ref_id.clone())
-            .collect();
-        scripted.sort();
-        for ref_id in scripted {
-            if let Some(result) = self.run_object_tests(&ref_id) {
-                if matches!(&result, Ok(fr) if fr.tests.is_empty()) {
-                    continue;
-                }
-                Self::render_test_result(
-                    &mut out,
-                    &format!("{} (embedded)", ref_id),
-                    result,
-                    &mut passed,
-                    &mut failed,
-                );
-            }
-        }
-
-        if out.is_empty() {
-            return "No tests found (.test.luau files or embedded test_* functions).\r\n"
-                .to_string();
+        for tf in &test_files {
+            let world = if tf.is_lib { None } else { Some(self.world.clone()) };
+            let result = self.softcode.run_tests(
+                &tf.source,
+                &tf.relative,
+                world.as_ref(),
+                None,
+                softcode::Budget::default(),
+            );
+            Self::render_test_result(&mut out, &tf.relative, result, &mut passed, &mut failed);
         }
         out.push_str(&format!("\r\n{} passed, {} failed\r\n", passed, failed));
         out
