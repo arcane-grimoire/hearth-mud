@@ -1075,6 +1075,7 @@ impl Engine {
                 &self.map_templates,
                 &self.scheduled_hooks,
                 self.tick_count,
+                None,
             )
             .map_err(|e| annotate_archetype_error(e.to_string(), this_ref, &resolving_ref))?;
 
@@ -2557,6 +2558,7 @@ impl Engine {
                     &self.map_templates,
                     &self.scheduled_hooks,
                     self.tick_count,
+                    None,             // data (structured trigger payload)
                 );
                 match result {
                     Ok(r) => {
@@ -4195,6 +4197,32 @@ impl Engine {
         room_ref: Option<&str>,
         args: Option<&str>,
     ) -> Result<HookRun, String> {
+        self.fire_hook_inner(this_ref, hook_name, actor_ref, room_ref, args, None)
+    }
+
+    /// Fire a hook with a structured `data` payload (a triggered hook) — the
+    /// data reaches the hook as its 4th arg as a real Lua table. Used by the
+    /// `Intent::Trigger` path; `args` (the command string) is unused here.
+    fn fire_hook_data(
+        &mut self,
+        this_ref: &str,
+        hook_name: &str,
+        actor_ref: &str,
+        room_ref: Option<&str>,
+        data: Option<serde_json::Value>,
+    ) -> Result<HookRun, String> {
+        self.fire_hook_inner(this_ref, hook_name, actor_ref, room_ref, None, data)
+    }
+
+    fn fire_hook_inner(
+        &mut self,
+        this_ref: &str,
+        hook_name: &str,
+        actor_ref: &str,
+        room_ref: Option<&str>,
+        args: Option<&str>,
+        data: Option<serde_json::Value>,
+    ) -> Result<HookRun, String> {
         let (script, resolving_ref) = match self.resolve_hook_script(this_ref, hook_name) {
             Some(x) => x,
             None => {
@@ -4223,6 +4251,7 @@ impl Engine {
                 &self.map_templates,
                 &self.scheduled_hooks,
                 self.tick_count,
+                data,
             )
             .map_err(|e| annotate_archetype_error(e.to_string(), this_ref, &resolving_ref))?;
 
@@ -4315,8 +4344,8 @@ impl Engine {
                 Effect::CancelScheduledHook { target, hook } => {
                     self.scheduled_hooks.retain(|s| !(s.target == *target && s.hook == *hook));
                 }
-                Effect::TriggerHook { target, hook, data } => {
-                    triggers.push((target.clone(), hook.clone(), data.clone()));
+                Effect::TriggerHook { target, hook, data, actor } => {
+                    triggers.push((target.clone(), hook.clone(), data.clone(), actor.clone()));
                 }
                 Effect::MovedObject { mover, old_room, new_room, announce, fire_hooks } => {
                     if *announce {
@@ -4415,22 +4444,18 @@ impl Engine {
                 }
             }
         }
-        for (target, hook, data) in triggers {
+        for (target, hook, data, actor) in triggers {
             let room_ref = self
                 .world
                 .get(&target)
                 .and_then(|o| o.location_ref.clone());
-            if data.is_some()
-                && let Some(obj) = self.world.get_mut(&target) {
-                    obj.attrs.insert("_trigger_data".into(), data.clone().unwrap());
-                }
-            if let Err(e) = self.fire_hook(&target, &hook, actor_ref, room_ref.as_deref(), None) {
+            // The hook fires as the trigger's chosen actor, or the ambient
+            // actor when none was given. `data` reaches the hook as its 4th
+            // argument (a real Lua table) — no more `_trigger_data` attr.
+            let who = actor.as_deref().unwrap_or(actor_ref);
+            if let Err(e) = self.fire_hook_data(&target, &hook, who, room_ref.as_deref(), data) {
                 tracing::warn!(hook = %hook, target = %target, error = %e, "Triggered hook error");
             }
-            if data.is_some()
-                && let Some(obj) = self.world.get_mut(&target) {
-                    obj.attrs.remove("_trigger_data");
-                }
         }
         // Event-aware move choreography, with the moved object as actor — the
         // same on_leave/on_move/on_enter sequence (plus global hooks) that
@@ -10694,6 +10719,62 @@ end
                 ClientMessage::Game { channel, .. } if channel == "Terrain.Legend"
             )),
             "same-map move must not re-send the legend"
+        );
+    }
+
+    /// The improved `trigger()`: `data` reaches the hook as its 4th argument (a
+    /// real table, not the old `_trigger_data` attr), and the optional 4th arg
+    /// fires the hook *as* a chosen actor rather than the ambient one.
+    #[test]
+    fn trigger_delivers_data_as_arg_and_honors_actor_override() {
+        let (mut engine, _t, _) = engine_with_api_token(&[Scope::Builder]);
+
+        // Target: on_ping records the payload amount + who acted.
+        let a = engine.world.next_dbref();
+        let mut oa = GameObject::new(&a, "target", Kind::Item);
+        crate::softcode::hooks::set_script(
+            &mut oa,
+            "function on_ping(this, actor, room, data)\n\
+               set_attr(this, \"saw_amount\", data.amount)\n\
+               set_attr(this, \"saw_actor\", actor and actor.ref_id or \"none\")\n\
+             end"
+            .to_string(),
+        );
+        engine.world.add_object(oa);
+
+        // Two distinct actors: the ambient one that fires the driver, and the
+        // override the trigger names.
+        let ambient = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&ambient, "ambient", Kind::Player));
+        let override_actor = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&override_actor, "chosen", Kind::Player));
+
+        // Driver: on_use triggers on_ping on the target with data + the override.
+        let b = engine.world.next_dbref();
+        let mut ob = GameObject::new(&b, "wand", Kind::Item);
+        crate::softcode::hooks::set_script(
+            &mut ob,
+            format!(
+                "function on_use(this, actor, room)\n  trigger(\"{}\", \"on_ping\", {{ amount = 7 }}, \"{}\")\nend",
+                a, override_actor
+            ),
+        );
+        engine.world.add_object(ob);
+
+        // Fire the driver as the AMBIENT actor; the trigger should still land as
+        // the override.
+        engine.fire_hook(&b, "on_use", &ambient, None, None).unwrap();
+
+        let t = engine.world.get(&a).unwrap();
+        assert_eq!(
+            t.attrs.get("saw_amount"),
+            Some(&serde_json::json!(7)),
+            "data reached the hook as its 4th arg (not _trigger_data)"
+        );
+        assert_eq!(
+            t.attrs.get("saw_actor").and_then(|v| v.as_str()),
+            Some(override_actor.as_str()),
+            "the trigger fired as the override actor, not the ambient one"
         );
     }
 

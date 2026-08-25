@@ -304,11 +304,14 @@ type CloneOpts = {
 --- from clone(), which flattens an archetype instance in place.
 declare function clone_object(src: ObjectRef, opts: CloneOpts?): string
 
---- Fire a hook on another object. The triggered hook runs after this
---- script's intents are applied. Use for connected machinery, puzzles,
---- chain reactions. The optional data table is passed to the hook as `args`.
---- e.g. trigger("area/dungeon/item/gate", "on_activate")
-declare function trigger(ref: ObjectRef, hook: string, data: any?): ()
+--- Fire a hook on another object. The triggered hook runs after this script's
+--- intents are applied. Use for connected machinery, puzzles, chain reactions.
+--- `data` (a table) is passed to the hook as its 4th argument:
+---   function on_activate(this, actor, room, data) ... end
+--- The optional `actor` fires the hook *as* that object (default: the ambient
+--- actor — whoever caused this batch).
+--- e.g. trigger(gate, "on_activate", { key = "brass" }, player)
+declare function trigger(ref: ObjectRef, hook: string, data: any?, actor: ObjectRef?): ()
 
 --- Force a player or NPC to run a command as if they had typed it — charm,
 --- puppet, confusion, or a self-driving NPC. The command runs through the

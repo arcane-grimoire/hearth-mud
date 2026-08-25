@@ -1749,17 +1749,24 @@ pub fn install<'scope, 'env>(
     let b = Rc::clone(&batch);
     env.set(
         "trigger",
-        scope.create_function(move |lua, (r, hook, data): (Value, String, Option<Value>)| {
-            let target = ref_of(&r)?;
-            let data = match data {
-                Some(v) if !matches!(v, Value::Nil) => {
-                    Some(lua.from_value::<serde_json::Value>(v)?)
-                }
-                _ => None,
-            };
-            b.borrow_mut().push(Intent::Trigger { target, hook, data });
-            Ok(())
-        })?,
+        scope.create_function(
+            move |lua, (r, hook, data, actor): (Value, String, Option<Value>, Option<Value>)| {
+                let target = ref_of(&r)?;
+                let data = match data {
+                    Some(v) if !matches!(v, Value::Nil) => {
+                        Some(lua.from_value::<serde_json::Value>(v)?)
+                    }
+                    _ => None,
+                };
+                // Optional 4th arg: fire the hook "as" this actor.
+                let actor = match actor {
+                    Some(v) if !matches!(v, Value::Nil) => Some(ref_of(&v)?),
+                    _ => None,
+                };
+                b.borrow_mut().push(Intent::Trigger { target, hook, data, actor });
+                Ok(())
+            },
+        )?,
     )?;
 
     let b = Rc::clone(&batch);
@@ -2088,6 +2095,7 @@ pub fn install<'scope, 'env>(
                     target: host,
                     hook: "on_leave".into(),
                     data: Some(serde_json::json!({ "x": x, "y": y, "map": map_name, "terrain": old_terrain })),
+                    actor: Some(actor.clone()),
                 });
             }
             if let Some(host) = arch_of(&new_terrain) {
@@ -2095,6 +2103,7 @@ pub fn install<'scope, 'env>(
                     target: host,
                     hook: "on_enter".into(),
                     data: Some(serde_json::json!({ "x": nx, "y": ny, "map": map_name, "terrain": new_terrain })),
+                    actor: Some(actor.clone()),
                 });
             }
             drop(batch);

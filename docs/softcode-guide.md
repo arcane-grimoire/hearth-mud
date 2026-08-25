@@ -379,21 +379,25 @@ function cmd_pull(this, actor, room, args)
 end
 ```
 
-The optional third argument passes data to the triggered hook. The data is
-available as the `_trigger_data` attr on the target during execution:
+The optional third argument passes a data table to the triggered hook — it
+arrives as the hook's **4th parameter**, a real table (no magic attr). An
+optional fourth argument fires the hook *as* a chosen actor (default: the
+ambient actor — whoever caused the current batch):
 
 ```lua
--- Alert nearby NPCs about combat
-trigger(npc, "on_alert", { threat = actor.ref_id, type = "combat" })
+-- Alert an NPC about combat, firing the hook as the attacker.
+trigger(npc, "on_alert", { threat = actor.ref_id, type = "combat" }, actor)
 
--- In the NPC's on_alert hook:
-function on_alert(this, actor, room)
-  local data = get_attr(this, "_trigger_data")
+-- In the NPC's on_alert hook — data is the 4th arg:
+function on_alert(this, actor, room, data)
   if data and data.type == "combat" then
     emit_room(room, this.display_name .. " rushes toward the sound of fighting!")
   end
 end
 ```
+
+The triggered hook still runs *after* the current script's batch commits
+(deferred, like all effects) — it can't return a value to the caller.
 
 Triggers don't recurse — if the triggered hook also calls `trigger`, the
 second trigger fires after the first finishes. This prevents infinite loops.

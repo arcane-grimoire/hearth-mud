@@ -185,6 +185,9 @@ pub enum Intent {
         target: String,
         hook: String,
         data: Option<serde_json::Value>,
+        /// Fire the hook with this actor (default: the ambient actor — whoever
+        /// caused the batch). Lets a script fire a hook "as" a chosen object.
+        actor: Option<String>,
     },
     EmitNearby {
         room: String,
@@ -376,6 +379,8 @@ pub enum Effect {
         target: String,
         hook: String,
         data: Option<serde_json::Value>,
+        /// Actor to fire the hook as; `None` = the ambient actor.
+        actor: Option<String>,
     },
     /// Post-move choreography for a scripted `move_object` run with flags:
     /// announce departure/arrival and/or fire the `on_leave`/`on_move`/
@@ -927,6 +932,7 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                     target: ref_id.clone(),
                     hook: "on_create".to_string(),
                     data: None,
+                    actor: None,
                 });
             }
             Intent::SetTitle { target, title } => {
@@ -1045,6 +1051,7 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                     target: ref_id.clone(),
                     hook: "on_create".to_string(),
                     data: None,
+                    actor: None,
                 });
             }
             Intent::SetScript { target, source } => {
@@ -1070,9 +1077,15 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                     crate::softcode::hooks::ProgramOrigin::InGame,
                 );
             }
-            Intent::Trigger { target, hook, data } => {
+            Intent::Trigger { target, hook, data, actor } => {
                 if world.get(target).is_none() {
                     return Err(format!("trigger: no object '{}'", target));
+                }
+                // An explicit actor must exist too (it's fired "as" that object).
+                if let Some(a) = actor
+                    && world.get(a).is_none()
+                {
+                    return Err(format!("trigger: no actor '{}'", a));
                 }
                 // Triggering runs the target's Program under *its* authority,
                 // so this is the confused-deputy seam. Gameplay hooks stay
@@ -1086,6 +1099,7 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                     target: target.clone(),
                     hook: hook.clone(),
                     data: data.clone(),
+                    actor: actor.clone(),
                 });
             }
             Intent::EmitNearby { room, x, y, radius, message, exclude } => {
@@ -1387,6 +1401,11 @@ struct HookRunCtx<'a> {
     /// Created once by [`SoftcodeRuntime::run_hook`] and reused at every
     /// `pass()` level (never delegated — see docs/plans/archetypes.md).
     state_tbl: Option<mlua::Table>,
+    /// Structured payload for a triggered hook (`trigger(ref, hook, data)`).
+    /// When set, it's passed to the hook as its 4th argument as a real Lua
+    /// table (instead of the `args` command string) — shared across `pass()`
+    /// levels like the rest of the ctx.
+    data: Option<serde_json::Value>,
 }
 
 impl SoftcodeRuntime {
@@ -1680,6 +1699,7 @@ impl SoftcodeRuntime {
         map_templates: &HashMap<String, crate::map_template::MapTemplateFile>,
         scheduled_hooks: &[ScheduledHook],
         tick_count: u64,
+        data: Option<serde_json::Value>,
     ) -> Result<ProgramResult, SoftcodeError> {
         self.sync_user_lib_sources(world);
         self.install_budget(budget);
@@ -1739,6 +1759,7 @@ impl SoftcodeRuntime {
             // ancestor's code happens to be running still reads/writes the
             // *instance's* own state.
             state_tbl: state_tbl.clone(),
+            data,
         };
 
         let run_result: mlua::Result<LuaValue> = self.lua.scope(|scope| {
@@ -1885,9 +1906,16 @@ impl SoftcodeRuntime {
                 Some(r) => api::object_to_value(&self.lua, ctx.world, r, Some(&obj_mt))?,
                 None => LuaValue::Nil,
             };
-            match args {
-                Some(a) => func.call::<LuaValue>((this_val, actor_val, room_val, a)),
-                None => func.call::<LuaValue>((this_val, actor_val, room_val)),
+            // A triggered hook's structured `data` becomes the 4th arg (a real
+            // Lua table); otherwise a command hook's `args` string does.
+            if let Some(data) = &ctx.data {
+                let data_val = self.lua.to_value(data)?;
+                func.call::<LuaValue>((this_val, actor_val, room_val, data_val))
+            } else {
+                match args {
+                    Some(a) => func.call::<LuaValue>((this_val, actor_val, room_val, a)),
+                    None => func.call::<LuaValue>((this_val, actor_val, room_val)),
+                }
             }
         }
     }
@@ -2492,6 +2520,7 @@ mod tests {
                 map_templates,
                 scheduled_hooks,
                 tick_count,
+                None,
             )
         }
     }
@@ -5363,6 +5392,7 @@ mod tests {
                     target: target.clone(),
                     hook: hook.into(),
                     data: None,
+                    actor: None,
                 }],
             );
             assert!(
@@ -5382,6 +5412,7 @@ mod tests {
                 target: target.clone(),
                 hook: "on_use".into(),
                 data: None,
+                    actor: None,
             }],
         );
 
