@@ -24,6 +24,24 @@ pub enum ClientMessage {
         description: String,
         exits: Vec<ExitData>,
         contents: Vec<EntityData>,
+        /// The room's ref (dbref) — a stable id for map-aware clients (GMCP
+        /// `Room.Info.num`). Defaulted so older clients ignore it.
+        #[serde(default)]
+        num: String,
+        #[serde(default)]
+        area: String,
+        /// Map name / terrain char / grid coords, present only for rooms
+        /// instantiated from a map template (stamped `map_name`/`terrain`/
+        /// `map_x`/`map_y`). Drive a Mudlet-style mapper's area + environment
+        /// + coordinates.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        map: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        environment: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<i64>,
     },
     Inventory { items: Vec<ItemData> },
     Game { channel: String, data: serde_json::Value },
@@ -35,6 +53,10 @@ pub enum ClientMessage {
 pub struct ExitData {
     pub dir: String,
     pub name: String,
+    /// Destination room ref (dbref), for map-aware clients (GMCP `Room.Info`
+    /// exits link `dir → to`). Empty when the exit has no resolved target.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub to: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -5037,7 +5059,11 @@ impl Engine {
                 .and_then(|t| self.world.get(t))
                 .map(|r| self.world.display_name(r))
                 .unwrap_or_default();
-            ExitData { dir: e.key.clone(), name: dest_name }
+            ExitData {
+                dir: e.key.clone(),
+                name: dest_name,
+                to: e.target_ref.clone().unwrap_or_default(),
+            }
         }).collect();
 
         // Resolved names — an archetype-based instance with no title of its
@@ -5056,12 +5082,20 @@ impl Engine {
             })
             .collect();
 
+        let attr_str = |k: &str| room.attrs.get(k).and_then(|v| v.as_str()).map(str::to_string);
+        let attr_int = |k: &str| room.attrs.get(k).and_then(|v| v.as_i64());
         if let Some(session) = self.sessions.get(session_id) {
             let _ = session.tx.send(ClientMessage::Room {
                 name: self.world.display_name(room),
                 description: self.world.resolved_description(room),
                 exits,
                 contents,
+                num: room_ref.clone(),
+                area: Self::room_area(room),
+                map: attr_str("map_name"),
+                environment: attr_str("terrain"),
+                x: attr_int("map_x"),
+                y: attr_int("map_y"),
             });
         }
     }

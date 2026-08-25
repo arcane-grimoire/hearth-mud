@@ -100,7 +100,7 @@ src/
     commands.rs        Gameplay commands (look, go, get, etc.)
   net/
     mod.rs
-    telnet.rs          Async telnet with IAC/SGA/ECHO negotiation
+    telnet.rs          Async telnet with IAC/SGA/ECHO/GMCP negotiation (GMCP → Room.Info + emit_data for Mudlet-style mappers)
     web.rs             Axum HTTP server: WebSocket (JSON protocol), REST API, static file serving
     web_client.html    Fallback HTML client (used when web/dist/ not built)
   softcode/
@@ -143,7 +143,7 @@ web/                   Svelte 5 + Vite web client
                        (⌘K), consumed by the unified workspace
 docs/
   adr/                 6 architectural decision records (ADR 0001–0006)
-  plans/               Pending/in-progress design docs (archetype traits + live debugger, terrain attr schemas, Mudlet/GMCP client map integration)
+  plans/               Pending/in-progress design docs (archetype traits + live debugger, terrain attr schemas, Mudlet/GMCP terrain-legend + tiles)
   archetypes.md        Archetypes guide (is-a delegation, file-based types, hot-reload)
   commands.md          Command reference
   getting-started.md   Getting started guide
@@ -172,7 +172,8 @@ docs/
 - **Dungeon layout grid** — `generate_dungeon` stores a Grid2D on the entrance room (`dungeon_layout` attr)
 - **BBCode markup** — `[b]`, `[red]`, `[cmd=go north]`, `[/]` etc. — transport-neutral styling, converted to ANSI for telnet, HTML for web
 - **Clickable commands** — `[cmd=COMMAND]text[/cmd]` renders as clickable text in web client, underlined text in telnet
-- **Structured data channel** — `ClientMessage` enum (Text, Prompt, Room, Inventory, Game) sent as JSON to web clients
+- **Structured data channel** — `ClientMessage` enum (Text, Prompt, Room, Inventory, Game) sent as JSON to web clients; over telnet, GMCP-enabled clients get the same `Room` payload as a `Room.Info` package and `emit_data` as GMCP (one payload, per-transport rendering)
+- **GMCP (telnet option 201)** — negotiated in `net/telnet.rs`; on move the engine's `Room` message (now carrying `num`/`area`/`map`/`environment`/`x`/`y` + exit target dbrefs) is framed as `Room.Info` for Mudlet's built-in mapper. Text-only clients never enable it, so nothing changes for them. A Mudlet package + install notes live in `clients/mudlet/`. Terrain-legend colors and tile images are follow-ups.
 - **Auto room data** — engine sends structured Room messages (exits, contents) on look/movement, powers sidebar panels
 - **emit_data()** — softcode can push structured JSON to web clients: `emit_data(player_ref, "channel", data_table)`
 - **REST API** — POST /api with ~44 actions (list/examine, create room/object/exit, clone object, set title/desc/attr/tags/aliases, set/clear lock, update exit, force command (admin), script get/set/clear + lib get/set/remove, world_check, ink compile/save/load, maps + terrain, eval, import/export)

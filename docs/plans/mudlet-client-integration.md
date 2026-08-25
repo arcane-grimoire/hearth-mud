@@ -1,5 +1,20 @@
 # Plan: Client map integration (GMCP / Mudlet)
 
+> **Status: core shipped (Stages 1–3, 5).** Telnet negotiates GMCP (option 201,
+> `src/net/telnet.rs`): it offers `IAC WILL GMCP`, enables on `DO`/`WILL GMCP`,
+> buffers inbound subnegotiation (Core.Hello/Supports.Set parsed-and-ignored),
+> and frames outbound packages as `IAC SB 201 <package> <json> IAC SE`. The
+> transport-agnostic seam (Stage 2) fell out of the existing `ClientMessage`
+> plumbing: the engine's `Room` message (enriched with `num`/`area`/`map`/
+> `environment`/`x`/`y` + exit target dbrefs) renders as JSON for web and as a
+> `Room.Info` package for GMCP telnet, and `emit_data` rides the same way; a
+> non-GMCP telnet client drops both. A Mudlet package + install notes ship in
+> `clients/mudlet/`. **Remaining: Stage 4 (Terrain.Legend colors) and Stage 6
+> (tiles).** Open question still open: wilderness rooms get fresh dbrefs per
+> instantiation, so a wandering mapper there needs a `map`+coords stable id
+> (the payload already carries `map`/`x`/`y` for when the Mudlet side keys on
+> them).
+
 ## Goal
 
 Get structured room and terrain data out of the engine and into map-aware
