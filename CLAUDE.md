@@ -144,7 +144,6 @@ web/                   Svelte 5 + Vite web client
 docs/
   adr/                 6 architectural decision records (ADR 0001–0006)
   plans/               Pending/in-progress design docs (archetype traits + live debugger, terrain attr schemas, Mudlet/GMCP client map integration)
-  audits/              Point-in-time code/design audits
   archetypes.md        Archetypes guide (is-a delegation, file-based types, hot-reload)
   commands.md          Command reference
   getting-started.md   Getting started guide
@@ -205,7 +204,7 @@ locked = ["std"]           # optional: file-key/area prefixes whose managed
                            # in-game authoring (see Tiering + locking below)
 # cors_allowed_origins = ["https://play.example.com"]  # optional: restrict
                            # browser CORS to an allow-list in production;
-                           # unset = permissive (dev only). See RBAC audit M3.
+                           # unset = permissive (dev only).
 ```
 
 **`game_dir` is always required, even with `load_world_files = false`.**
