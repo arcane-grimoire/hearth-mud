@@ -1467,6 +1467,16 @@ pub fn install<'scope, 'env>(
 
     let b = Rc::clone(&batch);
     env.set(
+        "run_command_as",
+        scope.create_function(move |_, (actor, command): (Value, String)| {
+            let actor = ref_of(&actor)?;
+            b.borrow_mut().push(Intent::RunCommandAs { actor, command });
+            Ok(())
+        })?,
+    )?;
+
+    let b = Rc::clone(&batch);
+    env.set(
         "set_tag",
         scope.create_function(move |_, (r, spec): (Value, String)| {
             let target = ref_of(&r)?;

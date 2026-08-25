@@ -321,6 +321,11 @@ enum SessionState {
     Playing { actor_ref: String, account_id: String, puppet_ref: Option<String> },
 }
 
+/// Maximum nesting of `run_command_as`: a forced command may itself fire hooks
+/// that force further commands, so this bounds the chain (charm/puppet loop
+/// guard). Small on purpose — legitimate cascades are shallow.
+const MAX_FORCE_DEPTH: u32 = 5;
+
 struct Session {
     tx: mpsc::UnboundedSender<ClientMessage>,
     state: SessionState,
@@ -435,6 +440,11 @@ pub struct Engine {
     scheduled_hooks: Vec<ScheduledHook>,
     /// API tokens: hash → info. Both session (ephemeral) and persistent tokens.
     api_tokens: HashMap<String, TokenInfo>,
+    /// Re-entrancy depth of `run_command_as` (forced commands). A forced
+    /// command can fire hooks that force further commands; this bounds the
+    /// chain so a charm/puppet loop can't recurse without limit. See
+    /// `MAX_FORCE_DEPTH`.
+    force_depth: u32,
     /// Recent failed-login tracking per lowercased username:
     /// `(consecutive_failures, first_failure_at)`. Used to throttle repeated
     /// bad passwords so Argon2 verification can't be used as a CPU-DoS
@@ -679,6 +689,7 @@ impl Engine {
             file_sources,
             scheduled_hooks,
             api_tokens,
+            force_depth: 0,
             login_failures: HashMap::new(),
             file_hashes,
             max_characters: config.max_characters,
@@ -4006,6 +4017,9 @@ impl Engine {
         // effects loop (like triggers) so hook re-entrancy stays out of the
         // loop. Each is (mover, old_room, new_room).
         let mut moves: Vec<(String, Option<String>, String)> = Vec::new();
+        // Forced commands (`run_command_as`) — deferred for the same
+        // re-entrancy reason. Each is (actor, command).
+        let mut forced: Vec<(String, String)> = Vec::new();
         for effect in effects {
             match effect {
                 Effect::ToActor { target, message } => self.send_to_actor_ref(target, message),
@@ -4057,6 +4071,9 @@ impl Engine {
                     if *fire_hooks {
                         moves.push((mover.clone(), old_room.clone(), new_room.clone()));
                     }
+                }
+                Effect::RunCommand { actor, command } => {
+                    forced.push((actor.clone(), command.clone()));
                 }
                 Effect::EmitNearby { room, x, y, radius, message, exclude } => {
                     let r2 = radius * radius;
@@ -4165,6 +4182,60 @@ impl Engine {
             let _ = self.fire_hook(&new_room, "on_enter", &mover, Some(&new_room), None);
             self.fire_global_hooks("on_enter", &mover, Some(&new_room), None);
         }
+        // Forced commands (`run_command_as`). Run through the normal command
+        // dispatch as the target's own session, so the command executes under
+        // *their* scopes and every existing gate applies. The `@`-command and
+        // `quit` bans (`forced_command_allowed`) and the depth guard are the
+        // security line — a charmed player can never be forced into authoring/
+        // admin commands or a disconnect, and forced-command chains can't
+        // recurse without bound.
+        for (target, command) in forced {
+            if self.force_depth >= MAX_FORCE_DEPTH {
+                tracing::warn!(
+                    target = %target,
+                    command = %command,
+                    "run_command_as: force depth limit reached; refusing"
+                );
+                continue;
+            }
+            if !Self::forced_command_allowed(&command) {
+                tracing::warn!(
+                    target = %target,
+                    command = %command,
+                    "run_command_as: refused a privileged/quit command on the forced path"
+                );
+                self.send_to_actor_ref(&target, "You resist the compulsion.\r\n");
+                continue;
+            }
+            let Some(session_id) = self.session_for_actor(&target) else {
+                // No live session (offline player). Nothing to drive.
+                continue;
+            };
+            self.force_depth += 1;
+            self.handle_game_input(&session_id, &command);
+            self.force_depth = self.force_depth.saturating_sub(1);
+        }
+    }
+
+    /// Whether a forced command (`run_command_as`) is permitted. The hard
+    /// security line: never let a charm/puppet force an `@`-command (all
+    /// authoring/admin verbs are `@`-prefixed) or `quit`/`q` (a forced
+    /// disconnect). Everything else — movement, `say`, `get`/`drop`, game
+    /// `cmd_*` verbs — runs under the target's own scopes, same as if typed.
+    fn forced_command_allowed(command: &str) -> bool {
+        let first = command.split_whitespace().next().unwrap_or("");
+        if first.starts_with('@') {
+            return false;
+        }
+        !matches!(first.to_lowercase().as_str(), "quit" | "q")
+    }
+
+    /// The session id currently playing as `actor_ref`, if any.
+    fn session_for_actor(&self, actor_ref: &str) -> Option<String> {
+        self.sessions.iter().find_map(|(sid, s)| match &s.state {
+            SessionState::Playing { actor_ref: ar, .. } if ar == actor_ref => Some(sid.clone()),
+            _ => None,
+        })
     }
 
     fn send_to_actor_ref(&self, actor_ref: &str, message: &str) {
@@ -6997,6 +7068,9 @@ fn describe_intent(intent: &softcode::Intent, world: &World) -> String {
         Intent::CloneObject { ref_id, source, .. } => {
             format!("clone {} → {}", label(source), ref_id)
         }
+        Intent::RunCommandAs { actor, command } => {
+            format!("force {} to '{}'", label(actor), command)
+        }
         Intent::SetTag { target, tag } => {
             format!("tag {} +{}:{}", label(target), tag.category, tag.key)
         }
@@ -9666,6 +9740,24 @@ end
             Some(builder_token),
         );
         assert!(normal.ok, "builder editing a non-global object must still work: {:?}", normal.error);
+    }
+
+    /// The `run_command_as` security gate: `@`-commands (all authoring/admin
+    /// verbs) and quit are refused on the forced path; ordinary gameplay verbs
+    /// pass and run under the target's own scopes.
+    #[test]
+    fn forced_commands_ban_at_prefixed_and_quit() {
+        assert!(Engine::forced_command_allowed("drop sword"));
+        assert!(Engine::forced_command_allowed("say hello there"));
+        assert!(Engine::forced_command_allowed("go north"));
+        assert!(Engine::forced_command_allowed("attack goblin"));
+        // Authoring/admin verbs are all @-prefixed — never forceable.
+        assert!(!Engine::forced_command_allowed("@program #5"));
+        assert!(!Engine::forced_command_allowed("   @grant admin bob"));
+        assert!(!Engine::forced_command_allowed("@eval destroy('#1')"));
+        // Forced disconnect is banned too.
+        assert!(!Engine::forced_command_allowed("quit"));
+        assert!(!Engine::forced_command_allowed("Q"));
     }
 
     // -- @import / @export (Stage 4) --

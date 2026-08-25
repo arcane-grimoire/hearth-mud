@@ -310,6 +310,14 @@ declare function clone_object(src: ObjectRef, opts: CloneOpts?): string
 --- e.g. trigger("area/dungeon/item/gate", "on_activate")
 declare function trigger(ref: ObjectRef, hook: string, data: any?): ()
 
+--- Force a player to run a command as if they had typed it — charm, puppet,
+--- confusion. The command runs through the normal parser under the *target's*
+--- own scopes; `@`-commands (all authoring/admin verbs) and quit are refused
+--- on this path, and forced-command chains are depth-bounded. `actor` must be
+--- a player (only players have the session-bound command dispatch).
+--- e.g. run_command_as(victim, "drop sword")
+declare function run_command_as(actor: ObjectRef, command: string): ()
+
 --- Available ONLY inside a hook body (an archetype delegation feature — see
 --- docs/plans/archetypes.md): call the inherited version of the CURRENT
 --- hook — the next archetype ancestor above the one whose code is running

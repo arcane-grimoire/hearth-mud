@@ -101,6 +101,16 @@ pub enum Intent {
         location: Option<String>,
         owner: Option<String>,
     },
+    /// Force a player to run a command as if they had typed it — charm,
+    /// puppet, confusion. Runs through the normal command parser under the
+    /// *target's* own scopes; `@`-commands and `quit` are refused on the
+    /// forced path (see the engine's `deliver_effects`), and a depth guard
+    /// bounds forced-command chains. The `actor` must be a player (only
+    /// players have the session-bound command dispatch).
+    RunCommandAs {
+        actor: String,
+        command: String,
+    },
     SetTag {
         target: String,
         tag: Tag,
@@ -377,6 +387,13 @@ pub enum Effect {
         new_room: String,
         announce: bool,
         fire_hooks: bool,
+    },
+    /// Run a command as `actor` through the normal parser (a forced command).
+    /// Emitted by [`Intent::RunCommandAs`]; the engine's `deliver_effects`
+    /// applies the security gate and depth guard.
+    RunCommand {
+        actor: String,
+        command: String,
     },
     EmitNearby {
         room: String,
@@ -786,6 +803,33 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 obj.tags.retain(|t| t.category != "system");
                 obj.attrs.remove(crate::loader::FILE_KEY_ATTR);
                 world.add_object(obj);
+            }
+            Intent::RunCommandAs { actor, command } => {
+                // Deliberately unrestricted like Move (you cannot own a player,
+                // so gating on ownership would rule out the charm/puppet content
+                // this exists for). The hard security line is enforced at the
+                // engine's `deliver_effects`: `@`-commands and `quit` are
+                // refused on the forced path, the command runs under the
+                // target's own scopes, and a depth guard bounds chains. The
+                // griefing surface (forcing `say`/`drop`) is accepted as a
+                // social problem, same as Move's "possession routes around
+                // ownership" note.
+                let obj = world
+                    .get(actor)
+                    .ok_or_else(|| format!("run_command_as: no object '{}'", actor))?;
+                if obj.kind != Kind::Player {
+                    return Err(format!(
+                        "run_command_as: '{}' is not a player (only players have command dispatch)",
+                        actor
+                    ));
+                }
+                if command.trim().is_empty() {
+                    return Err("run_command_as: empty command".into());
+                }
+                effects.push(Effect::RunCommand {
+                    actor: actor.clone(),
+                    command: command.clone(),
+                });
             }
             Intent::SetTag { target, tag } => {
                 if !may_modify(world, authority, target) {
@@ -2621,6 +2665,44 @@ mod tests {
         assert_eq!(moved.1.as_deref(), Some("#2"));
         assert_eq!(moved.2, "#1");
         assert!(moved.3 && moved.4);
+    }
+
+    #[test]
+    fn run_command_as_targets_players_and_emits_a_run_command_effect() {
+        let mut world = test_world();
+        // alice (#3) is a player: the intent yields a RunCommand effect.
+        let effects = apply_batch(
+            &mut world,
+            &IntentBatch::from_intents(vec![Intent::RunCommandAs {
+                actor: "#3".into(),
+                command: "say hi".into(),
+            }]),
+        )
+        .unwrap();
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::RunCommand { actor, command } if actor == "#3" && command == "say hi"
+        )));
+
+        // A non-player target is refused (#5 is an item).
+        assert!(apply_batch(
+            &mut world,
+            &IntentBatch::from_intents(vec![Intent::RunCommandAs {
+                actor: "#5".into(),
+                command: "say hi".into(),
+            }]),
+        )
+        .is_err());
+
+        // An empty command is refused.
+        assert!(apply_batch(
+            &mut world,
+            &IntentBatch::from_intents(vec![Intent::RunCommandAs {
+                actor: "#3".into(),
+                command: "   ".into(),
+            }]),
+        )
+        .is_err());
     }
 
     #[test]
