@@ -568,12 +568,17 @@ fn apply(
                     }
                 }
                 obj.locks = room.locks.clone();
+                obj.attr_schema = room.attr_schema.clone();
                 obj.attrs.insert(loader::FILE_KEY_ATTR.into(), serde_json::json!(fk));
                 world.add_object(obj);
             } else {
                 let obj = world.get_mut(&ref_id).unwrap();
                 if obj.archetype_ref != archetype_ref {
                     obj.archetype_ref = archetype_ref.clone();
+                    changed = true;
+                }
+                if obj.attr_schema != room.attr_schema {
+                    obj.attr_schema = room.attr_schema.clone();
                     changed = true;
                 }
                 if obj.title.as_deref() != Some(room.title.as_str()) {
@@ -649,6 +654,7 @@ fn apply(
                 obj.attrs = object.attrs.clone();
                 obj.attrs.insert(loader::FILE_KEY_ATTR.into(), serde_json::json!(fk));
                 obj.locks = object.locks.clone();
+                obj.attr_schema = object.attr_schema.clone();
                 world.add_object(obj);
             } else {
                 let obj = world.get_mut(&ref_id).unwrap();
@@ -680,6 +686,10 @@ fn apply(
                 }
                 if obj.locks != object.locks {
                     obj.locks = object.locks.clone();
+                    changed = true;
+                }
+                if obj.attr_schema != object.attr_schema {
+                    obj.attr_schema = object.attr_schema.clone();
                     changed = true;
                 }
                 for t in &object.tags {
@@ -1319,6 +1329,7 @@ pub fn export_bundle(path: &Path, world: &mut World) -> Result<ExportReport, Str
                             .and_then(|r| resolve_ref_to_key(r, area_name, &ref_to_key)),
                         script,
                         libs,
+                        attr_schema: obj.attr_schema.clone(),
                     });
                     report.objects_written += 1;
                 }
@@ -1347,6 +1358,7 @@ pub fn export_bundle(path: &Path, world: &mut World) -> Result<ExportReport, Str
                             .and_then(|r| resolve_ref_to_key(r, area_name, &ref_to_key)),
                         script,
                         libs,
+                        attr_schema: obj.attr_schema.clone(),
                     });
                     report.objects_written += 1;
                 }
@@ -1392,6 +1404,7 @@ pub fn export_bundle(path: &Path, world: &mut World) -> Result<ExportReport, Str
                             .and_then(|r| resolve_ref_to_key(r, area_name, &ref_to_key)),
                         script,
                         libs,
+                        attr_schema: obj.attr_schema.clone(),
                     });
                     report.objects_written += 1;
                 }
@@ -2081,6 +2094,48 @@ mod tests {
             "the archetype relationship must survive export->import"
         );
         assert_eq!(fresh.resolved_title(grunt2).as_deref(), Some("Goblin"));
+    }
+
+    #[test]
+    fn attr_schema_round_trips_through_export() {
+        use crate::attr_schema::{AttrDescriptor, AttrType};
+        let src = {
+            let mut world = World::new();
+            let monster = world.next_dbref();
+            let mut m = GameObject::new(&monster, "monster", Kind::Npc).with_title("Monster");
+            let mut hp = AttrDescriptor::new("hp", AttrType::Int);
+            hp.label = Some("Hit points".into());
+            hp.min = Some(0.0);
+            hp.default = Some(serde_json::json!(1));
+            let mut biome = AttrDescriptor::new("biome", AttrType::Enum);
+            biome.values = vec!["arid".into(), "alpine".into()];
+            m.attr_schema = vec![hp, biome];
+            world.add_object(m);
+            world
+        };
+
+        let export_dir = TempDir::new();
+        {
+            let mut world = src;
+            export_bundle(&export_dir.path, &mut world).unwrap();
+        }
+
+        let db = temp_db();
+        let mut fresh = World::new();
+        import_bundle(&export_dir.path, &mut fresh, &db, false, Some("#1")).unwrap();
+
+        let m2 = fresh
+            .objects
+            .values()
+            .find(|o| o.key == "monster")
+            .expect("monster re-imported");
+        assert_eq!(m2.attr_schema.len(), 2, "attr_schema must survive export->import");
+        assert_eq!(m2.attr_schema[0].key, "hp");
+        assert_eq!(m2.attr_schema[0].ty, AttrType::Int);
+        assert_eq!(m2.attr_schema[0].min, Some(0.0));
+        assert_eq!(m2.attr_schema[0].default, Some(serde_json::json!(1)));
+        assert_eq!(m2.attr_schema[1].ty, AttrType::Enum);
+        assert_eq!(m2.attr_schema[1].values, vec!["arid".to_string(), "alpine".to_string()]);
     }
 
     /// Objects created entirely in-game (no `@import` involved, no

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::Tag;
+use crate::attr_schema::AttrDescriptor;
 use crate::softcode::hooks::{LibModule, ObjectScript};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +73,13 @@ pub struct GameObject {
     #[serde(default)]
     pub archetype_ref: Option<String>,
     pub attrs: HashMap<String, serde_json::Value>,
+    /// Declared attribute schema — typed descriptors for this object's custom
+    /// attributes, so a builder renders a real form. Inherited down the
+    /// archetype chain via [`crate::world::World::resolved_attr_schema`]. Purely
+    /// descriptive metadata; attr values stay free-form. See
+    /// `docs/plans/attribute-schema.md`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attr_schema: Vec<AttrDescriptor>,
     pub tags: HashSet<Tag>,
     #[serde(default)]
     pub aliases: HashSet<String>,
@@ -101,6 +109,7 @@ impl GameObject {
             target_ref: None,
             archetype_ref: None,
             attrs: HashMap::new(),
+            attr_schema: Vec::new(),
             tags: HashSet::new(),
             aliases: HashSet::new(),
             script: None,

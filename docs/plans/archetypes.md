@@ -217,8 +217,15 @@ than today's inline stats, stage 1 earned its keep.
   redefinition OR a removal — is reported, never silently dropped. The builder
   renders locked objects read-only (banner, disabled controls, read-only
   CodeMirror). Runtime archetype *creation* stays out (file-first).
-- **`@export` / declared attrs** — ties into `docs/plans/attribute-schema.md`;
-  an archetype's declared attrs become an instance's typed inspector defaults.
+- **Declared attrs — DONE.** An object/archetype declares an `attr_schema`
+  (typed descriptors: type, label, help, default, constraints); it inherits down
+  the chain (`World::resolved_attr_schema`, nearest-wins), persists + round-trips
+  through `@export`/`@import`, and `examine` returns it with per-descriptor
+  source. The builder's `PropertiesPanel` renders declared attrs as typed
+  widgets (`AttrField.svelte`, incl. `ref` dropdowns via `list_ref_candidates`
+  and `list<T>` rows), so an archetype's declared attrs become every instance's
+  typed inspector fields. See `docs/plans/attribute-schema.md` and
+  `src/attr_schema.rs`.
 - **Live debugger** — hook error → inspect `this`/`actor` state → edit → re-fire
   (the Smalltalk-image payoff; most valuable *because* layered behavior is where
   "which script ran, and why did it break" gets murky).

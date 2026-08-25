@@ -210,6 +210,10 @@ pub(crate) struct RoomDef {
     /// `require("<name>")`). Rare on rooms; usually on `Kind::Code` objects.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub(crate) libs: std::collections::HashMap<String, ProgramSource>,
+    /// Declared attribute schema — inline array of typed descriptors driving
+    /// the builder's form. See `docs/plans/attribute-schema.md`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) attr_schema: Vec<crate::attr_schema::AttrDescriptor>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -242,6 +246,10 @@ pub(crate) struct ObjectDef {
     /// `require("<name>")`). Authored on `Kind::Code` objects.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub(crate) libs: std::collections::HashMap<String, ProgramSource>,
+    /// Declared attribute schema — inline array of typed descriptors driving
+    /// the builder's form. See `docs/plans/attribute-schema.md`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) attr_schema: Vec<crate::attr_schema::AttrDescriptor>,
 }
 
 fn default_kind() -> String {
@@ -581,6 +589,7 @@ pub fn load_game_dir(
                     existing.archetype_ref = archetype_ref;
                     sync_managed_tags(existing, &room.tags);
                     install_script(existing, &room.script, &room.libs, base_dir, &mut diverged)?;
+                    install_attr_schema(existing, &room.attr_schema, &file_key);
                     updated += 1;
                 }
                 continue;
@@ -597,6 +606,7 @@ pub fn load_game_dir(
             obj.archetype_ref = archetype_ref;
             obj.attrs.insert(FILE_KEY_ATTR.into(), serde_json::json!(file_key));
             install_script(&mut obj, &room.script, &room.libs, base_dir, &mut diverged)?;
+            install_attr_schema(&mut obj, &room.attr_schema, &file_key);
             world.add_object(obj);
             created += 1;
         }
@@ -629,6 +639,7 @@ pub fn load_game_dir(
                     existing.locks = object.locks.clone();
                     sync_managed_tags(existing, &object.tags);
                     install_script(existing, &object.script, &object.libs, base_dir, &mut diverged)?;
+                    install_attr_schema(existing, &object.attr_schema, &file_key);
                     updated += 1;
                 }
                 continue;
@@ -652,6 +663,7 @@ pub fn load_game_dir(
             obj.locks = object.locks.clone();
             obj.archetype_ref = archetype_ref;
             install_script(&mut obj, &object.script, &object.libs, base_dir, &mut diverged)?;
+            install_attr_schema(&mut obj, &object.attr_schema, &file_key);
             world.add_object(obj);
             created += 1;
         }
@@ -778,6 +790,28 @@ fn sync_managed_tags(obj: &mut GameObject, file_tags: &[String]) {
 /// file program. Reconciling those away would destroy them on every
 /// `@reload-world` — and, because startup loads with no previous file hashes,
 /// on every restart.
+/// Assign a declared attribute schema onto an object, warning (non-fatally)
+/// about any unknown descriptor type so it's visible without breaking the load
+/// — the builder degrades an unknown type to a raw field. See
+/// `docs/plans/attribute-schema.md`.
+fn install_attr_schema(
+    obj: &mut GameObject,
+    schema: &[crate::attr_schema::AttrDescriptor],
+    file_key: &str,
+) {
+    for d in schema {
+        if d.ty.is_unknown() {
+            tracing::warn!(
+                file_key,
+                key = %d.key,
+                ty = d.ty.tag(),
+                "unknown attribute type in schema — builder falls back to a raw field"
+            );
+        }
+    }
+    obj.attr_schema = schema.to_vec();
+}
+
 fn install_script(
     obj: &mut GameObject,
     script: &Option<ScriptSource>,

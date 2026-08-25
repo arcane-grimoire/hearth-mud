@@ -12,6 +12,7 @@
 
 pub mod accounts;
 pub mod ansi;
+pub mod attr_schema;
 pub mod cli;
 pub mod config;
 pub mod db;

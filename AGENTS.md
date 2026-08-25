@@ -106,6 +106,12 @@ object (`area/system/item/rules`) carries hero, troupe, and combat commands.
   Object stays in world. Tag removed on reconnect.
 - **Ticks**: 1s heartbeat. Objects with `on_tick` program + `tick_interval`
   attr run on the beat. Global scripts (`World.scripts`) also tick.
+- **Attribute schemas**: an object/archetype declares `attr_schema = [ … ]`
+  (typed descriptors — `src/attr_schema.rs`, closed `AttrType` with an
+  `Unknown` fallback). It inherits down the archetype chain
+  (`World::resolved_attr_schema`), round-trips through the DB and export/import,
+  and `examine` returns it with per-descriptor source, so the builder renders
+  typed form widgets. Descriptive only — attr values stay free-form.
 
 ## Common tasks
 

@@ -411,6 +411,16 @@ pub(crate) fn detach_object(world: &mut World, target: &str) -> Result<(), Strin
     let description = world.resolved_description(&obj);
     let attrs = world.resolved_attrs(&obj);
     let tags = world.resolved_tags(&obj);
+    // Flatten the resolved attribute schema too (own + inherited descriptors,
+    // nearest-wins), so a detached instance keeps the typed builder fields it
+    // was showing — the schema inherits like attrs, so detaching must preserve
+    // it the same way (dropping the per-descriptor source; own is authoritative
+    // once delegation stops).
+    let attr_schema: Vec<_> = world
+        .resolved_attr_schema(&obj)
+        .into_iter()
+        .map(|(d, _)| d)
+        .collect();
     // Flatten the WHOLE resolved behavior — the instance's own script plus
     // every ancestor's, own/nearest winning — into one source, so a partial
     // override (a local hook alongside inherited ones) keeps ALL its hooks
@@ -424,6 +434,7 @@ pub(crate) fn detach_object(world: &mut World, target: &str) -> Result<(), Strin
     target_obj.description = description;
     target_obj.attrs = attrs;
     target_obj.tags = tags;
+    target_obj.attr_schema = attr_schema;
     if let Some(source) = flattened {
         // `set_script_with_origin` re-derives the hook index and PRESERVES the
         // instance's own `state` (never the ancestor's — state doesn't
@@ -3022,6 +3033,10 @@ mod tests {
             .with_title("Goblin")
             .with_description("A snarling goblin.");
         archetype.attrs.insert("max_hp".into(), serde_json::json!(10));
+        archetype.attr_schema = vec![crate::attr_schema::AttrDescriptor::new(
+            "max_hp",
+            crate::attr_schema::AttrType::Int,
+        )];
         archetype.tags.insert(Tag { category: "quest".into(), key: "elite".into() });
         hooks::set_script(
             &mut archetype,
@@ -3055,6 +3070,12 @@ mod tests {
         // Tags union: the instance's own plus the archetype's.
         assert!(instance.tags.contains(&Tag { category: "quest".into(), key: "elite".into() }));
         assert!(instance.tags.contains(&Tag { category: "loot".into(), key: "weapon".into() }));
+        // The inherited attribute schema is flattened down too, so the instance
+        // keeps its typed builder fields after it stops delegating.
+        assert!(
+            instance.attr_schema.iter().any(|d| d.key == "max_hp"),
+            "detach must flatten the inherited attr_schema onto the instance"
+        );
         let script = instance.script.as_ref().expect("script copied from archetype");
         assert!(script.hooks.contains(&"on_get".to_string()));
         assert_eq!(

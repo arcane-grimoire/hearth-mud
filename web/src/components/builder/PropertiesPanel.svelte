@@ -3,6 +3,7 @@
   import { api } from '../../lib/api.js';
   import { bbcodeToHtml } from '../../lib/bbcode.js';
   import StructurePanel from './StructurePanel.svelte';
+  import AttrField from './AttrField.svelte';
 
   // Object properties: identity, tags, aliases, attributes, plus the
   // kind-specific bits (an exit's direction/target, a movable object's
@@ -54,6 +55,13 @@
   const userAttrs = $derived(sortedAttrs.filter((k) => !k.startsWith('_')));
   const sysAttrs = $derived(sortedAttrs.filter((k) => k.startsWith('_')));
 
+  // Declared attribute schema (resolved up the archetype chain): each entry is
+  // a descriptor + `source`. Declared keys render as typed widgets (AttrField);
+  // everything else falls back to the raw key/value rows below, so an unschema'd
+  // game is unchanged. See docs/plans/attribute-schema.md.
+  const attrSchema = $derived(obj?.attr_schema || []);
+  const schemaByKey = $derived(Object.fromEntries(attrSchema.map((d) => [d.key, d])));
+
   // Delegation: resolved_attrs carries per-attr provenance {value, source,
   // overrides}. `source === 'own'` means this object holds the value; any other
   // source is the ancestor ref it's inherited from. `overrides` flags an own
@@ -65,6 +73,32 @@
       .sort(),
   );
   function overridesInherited(key) { return resolved[key]?.overrides === true; }
+
+  // Declared keys render as typed fields; the raw tables show only what the
+  // schema doesn't describe, so nothing double-renders.
+  const undeclaredUser = $derived(userAttrs.filter((k) => !schemaByKey[k]));
+  const undeclaredInherited = $derived(inheritedAttrs.filter((k) => !schemaByKey[k]));
+
+  // The effective value shown in a declared field: own value, else the
+  // inherited one, else the descriptor's default.
+  function fieldValue(d) {
+    if (obj?.attrs && Object.prototype.hasOwnProperty.call(obj.attrs, d.key)) return obj.attrs[d.key];
+    if (resolved[d.key]) return resolved[d.key].value;
+    return d.default ?? null;
+  }
+  function fieldOwned(d) {
+    return !!(obj?.attrs && Object.prototype.hasOwnProperty.call(obj.attrs, d.key));
+  }
+  function fieldOrigin(d) {
+    if (fieldOwned(d)) return '';
+    if (resolved[d.key]) return `inherited from ${resolved[d.key].source}`;
+    return d.default !== undefined && d.default !== null ? 'schema default' : '';
+  }
+  // AttrField hands back an already-typed value (number/bool/array/…).
+  async function saveTypedAttr(key, value) {
+    const res = await api('set_attribute', { ref_id: obj.ref_id, key, value });
+    res.ok ? onchanged() : showFlash(res.error || 'Could not save the attribute', { tone: 'danger' });
+  }
 
   // Title/description/tags can also be inherited. `title` is the object's OWN
   // title (null when unset); `resolved_title` is the effective value up the
@@ -327,9 +361,29 @@
     <section>
       <h3>Attributes</h3>
       <p class="hint">Freeform data stored on this object — read and written by softcode.</p>
+
+      {#if attrSchema.length}
+        <!-- Declared attributes: typed fields driven by the object's (and its
+             archetype's) attribute schema. -->
+        <div class="schema-fields">
+          {#each attrSchema as d}
+            <AttrField
+              descriptor={d}
+              value={fieldValue(d)}
+              owned={fieldOwned(d)}
+              origin={fieldOrigin(d)}
+              {locked}
+              onsave={(v) => saveTypedAttr(d.key, v)}
+              onrevert={fieldOwned(d) ? () => deleteAttr(d.key) : null}
+            />
+          {/each}
+        </div>
+        {#if undeclaredUser.length}<div class="inh-h">Other attributes</div>{/if}
+      {/if}
+
       <table class="attrs">
         <tbody>
-          {#each userAttrs as key}
+          {#each undeclaredUser as key}
             {@const val = obj.attrs[key]}
             {@const disp = typeof val === 'object' ? JSON.stringify(val) : String(val)}
             {@const ov = overridesInherited(key)}
@@ -351,15 +405,15 @@
               {/if}
             </tr>
           {/each}
-          {#if !userAttrs.length}<tr><td colspan="3" class="none pad">No attributes</td></tr>{/if}
+          {#if !undeclaredUser.length && !attrSchema.length}<tr><td colspan="3" class="none pad">No attributes</td></tr>{/if}
         </tbody>
       </table>
 
-      {#if inheritedAttrs.length}
+      {#if undeclaredInherited.length}
         <div class="inh-h">Inherited</div>
         <table class="attrs">
           <tbody>
-            {#each inheritedAttrs as key}
+            {#each undeclaredInherited as key}
               {@const r = resolved[key]}
               {@const disp = typeof r.value === 'object' ? JSON.stringify(r.value) : String(r.value)}
               <tr class="inh">
@@ -481,6 +535,7 @@
   .tag button:hover { color: var(--accent-red, #e06c75); }
   .none { color: var(--text-muted, #8c8378); font-style: italic; font-size: 11px; }
   .pad { padding: 10px !important; text-align: center; }
+  .schema-fields { display: flex; flex-direction: column; gap: 12px; margin-bottom: 6px; }
   .attrs { width: 100%; border-collapse: collapse; }
   .attrs td { padding: 4px 6px; border-bottom: 1px solid var(--border-muted, #211d16); vertical-align: top; font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-meta); }
   .ak { color: var(--accent-teal, #56b6c2); white-space: nowrap; width: 1%; }

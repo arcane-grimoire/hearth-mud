@@ -122,6 +122,12 @@ pub enum ApiRequest {
     /// Flatten an instance off its archetype (copy resolved fields/script down,
     /// clear the delegation) — the REST counterpart of softcode `clone`.
     DetachObject { ref_id: String },
+    /// Candidate entities for a `ref`-typed attribute's dropdown (see
+    /// `crate::attr_schema`). `ref_source` vocabulary:
+    /// `kind:<npc|item|room|exit|code>`, `tag:<cat>:<key>` (matched against
+    /// resolved tags), or `archetype` (objects with live instances). Returns
+    /// `{ candidates: [{ ref_id, label }] }`, sorted by label. Read-only.
+    ListRefCandidates { ref_source: String },
     /// An object's script: `{ source, hooks: [..], enabled }` (or null).
     GetScript { ref_id: String },
     /// Set a `require`able lib module on a `Kind::Code` object, keyed by bare
@@ -1417,6 +1423,25 @@ impl Engine {
                             }
                         }
 
+                        // Declared attribute schema, resolved up the archetype
+                        // chain. Each descriptor is its serialized form plus a
+                        // `source` ("own" or the ancestor ref it's inherited
+                        // from), so the builder renders typed fields and knows
+                        // which are declared here vs inherited.
+                        let attr_schema: Vec<serde_json::Value> = self
+                            .world
+                            .resolved_attr_schema(obj)
+                            .into_iter()
+                            .map(|(d, source)| {
+                                let mut v = serde_json::to_value(&d)
+                                    .unwrap_or_else(|_| serde_json::json!({}));
+                                if let Some(map) = v.as_object_mut() {
+                                    map.insert("source".into(), serde_json::json!(source));
+                                }
+                                v
+                            })
+                            .collect();
+
                         ApiResponse::success(serde_json::json!({
                             "ref_id": obj.ref_id,
                             "key": obj.key,
@@ -1433,6 +1458,7 @@ impl Engine {
                             "locked": Self::is_object_locked(obj),
                             "attrs": obj.attrs,
                             "resolved_attrs": resolved_attrs,
+                            "attr_schema": attr_schema,
                             "tags": tags,
                             "resolved_tags": resolved_tags,
                             "has_script": hooks::has_authored_script(obj),
@@ -1657,6 +1683,11 @@ impl Engine {
                     Ok(()) => ApiResponse::ok(),
                     Err(e) => ApiResponse::error(e),
                 }
+            }
+            ApiRequest::ListRefCandidates { ref_source } => {
+                ApiResponse::success(serde_json::json!({
+                    "candidates": self.ref_candidates(&ref_source),
+                }))
             }
             ApiRequest::GetScript { ref_id } => {
                 match self.world.get(&ref_id) {
@@ -6352,6 +6383,51 @@ impl Engine {
         )
     }
 
+    /// Candidate entities for a `ref`-typed attribute's dropdown. `source`
+    /// vocabulary (extensible): `kind:<npc|item|room|exit|code>`,
+    /// `tag:<cat>:<key>` (matched against RESOLVED tags, so an instance of a
+    /// tagged archetype qualifies), or `archetype` (objects with live
+    /// instances). Each candidate is `{ ref_id, label }` where label is the
+    /// resolved title (falling back to the key), sorted by label. Unknown
+    /// sources return nothing. See `crate::attr_schema`.
+    fn ref_candidates(&self, source: &str) -> Vec<serde_json::Value> {
+        let matches: Vec<&GameObject> = if let Some(kind_str) = source.strip_prefix("kind:") {
+            match Kind::parse(kind_str) {
+                Some(k) => self.world.objects.values().filter(|o| o.kind == k).collect(),
+                None => Vec::new(),
+            }
+        } else if let Some(tag_spec) = source.strip_prefix("tag:") {
+            match Tag::parse(tag_spec) {
+                Ok(tag) => self
+                    .world
+                    .objects
+                    .values()
+                    .filter(|o| self.world.resolved_tags(o).contains(&tag))
+                    .collect(),
+                Err(_) => Vec::new(),
+            }
+        } else if source == "archetype" {
+            self.world
+                .objects
+                .values()
+                .filter(|o| self.world.has_archetype_instances(&o.ref_id))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut out: Vec<serde_json::Value> = matches
+            .into_iter()
+            .map(|o| {
+                serde_json::json!({
+                    "ref_id": o.ref_id,
+                    "label": self.world.resolved_title(o).unwrap_or_else(|| o.key.clone()),
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| a["label"].as_str().cmp(&b["label"].as_str()));
+        out
+    }
+
     fn can_modify_object(&self, session_id: &str, actor_ref: &str, target_ref: &str) -> bool {
         if self.session_has_scope(session_id, Scope::Admin) {
             return true;
@@ -7862,6 +7938,91 @@ mod tests {
             .data
             .unwrap();
         assert_eq!(exa["instance_count"].as_u64(), Some(1));
+    }
+
+    #[test]
+    fn examine_reports_resolved_attr_schema_with_source() {
+        use crate::attr_schema::{AttrDescriptor, AttrType};
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
+
+        // Archetype declares hp (int, min 0) + attack (int).
+        let arch = engine.world.next_dbref();
+        let mut a = GameObject::new(&arch, "monster", Kind::Npc).with_title("Monster");
+        let mut hp = AttrDescriptor::new("hp", AttrType::Int);
+        hp.label = Some("Hit points".into());
+        hp.min = Some(0.0);
+        a.attr_schema = vec![hp, AttrDescriptor::new("attack", AttrType::Int)];
+        engine.world.add_object(a);
+
+        // Instance inherits the schema and declares one more of its own.
+        let inst = engine.world.next_dbref();
+        let mut i = GameObject::new(&inst, "goblin", Kind::Npc);
+        i.archetype_ref = Some(arch.clone());
+        i.attr_schema = vec![AttrDescriptor::new("cunning", AttrType::Int)];
+        engine.world.add_object(i);
+
+        let ex = engine
+            .handle_api_request(ApiRequest::Examine { ref_id: inst.clone() }, Some(token.clone()))
+            .data
+            .unwrap();
+        let schema = ex["attr_schema"].as_array().unwrap();
+        let entry = |k: &str| schema.iter().find(|e| e["key"] == k).unwrap();
+        // Own descriptor marked "own"; type serializes under "type".
+        assert_eq!(entry("cunning")["source"].as_str(), Some("own"));
+        assert_eq!(entry("cunning")["type"].as_str(), Some("int"));
+        // Inherited descriptors carry the archetype ref as source, with extras.
+        assert_eq!(entry("hp")["source"].as_str(), Some(arch.as_str()));
+        assert_eq!(entry("hp")["label"].as_str(), Some("Hit points"));
+        assert_eq!(entry("hp")["min"].as_f64(), Some(0.0));
+        assert_eq!(entry("attack")["source"].as_str(), Some(arch.as_str()));
+        assert_eq!(schema.len(), 3);
+    }
+
+    #[test]
+    fn list_ref_candidates_matches_kind_and_resolved_tag() {
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
+
+        let goblin = engine.world.next_dbref();
+        let mut g = GameObject::new(&goblin, "goblin", Kind::Npc).with_title("Goblin");
+        g.tags.insert(Tag::parse("kind:monster").unwrap());
+        engine.world.add_object(g);
+
+        // A pure delegate inherits the "kind:monster" tag (resolved), so a
+        // tag: query must find it too.
+        let grunt = engine.world.next_dbref();
+        let mut gr = GameObject::new(&grunt, "grunt", Kind::Npc);
+        gr.archetype_ref = Some(goblin.clone());
+        engine.world.add_object(gr);
+
+        let sword = engine.world.next_dbref();
+        engine
+            .world
+            .add_object(GameObject::new(&sword, "sword", Kind::Item).with_title("a sword"));
+
+        let mut refs = |src: &str| -> Vec<String> {
+            engine
+                .handle_api_request(
+                    ApiRequest::ListRefCandidates { ref_source: src.to_string() },
+                    Some(token.clone()),
+                )
+                .data
+                .unwrap()["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["ref_id"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        let npcs = refs("kind:npc");
+        assert!(npcs.contains(&goblin) && npcs.contains(&grunt) && !npcs.contains(&sword));
+        let items = refs("kind:item");
+        assert!(items.contains(&sword) && !items.contains(&goblin));
+        // Resolved tags: the grunt inherits kind:monster from its archetype.
+        let monsters = refs("tag:kind:monster");
+        assert!(monsters.contains(&goblin) && monsters.contains(&grunt));
+        // Unknown source → no candidates.
+        assert!(refs("nonsense").is_empty());
     }
 
     #[test]

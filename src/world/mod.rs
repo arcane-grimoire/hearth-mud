@@ -241,6 +241,33 @@ impl World {
     /// inherited tag" in Stage 1 (that's `clear_attr`'s Stage 2 sibling, per
     /// docs/plans/archetypes.md), so this is a plain union rather than an
     /// override-per-key merge like `resolved_attrs`.
+    /// The effective attribute schema: `obj`'s own declared descriptors first,
+    /// then each archetype ancestor (nearest first) contributes any `key` not
+    /// already declared — nearest-wins per key, mirroring [`Self::resolved_attrs`].
+    /// Each descriptor is paired with its source: `"own"` or the ancestor ref it
+    /// is inherited from. So an archetype declares `hp`/`attack` once and every
+    /// instance renders the same typed fields.
+    pub fn resolved_attr_schema(
+        &self,
+        obj: &GameObject,
+    ) -> Vec<(crate::attr_schema::AttrDescriptor, String)> {
+        let mut out: Vec<(crate::attr_schema::AttrDescriptor, String)> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for d in &obj.attr_schema {
+            if seen.insert(d.key.clone()) {
+                out.push((d.clone(), "own".to_string()));
+            }
+        }
+        for anc in self.archetype_ancestors(obj) {
+            for d in &anc.attr_schema {
+                if seen.insert(d.key.clone()) {
+                    out.push((d.clone(), anc.ref_id.clone()));
+                }
+            }
+        }
+        out
+    }
+
     pub fn resolved_tags(&self, obj: &GameObject) -> HashSet<Tag> {
         let mut tags: HashSet<Tag> = obj.tags.clone();
         for anc in self.archetype_ancestors(obj) {
@@ -505,5 +532,44 @@ mod tests {
             world.resolved_tags(world.get(&child_ref).unwrap()).contains(&locked),
             "own system:locked is kept",
         );
+    }
+
+    /// A declared attribute schema inherits down the archetype chain: an
+    /// instance sees its archetype's descriptors, its own descriptors win on a
+    /// key collision (nearest-first), and each carries its source.
+    #[test]
+    fn resolved_attr_schema_inherits_own_wins() {
+        use crate::attr_schema::{AttrDescriptor, AttrType};
+
+        let mut world = World::new();
+        let base_ref = world.next_dbref();
+        let mut base = GameObject::new(&base_ref, "monster", Kind::Npc);
+        base.attr_schema = vec![
+            AttrDescriptor::new("hp", AttrType::Int),
+            AttrDescriptor::new("armor", AttrType::Int),
+        ];
+        world.add_object(base);
+
+        let child_ref = world.next_dbref();
+        let mut child = GameObject::new(&child_ref, "goblin", Kind::Npc);
+        child.archetype_ref = Some(base_ref.clone());
+        // Own `hp` overrides the inherited one; `attack` is new.
+        let mut own_hp = AttrDescriptor::new("hp", AttrType::Int);
+        own_hp.label = Some("Goblin HP".into());
+        child.attr_schema = vec![own_hp, AttrDescriptor::new("attack", AttrType::Int)];
+        world.add_object(child);
+
+        let resolved = world.resolved_attr_schema(world.get(&child_ref).unwrap());
+        let by_key: std::collections::HashMap<&str, &(AttrDescriptor, String)> =
+            resolved.iter().map(|e| (e.0.key.as_str(), e)).collect();
+
+        // Own descriptors are marked "own"; own hp wins over the inherited one.
+        assert_eq!(by_key["hp"].1, "own");
+        assert_eq!(by_key["hp"].0.label.as_deref(), Some("Goblin HP"));
+        assert_eq!(by_key["attack"].1, "own");
+        // The inherited-only descriptor carries its source ref.
+        assert_eq!(by_key["armor"].1, base_ref);
+        // Each key appears exactly once.
+        assert_eq!(resolved.len(), 3);
     }
 }

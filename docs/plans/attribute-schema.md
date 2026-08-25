@@ -1,5 +1,21 @@
 # Plan: Attribute schemas for game-defined data
 
+> **Status: objects/archetypes shipped.** The kind-agnostic mechanism
+> (`src/attr_schema.rs`: `AttrType` closed enum + `Unknown` fallback,
+> `AttrDescriptor`) is built and wired for **objects and rooms**: declare
+> `attr_schema = [ … ]` (inline array of descriptors) on a `[[objects]]`/
+> `[[rooms]]` element; it persists (DB `attr_schema_json`), round-trips through
+> `@export`/`@import`, inherits down the archetype chain
+> (`World::resolved_attr_schema`, nearest-wins), and `examine` returns it with
+> per-descriptor `source` (own/ancestor). The web builder's `PropertiesPanel`
+> renders declared attrs as typed widgets (`AttrField.svelte`) — text/number/
+> checkbox/enum-dropdown/color/`ref`-dropdown (populated by the
+> `list_ref_candidates` REST action)/repeatable `list<T>` rows — with
+> own-vs-inherited affordances; undeclared attrs keep the raw field.
+> **Terrain** is the remaining consumer: fold `[[terrain_attr]]` onto the same
+> `AttrType`/`AttrDescriptor` (Stages 1–3 below) when the terrain form is built.
+> The optional warn-only load-time value validation is still open.
+
 ## Goal
 
 Let a game *declare* the custom attributes it uses — starting with terrain

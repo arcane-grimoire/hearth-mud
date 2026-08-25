@@ -44,6 +44,7 @@ impl Database {
                 script_json TEXT NOT NULL DEFAULT 'null',
                 libs_json TEXT NOT NULL DEFAULT '{}',
                 locks_json TEXT NOT NULL DEFAULT '{}',
+                attr_schema_json TEXT NOT NULL DEFAULT '[]',
                 id TEXT NOT NULL
             );
 
@@ -89,6 +90,7 @@ impl Database {
         let _ = self.conn.execute("ALTER TABLE accounts ADD COLUMN max_characters INTEGER", []);
         let _ = self.conn.execute("ALTER TABLE objects ADD COLUMN owner_ref TEXT", []);
         let _ = self.conn.execute("ALTER TABLE objects ADD COLUMN archetype_ref TEXT", []);
+        let _ = self.conn.execute("ALTER TABLE objects ADD COLUMN attr_schema_json TEXT NOT NULL DEFAULT '[]'", []);
 
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS scheduled_hooks (
@@ -332,7 +334,7 @@ impl Database {
 
         {
             let mut obj_stmt = tx.prepare(
-                "INSERT INTO objects (ref_id, key, kind, title, description, location_ref, target_ref, attrs_json, aliases_json, script_json, libs_json, locks_json, id, owner_ref, archetype_ref) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                "INSERT INTO objects (ref_id, key, kind, title, description, location_ref, target_ref, attrs_json, aliases_json, script_json, libs_json, locks_json, id, owner_ref, archetype_ref, attr_schema_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             )?;
             let mut tag_stmt = tx.prepare(
                 "INSERT INTO tags (object_ref, category, key) VALUES (?1, ?2, ?3)",
@@ -349,6 +351,8 @@ impl Database {
                     serde_json::to_string(&obj.libs).unwrap_or_else(|_| "{}".into());
                 let locks_json =
                     serde_json::to_string(&obj.locks).unwrap_or_else(|_| "{}".into());
+                let attr_schema_json =
+                    serde_json::to_string(&obj.attr_schema).unwrap_or_else(|_| "[]".into());
                 obj_stmt.execute(params![
                     obj.ref_id,
                     obj.key,
@@ -365,6 +369,7 @@ impl Database {
                     obj.id,
                     obj.owner_ref,
                     obj.archetype_ref,
+                    attr_schema_json,
                 ])?;
                 for tag in &obj.tags {
                     tag_stmt.execute(params![obj.ref_id, tag.category, tag.key])?;
@@ -396,7 +401,7 @@ impl Database {
 
         {
             let mut obj_stmt = tx.prepare(
-                "INSERT OR REPLACE INTO objects (ref_id, key, kind, title, description, location_ref, target_ref, attrs_json, aliases_json, script_json, libs_json, locks_json, id, owner_ref, archetype_ref) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                "INSERT OR REPLACE INTO objects (ref_id, key, kind, title, description, location_ref, target_ref, attrs_json, aliases_json, script_json, libs_json, locks_json, id, owner_ref, archetype_ref, attr_schema_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             )?;
             let mut tag_del = tx.prepare("DELETE FROM tags WHERE object_ref = ?1")?;
             let mut tag_stmt = tx.prepare(
@@ -421,6 +426,8 @@ impl Database {
                     serde_json::to_string(&obj.libs).unwrap_or_else(|_| "{}".into());
                 let locks_json =
                     serde_json::to_string(&obj.locks).unwrap_or_else(|_| "{}".into());
+                let attr_schema_json =
+                    serde_json::to_string(&obj.attr_schema).unwrap_or_else(|_| "[]".into());
                 // Tags are cheap to rewrite wholesale per object.
                 tag_del.execute(params![ref_id])?;
                 obj_stmt.execute(params![
@@ -439,6 +446,7 @@ impl Database {
                     obj.id,
                     obj.owner_ref,
                     obj.archetype_ref,
+                    attr_schema_json,
                 ])?;
                 for tag in &obj.tags {
                     tag_stmt.execute(params![obj.ref_id, tag.category, tag.key])?;
@@ -453,7 +461,7 @@ impl Database {
         let mut world = World::new();
 
         let mut obj_stmt = self.conn.prepare(
-            "SELECT ref_id, key, kind, title, description, location_ref, target_ref, attrs_json, aliases_json, script_json, libs_json, locks_json, id, owner_ref, archetype_ref FROM objects",
+            "SELECT ref_id, key, kind, title, description, location_ref, target_ref, attrs_json, aliases_json, script_json, libs_json, locks_json, id, owner_ref, archetype_ref, attr_schema_json FROM objects",
         )?;
         let obj_rows = obj_stmt.query_map([], |row| {
             let ref_id: String = row.get(0)?;
@@ -471,17 +479,18 @@ impl Database {
             let id: String = row.get(12)?;
             let owner_ref: Option<String> = row.get(13)?;
             let archetype_ref: Option<String> = row.get(14)?;
+            let attr_schema_json: String = row.get(15)?;
             Ok((
                 ref_id, key, kind_str, title, description, location_ref,
                 target_ref, attrs_json, aliases_json, script_json, libs_json, locks_json, id,
-                owner_ref, archetype_ref,
+                owner_ref, archetype_ref, attr_schema_json,
             ))
         })?;
 
         for row in obj_rows {
             let (ref_id, key, kind_str, title, description, location_ref,
                 target_ref, attrs_json, aliases_json, script_json, libs_json, locks_json, id,
-                owner_ref, archetype_ref) = row?;
+                owner_ref, archetype_ref, attr_schema_json) = row?;
             let kind = match kind_str.as_str() {
                 "room" => Kind::Room,
                 "item" => Kind::Item,
@@ -502,6 +511,8 @@ impl Database {
                 serde_json::from_str(&libs_json).unwrap_or_default();
             let locks: HashMap<String, String> =
                 serde_json::from_str(&locks_json).unwrap_or_default();
+            let attr_schema: Vec<crate::attr_schema::AttrDescriptor> =
+                serde_json::from_str(&attr_schema_json).unwrap_or_default();
             let obj = GameObject {
                 ref_id: ref_id.clone(),
                 key,
@@ -513,6 +524,7 @@ impl Database {
                 target_ref,
                 archetype_ref,
                 attrs,
+                attr_schema,
                 tags: HashSet::new(),
                 aliases,
                 script,
@@ -848,6 +860,34 @@ mod tests {
         );
         // And the archetype with none stays None.
         assert_eq!(loaded.get(&arch_ref).unwrap().archetype_ref, None);
+    }
+
+    #[test]
+    fn world_round_trip_attr_schema() {
+        use crate::attr_schema::{AttrDescriptor, AttrType};
+        let db = temp_db();
+        let mut world = World::new();
+
+        let ref_id = world.next_dbref();
+        let mut obj = GameObject::new(&ref_id, "monster", Kind::Npc);
+        let mut hp = AttrDescriptor::new("hp", AttrType::Int);
+        hp.label = Some("Hit points".into());
+        hp.min = Some(0.0);
+        hp.default = Some(serde_json::json!(1));
+        obj.attr_schema = vec![hp, AttrDescriptor::new("biome", AttrType::Enum)];
+        world.add_object(obj);
+
+        db.save_world(&world).unwrap();
+        let loaded = db.load_world().unwrap();
+
+        let schema = &loaded.get(&ref_id).unwrap().attr_schema;
+        assert_eq!(schema.len(), 2, "attr_schema must round-trip through save/load");
+        assert_eq!(schema[0].key, "hp");
+        assert_eq!(schema[0].ty, AttrType::Int);
+        assert_eq!(schema[0].label.as_deref(), Some("Hit points"));
+        assert_eq!(schema[0].min, Some(0.0));
+        assert_eq!(schema[0].default, Some(serde_json::json!(1)));
+        assert_eq!(schema[1].ty, AttrType::Enum);
     }
 
     #[test]
