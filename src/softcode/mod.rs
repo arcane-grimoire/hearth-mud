@@ -2235,11 +2235,20 @@ impl SoftcodeRuntime {
         names.map_err(classify_lua_error)
     }
 
+    /// Discover and run every `test_*` function in `source`.
+    ///
+    /// `world` toggles integration mode (a live-world API + a `ctx` table with
+    /// `this`/`actor`/`room`) vs. unit mode (lib modules, no world). In
+    /// integration mode, `this_ref` — when set — is the object under test:
+    /// `ctx.this` is bound to it and `ctx.room` to its location, so an object's
+    /// own embedded tests run against itself. When `None`, `ctx.this` falls
+    /// back to the first item in the world (the original `.test.luau` behavior).
     pub fn run_tests(
         &self,
         source: &str,
         file_name: &str,
         world: Option<&World>,
+        this_ref: Option<&str>,
         budget: Budget,
     ) -> Result<TestFileResult, SoftcodeError> {
         let test_names = self.discover_test_names(source, file_name)?;
@@ -2291,8 +2300,20 @@ impl SoftcodeRuntime {
                     if let Some(player) = sorted_objs.iter().find(|o| o.kind == Kind::Player) {
                         ctx.set("actor", player.ref_id.clone())?;
                     }
-                    if let Some(item) = sorted_objs.iter().find(|o| o.kind == Kind::Item) {
-                        ctx.set("this", item.ref_id.clone())?;
+                    match this_ref {
+                        // Object under test: `this` is it, and `room` prefers
+                        // its own location over the first-room default above.
+                        Some(tr) => {
+                            ctx.set("this", tr.to_string())?;
+                            if let Some(loc) = w.get(tr).and_then(|o| o.location_ref.clone()) {
+                                ctx.set("room", loc)?;
+                            }
+                        }
+                        None => {
+                            if let Some(item) = sorted_objs.iter().find(|o| o.kind == Kind::Item) {
+                                ctx.set("this", item.ref_id.clone())?;
+                            }
+                        }
                     }
                     env.set("ctx", ctx)?;
                 }
@@ -4751,6 +4772,7 @@ mod tests {
                 "#,
                 "assertions.test.luau",
                 None,
+                None,
                 Budget::default(),
             )
             .expect("test runner should not error");
@@ -4774,6 +4796,7 @@ mod tests {
                     end
                 "#,
                 "fail.test.luau",
+                None,
                 None,
                 Budget::default(),
             )
@@ -4805,6 +4828,7 @@ mod tests {
                 "#,
                 "integration.test.luau",
                 Some(&world),
+                None,
                 Budget::default(),
             )
             .expect("test runner should not error");
@@ -4857,6 +4881,7 @@ mod tests {
                 &tf.source,
                 &tf.relative,
                 world.as_ref(),
+                None,
                 Budget::default(),
             );
             match result {

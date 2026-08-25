@@ -187,6 +187,10 @@ pub enum ApiRequest {
         source: Option<String>,
         #[serde(default)]
         file: Option<String>,
+        /// Run the `test_*` functions embedded in this object's own script
+        /// (tests co-located with hooks). Takes precedence over `source`/`file`.
+        #[serde(default)]
+        ref_id: Option<String>,
     },
     /// A flat, richer object listing for the builder's table view: every
     /// non-exit object (rooms, npcs, items, players) with its area, location
@@ -2215,7 +2219,38 @@ impl Engine {
                 });
                 ApiResponse::success(serde_json::json!({ "problems": problems, "count": problems.len() }))
             }
-            ApiRequest::RunTests { source, file } => {
+            ApiRequest::RunTests { source, file, ref_id } => {
+                // Object mode: run the test_* functions embedded in one object's
+                // own script (ctx.this bound to it). Takes precedence.
+                if let Some(ref_id) = ref_id {
+                    let label = format!("{} (embedded)", ref_id);
+                    return match self.run_object_tests(&ref_id) {
+                        None => ApiResponse::error(format!("{} has no script", ref_id)),
+                        Some(result) => {
+                            let (mut passed, mut failed) = (0usize, 0usize);
+                            let file = match result {
+                                Ok(fr) => {
+                                    let tests: Vec<serde_json::Value> = fr
+                                        .tests
+                                        .iter()
+                                        .map(|tr| {
+                                            if tr.passed { passed += 1; } else { failed += 1; }
+                                            serde_json::json!({ "name": tr.name, "passed": tr.passed, "error": tr.error })
+                                        })
+                                        .collect();
+                                    serde_json::json!({ "file": label, "tests": tests, "error": serde_json::Value::Null })
+                                }
+                                Err(e) => {
+                                    failed += 1;
+                                    serde_json::json!({ "file": label, "tests": [], "error": e.to_string() })
+                                }
+                            };
+                            ApiResponse::success(serde_json::json!({
+                                "files": [file], "passed": passed, "failed": failed,
+                            }))
+                        }
+                    };
+                }
                 // Mirror `cmd_test`: ad-hoc `source`, a single named file, or
                 // discover them all. Each non-lib file runs against a clone so
                 // its writes never touch the live world (see the variant doc).
@@ -2258,6 +2293,7 @@ impl Engine {
                         &tf.source,
                         &tf.relative,
                         world.as_ref(),
+                        None,
                         softcode::Budget::default(),
                     ) {
                         Ok(fr) => {
@@ -6759,85 +6795,159 @@ impl Engine {
         }
     }
 
+    /// Run the `test_*` functions embedded in an object's own script (tests
+    /// co-located with the hooks). `ctx.this` is bound to the object, so its
+    /// tests run against itself. `None` if the object has no script.
+    fn run_object_tests(
+        &self,
+        ref_id: &str,
+    ) -> Option<Result<softcode::TestFileResult, softcode::SoftcodeError>> {
+        let source = self
+            .world
+            .get(ref_id)
+            .and_then(|o| o.script.as_ref())
+            .map(|s| s.source.clone())?;
+        Some(self.softcode.run_tests(
+            &source,
+            &format!("{} (embedded)", ref_id),
+            Some(&self.world),
+            Some(ref_id),
+            softcode::Budget::default(),
+        ))
+    }
+
+    /// Append a test-file/object result to `out`, tallying pass/fail.
+    fn render_test_result(
+        out: &mut String,
+        label: &str,
+        result: Result<softcode::TestFileResult, softcode::SoftcodeError>,
+        passed: &mut usize,
+        failed: &mut usize,
+    ) {
+        match result {
+            Ok(fr) => {
+                out.push_str(&format!("\r\n{}:\r\n", label));
+                for tr in &fr.tests {
+                    if tr.passed {
+                        *passed += 1;
+                        out.push_str(&format!("  PASS {}\r\n", tr.name));
+                    } else {
+                        *failed += 1;
+                        out.push_str(&format!(
+                            "  FAIL {} -- {}\r\n",
+                            tr.name,
+                            tr.error.as_deref().unwrap_or("?")
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                *failed += 1;
+                out.push_str(&format!("\r\n{}: ERROR -- {}\r\n", label, e));
+            }
+        }
+    }
+
     fn cmd_test(&mut self, session_id: &str, args: &str) -> String {
         if !self.session_has_scope(session_id, Scope::Builder) {
             return "Permission denied.\r\n".to_string();
         }
+        let arg = args.trim();
+        let mut out = String::new();
+        let mut passed = 0usize;
+        let mut failed = 0usize;
 
-        let game_dir = match &self.game_dir {
-            Some(g) => g.clone(),
-            None => return "No game_dir configured.\r\n".to_string(),
-        };
-
-        let game_path = std::path::Path::new(&game_dir);
-        let test_files = if args.trim().is_empty() {
-            crate::loader::discover_test_files(game_path)
-        } else {
-            let path = game_path.join(args.trim());
-            match std::fs::read_to_string(&path) {
-                Ok(source) => {
-                    let is_lib = path.starts_with(game_path.join("lib"));
-                    vec![crate::loader::TestFile {
-                        path: path.clone(),
-                        relative: args.trim().to_string(),
-                        source,
-                        is_lib,
-                    }]
+        // `@test #<ref>` — run one object's embedded test_* functions. No
+        // game_dir needed; the tests travel with the object's script.
+        if arg.starts_with('#') {
+            match self.run_object_tests(arg) {
+                Some(result) => {
+                    Self::render_test_result(
+                        &mut out,
+                        &format!("{} (embedded)", arg),
+                        result,
+                        &mut passed,
+                        &mut failed,
+                    );
                 }
-                Err(e) => return format!("Cannot read '{}': {}\r\n", args.trim(), e),
+                None => return format!("{} has no script (no embedded tests).\r\n", arg),
             }
-        };
-
-        if test_files.is_empty() {
-            return "No .test.luau files found.\r\n".to_string();
+            out.push_str(&format!("\r\n{} passed, {} failed\r\n", passed, failed));
+            return out;
         }
 
-        let mut out = String::new();
-        let mut total_passed = 0usize;
-        let mut total_failed = 0usize;
-
-        for tf in &test_files {
-            let world = if tf.is_lib {
-                None
-            } else {
-                Some(self.world.clone())
+        // `@test <file>` — run one named .test.luau file (needs game_dir).
+        if !arg.is_empty() {
+            let game_dir = match &self.game_dir {
+                Some(g) => g.clone(),
+                None => return "No game_dir configured.\r\n".to_string(),
             };
-
+            let game_path = std::path::Path::new(&game_dir);
+            let path = game_path.join(arg);
+            let source = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => return format!("Cannot read '{}': {}\r\n", arg, e),
+            };
+            let is_lib = path.starts_with(game_path.join("lib"));
+            let world = if is_lib { None } else { Some(self.world.clone()) };
             let result = self.softcode.run_tests(
-                &tf.source,
-                &tf.relative,
+                &source,
+                arg,
                 world.as_ref(),
+                None,
                 softcode::Budget::default(),
             );
+            Self::render_test_result(&mut out, arg, result, &mut passed, &mut failed);
+            out.push_str(&format!("\r\n{} passed, {} failed\r\n", passed, failed));
+            return out;
+        }
 
-            match result {
-                Ok(file_result) => {
-                    out.push_str(&format!("\r\n{}:\r\n", tf.relative));
-                    for tr in &file_result.tests {
-                        if tr.passed {
-                            total_passed += 1;
-                            out.push_str(&format!("  PASS {}\r\n", tr.name));
-                        } else {
-                            total_failed += 1;
-                            out.push_str(&format!(
-                                "  FAIL {} -- {}\r\n",
-                                tr.name,
-                                tr.error.as_deref().unwrap_or("?")
-                            ));
-                        }
-                    }
+        // `@test` (no args) — every .test.luau file (if a game_dir is
+        // configured) plus every object that defines embedded test_* functions.
+        if let Some(game_dir) = self.game_dir.clone() {
+            let game_path = std::path::Path::new(&game_dir);
+            for tf in crate::loader::discover_test_files(game_path) {
+                let world = if tf.is_lib { None } else { Some(self.world.clone()) };
+                let result = self.softcode.run_tests(
+                    &tf.source,
+                    &tf.relative,
+                    world.as_ref(),
+                    None,
+                    softcode::Budget::default(),
+                );
+                Self::render_test_result(&mut out, &tf.relative, result, &mut passed, &mut failed);
+            }
+        }
+        // Object sweep: run embedded tests on every scripted object, reporting
+        // only those that actually define test_* functions.
+        let mut scripted: Vec<String> = self
+            .world
+            .objects
+            .values()
+            .filter(|o| o.script.is_some())
+            .map(|o| o.ref_id.clone())
+            .collect();
+        scripted.sort();
+        for ref_id in scripted {
+            if let Some(result) = self.run_object_tests(&ref_id) {
+                if matches!(&result, Ok(fr) if fr.tests.is_empty()) {
+                    continue;
                 }
-                Err(e) => {
-                    total_failed += 1;
-                    out.push_str(&format!("\r\n{}: ERROR -- {}\r\n", tf.relative, e));
-                }
+                Self::render_test_result(
+                    &mut out,
+                    &format!("{} (embedded)", ref_id),
+                    result,
+                    &mut passed,
+                    &mut failed,
+                );
             }
         }
 
-        out.push_str(&format!(
-            "\r\n{} passed, {} failed\r\n",
-            total_passed, total_failed
-        ));
+        if out.is_empty() {
+            return "No tests found (.test.luau files or embedded test_* functions).\r\n"
+                .to_string();
+        }
+        out.push_str(&format!("\r\n{} passed, {} failed\r\n", passed, failed));
         out
     }
 
@@ -9078,7 +9188,7 @@ function test_math_bad()
 end
 ";
         let resp = engine.handle_api_request(
-            ApiRequest::RunTests { source: Some(source.into()), file: None },
+            ApiRequest::RunTests { source: Some(source.into()), file: None, ref_id: None },
             Some(token),
         );
         assert!(resp.ok, "{:?}", resp.error);
@@ -9088,6 +9198,52 @@ end
         let files = data["files"].as_array().unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0]["tests"].as_array().unwrap().len(), 2);
+    }
+
+    /// Tests co-located in an object's own script (`test_*` alongside the
+    /// hooks) run via `RunTests { ref_id }`, with `ctx.this` bound to that
+    /// object so its tests exercise itself.
+    #[test]
+    fn embedded_object_tests_run_with_this_bound() {
+        let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
+        let room = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&room, "room", Kind::Room));
+        let obj = engine.world.next_dbref();
+        let mut o = GameObject::new(&obj, "widget", Kind::Item).with_location(&room);
+        crate::softcode::hooks::set_script(
+            &mut o,
+            "function on_use(this, actor, room) end\n\
+             function test_this_is_the_object(ctx)\n\
+               local me = get_object(ctx.this)\n\
+               assert_eq(me.key, \"widget\")\n\
+             end\n\
+             function test_intentional_fail()\n\
+               assert_true(false)\n\
+             end\n"
+                .to_string(),
+        );
+        engine.world.add_object(o);
+
+        let resp = engine.handle_api_request(
+            ApiRequest::RunTests { source: None, file: None, ref_id: Some(obj.clone()) },
+            Some(token.clone()),
+        );
+        assert!(resp.ok, "{:?}", resp.error);
+        let data = resp.data.unwrap();
+        assert_eq!(data["passed"], 1, "the this-bound test passes");
+        assert_eq!(data["failed"], 1, "the intentional failure is reported");
+        let tests = data["files"][0]["tests"].as_array().unwrap();
+        assert!(tests.iter().any(|t| t["name"] == "test_this_is_the_object" && t["passed"] == true));
+        assert!(tests.iter().any(|t| t["name"] == "test_intentional_fail" && t["passed"] == false));
+
+        // An object with no script reports a clear error.
+        let bare = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&bare, "bare", Kind::Item));
+        let none = engine.handle_api_request(
+            ApiRequest::RunTests { source: None, file: None, ref_id: Some(bare) },
+            Some(token),
+        );
+        assert!(!none.ok);
     }
 
     #[test]
@@ -9166,7 +9322,7 @@ end
         // Builder-gated (see the auth block at the top of handle_api_request).
         let (mut engine, token, _) = engine_with_api_token(&[]);
         let resp = engine.handle_api_request(
-            ApiRequest::RunTests { source: Some("function test_x() end".into()), file: None },
+            ApiRequest::RunTests { source: Some("function test_x() end".into()), file: None, ref_id: None },
             Some(token),
         );
         assert!(!resp.ok);
