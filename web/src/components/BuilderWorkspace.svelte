@@ -201,9 +201,8 @@
     loading = false;
   }
 
-  // Inline "new library" creator (no file access — a builder authors a
-  // require()able module from here; the engine auto-creates the Code host).
-  let newLibOpen = $state(false);
+  // "New library" via the unified New menu (nKind === 'library') — no file
+  // access; the engine auto-creates the Code host and it's require()able.
   let newLibName = $state('');
   let creatingLib = $state(false);
   async function createLibrary() {
@@ -214,7 +213,7 @@
     creatingLib = false;
     if (res?.ok) {
       newLibName = '';
-      newLibOpen = false;
+      newOpen = false;
       await loadObjects();
       openLibTab(res.data.ref_id, res.data.name);
     } else {
@@ -377,40 +376,44 @@
     <!-- Left: explorer tree + view launchers -->
     <nav class="explorer">
       <div class="ex-top">
-        <button class="new-btn" onclick={() => (newOpen = !newOpen)} title="Create a new object">
-          <PlusIcon size={14} /> New object
+        <button class="new-btn" onclick={() => (newOpen = !newOpen)} title="Create a new object, library, or map">
+          <PlusIcon size={14} /> New
         </button>
       </div>
       {#if newOpen}
         <div class="new-form">
           <div class="nf-kinds">
-            {#each ['room', 'item', 'npc'] as k}
+            {#each ['room', 'item', 'npc', 'library', 'map'] as k}
               <button class="nf-kind" class:on={nKind === k} onclick={() => (nKind = k)}>{k}</button>
             {/each}
           </div>
-          <input class="nf-in" placeholder="key (e.g. crossroads)" bind:value={nKey}
-            onkeydown={(e) => e.key === 'Enter' && createObject()} />
-          <input class="nf-in" placeholder="title (optional)" bind:value={nTitle}
-            onkeydown={(e) => e.key === 'Enter' && createObject()} />
-          {#if nKind !== 'room'}
-            <div class="nf-hint">{obj?.kind === 'room' ? `in ${obj.title || obj.ref_id}` : 'no room selected — will be unplaced'}</div>
+          {#if nKind === 'map'}
+            <div class="nf-hint">Opens the map builder to create a new tile/terrain map.</div>
+            <div class="nf-actions">
+              <button class="nf-go" onclick={() => { newOpen = false; openTab({ type: 'maps' }); }}>Open map builder</button>
+              <button class="nf-x" onclick={() => (newOpen = false)}>Cancel</button>
+            </div>
+          {:else if nKind === 'library'}
+            <input class="nf-in" placeholder="library name (e.g. combat)" bind:value={newLibName}
+              onkeydown={(e) => e.key === 'Enter' && createLibrary()} />
+            <div class="nf-hint">Authored here, no file access — loaded with <code>require("name")</code>.</div>
+            <div class="nf-actions">
+              <button class="nf-go" disabled={creatingLib || !newLibName.trim()} onclick={createLibrary}>{creatingLib ? '…' : 'Create'}</button>
+              <button class="nf-x" onclick={() => (newOpen = false)}>Cancel</button>
+            </div>
+          {:else}
+            <input class="nf-in" placeholder="key (e.g. crossroads)" bind:value={nKey}
+              onkeydown={(e) => e.key === 'Enter' && createObject()} />
+            <input class="nf-in" placeholder="title (optional)" bind:value={nTitle}
+              onkeydown={(e) => e.key === 'Enter' && createObject()} />
+            {#if nKind !== 'room'}
+              <div class="nf-hint">{obj?.kind === 'room' ? `in ${obj.title || obj.ref_id}` : 'no room selected — will be unplaced'}</div>
+            {/if}
+            <div class="nf-actions">
+              <button class="nf-go" disabled={creating || !nKey.trim()} onclick={createObject}>{creating ? '…' : 'Create'}</button>
+              <button class="nf-x" onclick={() => (newOpen = false)}>Cancel</button>
+            </div>
           {/if}
-          <div class="nf-actions">
-            <button class="nf-go" disabled={creating || !nKey.trim()} onclick={createObject}>{creating ? '…' : 'Create'}</button>
-            <button class="nf-x" onclick={() => (newOpen = false)}>Cancel</button>
-          </div>
-        </div>
-      {/if}
-
-      {#if newLibOpen}
-        <div class="new-form">
-          <div class="nf-hint">New library — authored here, no file access. Loaded with <code>require("name")</code>.</div>
-          <input class="nf-in" placeholder="library name (e.g. combat)" bind:value={newLibName}
-            onkeydown={(e) => e.key === 'Enter' && createLibrary()} />
-          <div class="nf-actions">
-            <button class="nf-go" disabled={creatingLib || !newLibName.trim()} onclick={createLibrary}>{creatingLib ? '…' : 'Create'}</button>
-            <button class="nf-x" onclick={() => { newLibOpen = false; newLibName = ''; }}>Cancel</button>
-          </div>
         </div>
       {/if}
 
@@ -450,7 +453,7 @@
             onopenmap={(m) => openTab({ type: 'maps', name: m })}
             onnewmap={() => openTab({ type: 'maps' })}
             onopenlib={openLibTab}
-            onnewlib={() => (newLibOpen = true)}
+            onnewlib={() => { nKind = 'library'; newOpen = true; }}
           />
           {#if truncated}
             <div class="ex-trunc" role="status">Showing the first {objects.length} objects — filter to find the rest.</div>
