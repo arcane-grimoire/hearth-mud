@@ -581,6 +581,9 @@ impl Engine {
         // keys are locked, so a newly-added prefix takes effect on boot. See
         // `crate::loader::stamp_locked` and `docs/plans/archetypes.md`.
         crate::loader::stamp_locked(&mut world, &config.locked);
+        // Warn (non-fatally) about declared attrs whose values don't match
+        // their type — a builder mistake worth surfacing, never a boot blocker.
+        crate::loader::validate_attr_schemas(&world);
 
         // Resolve the spawn room to a dbref, creating a fallback room if
         // the configured key wasn't found anywhere.
@@ -3169,6 +3172,7 @@ impl Engine {
             "@unpuppet" => self.cmd_unpuppet(session_id),
 
             "@chown" => self.cmd_chown(session_id, &args),
+            "@archetype" | "@chparent" => self.cmd_archetype(session_id, &actor_ref, &args),
             "@dialogue" | "@dialog" => self.cmd_dialogue(session_id, &actor_ref, &args),
 
             // Admin commands
@@ -3299,6 +3303,50 @@ impl Engine {
         } else {
             "Target not found.\r\n".to_string()
         }
+    }
+
+    /// `@archetype <ref> <archetype-ref>` sets `<ref>`'s archetype (delegation);
+    /// `@archetype <ref> none` detaches it (flatten-then-stop). The telnet
+    /// counterpart of the builder's Set/Detach — same guards as the REST
+    /// `SetArchetype`/`DetachObject` handlers.
+    fn cmd_archetype(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
+        if !self.session_has_scope(session_id, Scope::Builder) {
+            return "Permission denied.\r\n".to_string();
+        }
+        let parts: Vec<&str> = args.split_whitespace().collect();
+        if parts.len() != 2 {
+            return "Usage: @archetype <ref> <archetype-ref>  (or: @archetype <ref> none)\r\n"
+                .to_string();
+        }
+        let target = self.resolve_object_ref(actor_ref, parts[0]);
+        if self.world.get(&target).is_none() {
+            return format!("No object with ref '{}'.\r\n", parts[0]);
+        }
+        if !self.can_modify_object(session_id, actor_ref, &target) {
+            return "Permission denied (not owner).\r\n".to_string();
+        }
+        // Setting/clearing delegation is an authoring edit — a locked,
+        // file-authoritative object refuses it, like @name/@describe.
+        if self.is_ref_locked(&target) {
+            return format!("{}\r\n", Self::locked_error(&target));
+        }
+        if parts[1].eq_ignore_ascii_case("none") {
+            return match softcode::detach_object(&mut self.world, &target) {
+                Ok(()) => format!("{} detached — no longer delegates.\r\n", target),
+                Err(e) => format!("{}\r\n", e),
+            };
+        }
+        let archetype = self.resolve_object_ref(actor_ref, parts[1]);
+        if self.world.get(&archetype).is_none() {
+            return format!("No archetype with ref '{}'.\r\n", parts[1]);
+        }
+        if self.world.would_cycle_archetype(&target, &archetype) {
+            return format!("'{}' would create an archetype cycle.\r\n", archetype);
+        }
+        if let Some(obj) = self.world.get_mut(&target) {
+            obj.archetype_ref = Some(archetype.clone());
+        }
+        format!("{} now delegates to {}.\r\n", target, archetype)
     }
 
     fn cmd_create(&mut self, session_id: &str, actor_ref: &str, args: &str) -> String {
@@ -4719,7 +4767,7 @@ impl Engine {
                 "@teleport", "@name", "@program", "@programs", "@rmprogram",
                 "@tag", "@untag", "@script", "@scripts", "@rmscript",
                 "@script-interval", "@lib", "@libs", "@rmlib",
-                "@lock", "@unlock", "@locks",
+                "@lock", "@unlock", "@locks", "@archetype",
                 "@dialogue", "@test", "@reload", "@puppet", "@unpuppet", "@chown",
             ].iter().map(|s| String::from(*s)));
         }
@@ -5227,6 +5275,7 @@ impl Engine {
                 // Re-apply config-driven locking to anything newly created or
                 // re-imported this reload.
                 crate::loader::stamp_locked(&mut self.world, &self.locked_prefixes);
+                crate::loader::validate_attr_schemas(&self.world);
                 self.fire_lifecycle_hook("on_reload");
 
                 let mut msg = String::new();

@@ -111,6 +111,82 @@ pub fn stamp_locked(world: &mut World, prefixes: &[String]) -> u32 {
     added + removed
 }
 
+/// Warn-only load-time validation: a declared attribute's actual value should
+/// match its declared type. Loud but **non-fatal** — a schema that lies (or an
+/// attr edited to the wrong shape) is a builder mistake worth surfacing, never
+/// a reason to refuse boot. See `docs/plans/attribute-schema.md`. Called at boot
+/// and on `@reload-world`.
+pub fn validate_attr_schemas(world: &World) {
+    for issue in collect_attr_schema_issues(world) {
+        tracing::warn!("{}", issue);
+    }
+}
+
+/// Testable core of [`validate_attr_schemas`]: one issue string per (object,
+/// attr) mismatch. Checks each object's **own** attrs (`obj.attrs`) against its
+/// resolved schema, so a bad value is reported once — at the object that holds
+/// it — not re-warned on every inheriting instance.
+fn collect_attr_schema_issues(world: &World) -> Vec<String> {
+    use crate::attr_schema::AttrType;
+    let mut issues = Vec::new();
+    for obj in world.objects.values() {
+        for (desc, _src) in world.resolved_attr_schema(obj) {
+            let Some(value) = obj.attrs.get(&desc.key) else {
+                continue;
+            };
+            let who = obj
+                .attrs
+                .get(FILE_KEY_ATTR)
+                .and_then(|v| v.as_str())
+                .unwrap_or(obj.ref_id.as_str());
+            let base_ok = |ty: &AttrType, v: &serde_json::Value| match ty {
+                AttrType::Int => v.is_i64() || v.is_u64(),
+                AttrType::Float => v.is_number(),
+                AttrType::Bool => v.is_boolean(),
+                AttrType::String | AttrType::Text | AttrType::Color | AttrType::Ref | AttrType::Enum => {
+                    v.is_string()
+                }
+                AttrType::List => v.is_array(),
+                AttrType::Unknown(_) => true,
+            };
+            if !base_ok(&desc.ty, value) {
+                issues.push(format!(
+                    "attr schema: {who} attr '{}' = {value} — expected {}",
+                    desc.key,
+                    desc.ty.tag()
+                ));
+                continue;
+            }
+            // Enum: the (string) value must be one of the declared options.
+            if matches!(desc.ty, AttrType::Enum)
+                && !desc.values.is_empty()
+                && let Some(s) = value.as_str()
+                && !desc.values.iter().any(|v| v == s)
+            {
+                issues.push(format!(
+                    "attr schema: {who} attr '{}' = {s:?} — not one of {:?}",
+                    desc.key, desc.values
+                ));
+            }
+            // List: each element should match the declared item type.
+            if let (AttrType::List, Some(item), Some(arr)) =
+                (&desc.ty, &desc.item_type, value.as_array())
+            {
+                for (i, el) in arr.iter().enumerate() {
+                    if !base_ok(item, el) {
+                        issues.push(format!(
+                            "attr schema: {who} attr '{}'[{i}] = {el} — expected {}",
+                            desc.key,
+                            item.tag()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    issues
+}
+
 /// Attr key used to remember an object's `"<area>/<key>"` file identity, so
 /// reloads can find the same managed object again without relying on a
 /// stable ref_id (dbrefs are assigned once, at first creation).
@@ -1899,6 +1975,44 @@ archetype = "loop/a"
         let monster = world.get(result.key_map.get("std/monster").unwrap()).unwrap();
         assert!(!monster.tags.contains(&locked), "std/* object is unlocked after prefix removal");
         assert_eq!(stamp_locked(&mut world, &[]), 0, "already unlocked — no further change");
+    }
+
+    /// Attr-schema validation flags a value whose type (or enum membership)
+    /// doesn't match its descriptor, and stays quiet for a correct value.
+    #[test]
+    fn attr_schema_validation_flags_type_mismatches() {
+        use crate::attr_schema::{AttrDescriptor, AttrType};
+        let mut world = World::new();
+
+        let bad = world.next_dbref();
+        let mut o = GameObject::new(&bad, "goblin", Kind::Npc);
+        let mut biome = AttrDescriptor::new("biome", AttrType::Enum);
+        biome.values = vec!["arid".into(), "alpine".into()];
+        o.attr_schema = vec![AttrDescriptor::new("hp", AttrType::Int), biome];
+        o.attrs.insert("hp".into(), serde_json::json!("three")); // int declared, string given
+        o.attrs.insert("biome".into(), serde_json::json!("swamp")); // not in the set
+        world.add_object(o);
+
+        let issues = collect_attr_schema_issues(&world);
+        assert!(
+            issues.iter().any(|i| i.contains("'hp'") && i.contains("expected int")),
+            "type mismatch flagged: {issues:?}"
+        );
+        assert!(
+            issues.iter().any(|i| i.contains("'biome'") && i.contains("not one of")),
+            "enum-out-of-set flagged: {issues:?}"
+        );
+
+        // A correct value produces no issue for that object.
+        let good = world.next_dbref();
+        let mut g = GameObject::new(&good, "ok", Kind::Npc);
+        g.attr_schema = vec![AttrDescriptor::new("hp", AttrType::Int)];
+        g.attrs.insert("hp".into(), serde_json::json!(9));
+        world.add_object(g);
+        assert!(
+            !collect_attr_schema_issues(&world).iter().any(|i| i.contains(&good)),
+            "a correct value must not be flagged"
+        );
     }
 
     /// A file change that an in-game edit shadows must be surfaced (never
