@@ -87,7 +87,8 @@ src/
   main.rs              tokio entrypoint, wires engine + telnet + web
   accounts.rs          Account, Scope (player/builder/admin), AccountStore
   ansi.rs              BBCode-style markup helpers (room_title, exit_list, etc.)
-  cli.rs               Command-line client (hearth eval/program/import/export)
+  cli.rs               Command-line client (hearth eval/program/import/export/session-test)
+  session_test.rs      In-process .session E2E runner (drives the real session handler)
   import_export.rs     Bundle install/emit — @import, @export, three-way upgrade
   markup.rs            BBCode → ANSI (telnet) and BBCode → HTML (web) converters
   config.rs            hearth.toml deserialization
@@ -170,6 +171,7 @@ docs/
 - **Lock DSL** — perm(), has_tag(), has_attr(), in_inventory(), is_kind(), is_owner(), time_between(), AND/OR/NOT
 - **Timers** — `after(ticks, ref, hook, data?)` with DB persistence, `cancel_after()`, `get_timers()`, data payloads
 - **Softcode testing** — `.test.luau` files *or* `test_*` functions co-located in an object's own script (run against itself via `@test #<ref>` / REST `RunTests {ref_id}`, `ctx.this` bound to the object); assert_eq/assert_true/etc., unit mode (lib modules) and integration mode (full API + world); `@test` (no arg) runs every `.test.luau` file (embedded object tests are run per-object, not swept); `cargo test` harness
+- **Session testing (E2E)** — `.session` script files drive the REAL telnet session handler in-process (no socket): login/account flow, command dispatch, prompt/dialogue routing, and the renderer — the wire-level paths `.test.luau` can't reach (a green Luau test while a command crashes on spawn, or gets swallowed as dialogue input). A file is alternating `> <input>` lines and `expect:`/`expect-not:` assertions (substring, or `/regex/`) matched against the plain-text a player reads (`markup::to_plain`). Deterministic without sleeps — an `ApiRequest` fence guarantees each input's output is drained before the next (input-driven flows; tick/timer output is a follow-up). Run from the CLI (`hearth session-test <file>... [--config PATH] [--db PATH]`, building an engine in-process — no server needed) or in CI (the `tests/session_test.rs` glob runs `tests/fixtures/*.session` plus any `.session` files under the game's `game_dir`). `src/session_test.rs`.
 - **Ticks** — 1s global heartbeat, per-object on_tick with persistent state, global scripts
 - **Visibility** — system:hidden tag + can_see hook
 - **Global commands** — system:global tag on objects makes their cmd_ hooks available everywhere
@@ -308,6 +310,11 @@ world (1), game_smoke (1, loads the real Last Stag world).
 
 Softcode tests also discover and run `*.test.luau` files from the game
 directory (21 Luau tests across str and collections modules).
+
+The `session_test` integration test drives the real session handler over
+`.session` scripts: `tests/fixtures/*.session` always, plus any `.session`
+files under the game's `game_dir` when the sibling repo is checked out. The
+same runner backs `hearth session-test <file>...` for CLI/local use.
 
 ```sh
 cargo test                    # all

@@ -76,6 +76,38 @@ pub fn to_ansi(text: &str) -> String {
     out
 }
 
+/// Strip BBCode-style markup to plain text — drop the tags, keep the visible
+/// content (so `[cmd=go north]north[/cmd]` becomes `north`). Used by the
+/// session-test runner to match `expect:` patterns against what a player reads,
+/// not the wire encoding. Unknown `[...]` runs are left literal, mirroring
+/// `to_ansi`.
+pub fn to_plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.char_indices();
+
+    while let Some((i, ch)) = chars.next() {
+        if ch != '[' {
+            out.push(ch);
+            continue;
+        }
+        if let Some(end) = text[i + 1..].find(']') {
+            let tag = &text[i + 1..i + 1 + end];
+            let recognized = tag == "/"
+                || tag == "/cmd"
+                || tag.starts_with("cmd=")
+                || find_tag(tag).is_some()
+                || tag.strip_prefix('/').is_some_and(|n| find_tag(n).is_some());
+            if recognized {
+                advance(&mut chars, end + 1);
+                continue;
+            }
+        }
+        out.push('[');
+    }
+
+    out
+}
+
 /// Convert BBCode-style markup to HTML spans for the web client.
 /// Strips telnet IAC sequences and converts raw ANSI escape sequences
 /// that softcode may produce.
@@ -235,6 +267,15 @@ mod tests {
         let input = "[b][cyan]Hello[/]";
         let ansi = to_ansi(input);
         assert_eq!(ansi, "\x1b[1m\x1b[36mHello\x1b[0m");
+    }
+
+    #[test]
+    fn bbcode_to_plain_strips_tags_keeps_text() {
+        assert_eq!(to_plain("[b][cyan]Hello[/]"), "Hello");
+        // cmd tags drop, the clickable label survives.
+        assert_eq!(to_plain("go [cmd=go north]north[/cmd] now"), "go north now");
+        // Unknown bracket runs are left literal (mirrors to_ansi).
+        assert_eq!(to_plain("a [not a tag] b"), "a [not a tag] b");
     }
 
     #[test]

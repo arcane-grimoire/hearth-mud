@@ -1,0 +1,14 @@
+# Framework smoke: driving the real telnet session handler in-process.
+# Account creation must reach the world, and `look` must render the room.
+# Uses only the bare framework world (a fallback spawn room) — no game content.
+
+> create
+> tester
+> secretpass
+> secretpass
+expect: Account created
+
+# In the world now: look should render the fallback spawn room, not an error.
+> look
+expect: Spawn
+expect-not: Unknown command

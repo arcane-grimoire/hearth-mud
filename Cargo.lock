@@ -778,6 +778,7 @@ dependencies = [
  "noise",
  "password-hash",
  "rand 0.8.7",
+ "regex",
  "rusqlite",
  "rust-embed",
  "serde",

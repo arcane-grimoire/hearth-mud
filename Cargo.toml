@@ -33,6 +33,7 @@ blake3 = "1"
 similar = "2"
 ureq = { version = "2", features = ["json"] }
 full_moon = { version = "2.2.0", features = ["luau"] }
+regex = "1"
 
 [dev-dependencies]
 criterion = "0.5"

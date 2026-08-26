@@ -34,6 +34,10 @@ Subcommands:
                                      <path> is resolved on the SERVER's filesystem.
   export <path>                     Write DB-owned content back to files.
                                      <path> is resolved on the SERVER's filesystem.
+  session-test <file.session>...    Run end-to-end .session scripts in-process
+                                     (no server needed). Flags: --config PATH
+                                     (game config, default hearth.toml), --db PATH
+                                     (a world DB to run against; default in-memory).
 
 Connection (flags go after the subcommand, and may appear in any order):
   --addr HOST:PORT   Server address (default: localhost:8000)
@@ -57,7 +61,7 @@ Usage: hearth program <get|set> <ref> [FILE] [--addr ...] [--token ...]
 /// isn't a file" so back-compat is a property of this list, not of what
 /// happens to exist on disk.
 pub fn is_known_subcommand(name: &str) -> bool {
-    matches!(name, "eval" | "program" | "import" | "export")
+    matches!(name, "eval" | "program" | "import" | "export" | "session-test")
 }
 
 /// Entry point from `main.rs`. `args` is the full argv tail, e.g.
@@ -70,6 +74,7 @@ pub fn run(args: &[String]) -> i32 {
         Some("program") => cmd_program(&args[1..]),
         Some("import") => cmd_import(&args[1..]),
         Some("export") => cmd_export(&args[1..]),
+        Some("session-test") => cmd_session_test(&args[1..]),
         _ => {
             eprintln!("{}", USAGE);
             2
@@ -439,6 +444,115 @@ fn cmd_program_set(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+const SESSION_TEST_USAGE: &str = "\
+Usage: hearth session-test <file.session>... [--config PATH] [--db PATH]
+
+Run end-to-end .session scripts against a real engine, in-process (no running
+server). Each file drives the actual telnet session handler — login, command
+dispatch, prompt/dialogue routing, and the renderer — and asserts on the text
+a player would read.
+
+  --config PATH   Game config to read game_dir/spawn_room/locked from
+                  (default: hearth.toml). Determines which world loads.
+  --db PATH       Run against this world database instead of a throwaway
+                  in-memory one. WARNING: the run mutates it (creates an
+                  account, spawns a player, moves through the world).
+
+Exit code: 0 if every file passes, 1 if any assertion fails, 2 on a usage,
+parse, or I/O error.";
+
+/// `hearth session-test <file>...` — build an engine in-process (no server)
+/// and run each `.session` script against it. Unlike the other subcommands
+/// this is not an HTTP client: it constructs the engine directly, so it needs
+/// only a game config (for `game_dir`) and an optional world DB.
+fn cmd_session_test(args: &[String]) -> i32 {
+    let mut config_path = "hearth.toml".to_string();
+    let mut db_path: Option<String> = None;
+    let mut files: Vec<String> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--config" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => config_path = v.clone(),
+                    None => {
+                        eprintln!("--config needs a path\n\n{}", SESSION_TEST_USAGE);
+                        return 2;
+                    }
+                }
+            }
+            "--db" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => db_path = Some(v.clone()),
+                    None => {
+                        eprintln!("--db needs a path\n\n{}", SESSION_TEST_USAGE);
+                        return 2;
+                    }
+                }
+            }
+            "-h" | "--help" => {
+                println!("{}", SESSION_TEST_USAGE);
+                return 0;
+            }
+            other => files.push(other.to_string()),
+        }
+        i += 1;
+    }
+
+    if files.is_empty() {
+        eprintln!("{}", SESSION_TEST_USAGE);
+        return 2;
+    }
+
+    let config = Config::load(std::path::Path::new(&config_path));
+    let db_arg = db_path.as_deref().map(std::path::Path::new);
+
+    let mut total_files = 0;
+    let mut failed_files = 0;
+    for file in &files {
+        total_files += 1;
+        match crate::session_test::run_file_blocking(&config, db_arg, std::path::Path::new(file)) {
+            Ok(outcome) => {
+                if outcome.passed() {
+                    println!("  PASS {} ({} checks)", file, outcome.checks);
+                } else {
+                    failed_files += 1;
+                    println!(
+                        "  FAIL {} ({}/{} checks failed)",
+                        file,
+                        outcome.failures.len(),
+                        outcome.checks
+                    );
+                    for f in &outcome.failures {
+                        let verb = if f.negate { "expect-not" } else { "expect" };
+                        println!("    line {}: {} {} did not hold", f.line, verb, f.pattern);
+                        println!("      --- output searched (plain text) ---");
+                        for line in f.window.lines() {
+                            println!("      {}", line);
+                        }
+                        println!("      -------------------------------------");
+                    }
+                }
+            }
+            Err(e) => {
+                failed_files += 1;
+                eprintln!("  ERROR {}: {}", file, e);
+            }
+        }
+    }
+
+    println!(
+        "\n{} passed, {} failed ({} files)",
+        total_files - failed_files,
+        failed_files,
+        total_files
+    );
+    if failed_files > 0 { 1 } else { 0 }
 }
 
 #[cfg(test)]

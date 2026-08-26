@@ -27,6 +27,7 @@ pub mod map_template;
 pub mod markup;
 pub mod net;
 pub mod noise;
+pub mod session_test;
 pub mod softcode;
 pub mod theme;
 pub mod world;
