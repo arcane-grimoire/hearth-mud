@@ -1376,6 +1376,14 @@ const MODULE_LOADING_KEY: &str = "_hearth_module_loading";
 /// modules — see `install_require` and `docs/plans/program-authoring.md`
 /// Stage 2.
 pub(crate) const USER_LIB_SOURCES_KEY: &str = "_hearth_user_lib_sources";
+/// The per-hook environment of the hook run currently executing (see
+/// `run_hook_level`), or absent when no hook is running. A `require`d module's
+/// `_ENV.__index` resolves free names against this, so a module function can
+/// call the per-script API (`emit`, `ink_*`, `grid_move`, …) — which lives on
+/// the per-hook env, not `globals()` — of whatever run is calling it. Set/
+/// restored around each `run_hook_level` body so nested `pass()` levels unwind
+/// correctly; with no active hook, module lookups fall back to `globals()`.
+const CURRENT_HOOK_ENV_KEY: &str = "_hearth_current_hook_env";
 
 /// Level-invariant context for one hook run — the same `this`/`actor`/
 /// `room`, world, and shared machinery whether [`SoftcodeRuntime::run_hook`]
@@ -1487,7 +1495,21 @@ impl SoftcodeRuntime {
                 let chunk = lua.load(&source).set_name(&name).into_function()?;
                 let env = lua.create_table()?;
                 let mt = lua.create_table()?;
-                mt.set("__index", lua.globals())?;
+                // Resolve a module's free names against the CURRENT hook env
+                // (which itself chains to globals), so module functions can
+                // reach the per-script API installed there — `emit`, `ink_*`,
+                // `grid_move`, etc. — of whatever run calls them. With no hook
+                // running (e.g. a unit-mode test), fall back to globals, so
+                // pure compute-only modules behave exactly as before.
+                let index_fn = lua.create_function(|lua, (_t, key): (mlua::Table, LuaValue)| {
+                    let hook_env: LuaValue =
+                        lua.named_registry_value(CURRENT_HOOK_ENV_KEY)?;
+                    match hook_env {
+                        LuaValue::Table(env) => env.get::<LuaValue>(key),
+                        _ => lua.globals().get::<LuaValue>(key),
+                    }
+                })?;
+                mt.set("__index", index_fn)?;
                 env.set_metatable(Some(mt));
                 chunk.set_environment(env)?;
 
@@ -1880,44 +1902,66 @@ impl SoftcodeRuntime {
             .get_or_compile(&script.source, &ctx.hook)
             .map_err(|e| e.clone())?;
         compiled.set_environment(env.clone())?;
-        compiled.call::<()>(())?;
 
-        let func: Option<mlua::Function> = env.get(ctx.hook.as_str())?;
-        let func = match func {
-            Some(f) => f,
-            None => return Ok(LuaValue::Nil),
-        };
+        // Publish this run's env as the current hook env for the duration of
+        // the body, so `require`d modules resolve the per-script API against it
+        // (see CURRENT_HOOK_ENV_KEY). Save on entry and restore on every exit
+        // — including errors and the early `return` — so nested `pass()` levels
+        // unwind to their caller's env. A hook that runs no module code is
+        // unaffected.
+        let prev_hook_env: LuaValue = self
+            .lua
+            .named_registry_value(CURRENT_HOOK_ENV_KEY)
+            .unwrap_or(LuaValue::Nil);
+        self.lua.set_named_registry_value(CURRENT_HOOK_ENV_KEY, &env)?;
 
-        let this_val = api::object_to_value(&self.lua, ctx.world, &ctx.this_ref, Some(&obj_mt))?;
+        let run = || -> mlua::Result<LuaValue> {
+            compiled.call::<()>(())?;
 
-        if ctx.is_tick {
-            let state_tbl = ctx
-                .state_tbl
-                .clone()
-                .expect("on_tick run must carry a state table");
-            let room_val = match ctx.room_ref.as_deref().or(ctx.default_location.as_deref()) {
-                Some(r) => api::object_to_value(&self.lua, ctx.world, r, Some(&obj_mt))?,
-                None => LuaValue::Nil,
+            let func: Option<mlua::Function> = env.get(ctx.hook.as_str())?;
+            let func = match func {
+                Some(f) => f,
+                None => return Ok(LuaValue::Nil),
             };
-            func.call::<LuaValue>((this_val, state_tbl, room_val))
-        } else {
-            let actor_val = api::object_to_value(&self.lua, ctx.world, &ctx.actor_ref, Some(&obj_mt))?;
-            let room_val = match ctx.room_ref.as_deref().or(ctx.default_location.as_deref()) {
-                Some(r) => api::object_to_value(&self.lua, ctx.world, r, Some(&obj_mt))?,
-                None => LuaValue::Nil,
-            };
-            // A triggered hook's structured `data` becomes the 4th arg (a real
-            // Lua table); otherwise a command hook's `args` string does.
-            if let Some(data) = &ctx.data {
-                let data_val = self.lua.to_value(data)?;
-                func.call::<LuaValue>((this_val, actor_val, room_val, data_val))
+
+            let this_val =
+                api::object_to_value(&self.lua, ctx.world, &ctx.this_ref, Some(&obj_mt))?;
+
+            if ctx.is_tick {
+                let state_tbl = ctx
+                    .state_tbl
+                    .clone()
+                    .expect("on_tick run must carry a state table");
+                let room_val = match ctx.room_ref.as_deref().or(ctx.default_location.as_deref()) {
+                    Some(r) => api::object_to_value(&self.lua, ctx.world, r, Some(&obj_mt))?,
+                    None => LuaValue::Nil,
+                };
+                func.call::<LuaValue>((this_val, state_tbl, room_val))
             } else {
-                match args {
-                    Some(a) => func.call::<LuaValue>((this_val, actor_val, room_val, a)),
-                    None => func.call::<LuaValue>((this_val, actor_val, room_val)),
+                let actor_val =
+                    api::object_to_value(&self.lua, ctx.world, &ctx.actor_ref, Some(&obj_mt))?;
+                let room_val = match ctx.room_ref.as_deref().or(ctx.default_location.as_deref()) {
+                    Some(r) => api::object_to_value(&self.lua, ctx.world, r, Some(&obj_mt))?,
+                    None => LuaValue::Nil,
+                };
+                // A triggered hook's structured `data` becomes the 4th arg (a
+                // real Lua table); otherwise a command hook's `args` string does.
+                if let Some(data) = &ctx.data {
+                    let data_val = self.lua.to_value(data)?;
+                    func.call::<LuaValue>((this_val, actor_val, room_val, data_val))
+                } else {
+                    match args {
+                        Some(a) => func.call::<LuaValue>((this_val, actor_val, room_val, a)),
+                        None => func.call::<LuaValue>((this_val, actor_val, room_val)),
+                    }
                 }
             }
-        }
+        };
+
+        let result = run();
+        self.lua
+            .set_named_registry_value(CURRENT_HOOK_ENV_KEY, prev_hook_env)?;
+        result
     }
 
     /// Run a one-shot `@eval` script — an admin running arbitrary Luau
@@ -4120,6 +4164,58 @@ mod tests {
         assert_eq!(
             world.get("#5").unwrap().attrs.get("val").unwrap(),
             &serde_json::json!(10)
+        );
+    }
+
+    #[test]
+    fn required_module_can_call_per_script_api() {
+        // A `require`d module's functions must be able to reach the per-script
+        // API (set_attr/emit/ink_*/grid_move/…), which lives on the per-hook
+        // env, not globals. This is the contract dialog.luau depends on. Before
+        // the current-hook-env indirection, `set_attr` resolved to nil inside a
+        // module and the call errored with "attempt to call a nil value".
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let mut modules = HashMap::new();
+        modules.insert(
+            "writer".into(),
+            r#"
+                local M = {}
+                function M.stamp(ref) set_attr(ref, "stamped", true) end
+                return M
+            "#
+            .into(),
+        );
+        runtime.load_modules(modules);
+
+        let program = TestProgram::new(
+            "on_get",
+            r#"
+                function on_get(this, actor, room)
+                    require("writer").stamp(this)
+                end
+            "#,
+        );
+
+        let result = runtime
+            .run_hook_rec(
+                &world,
+                &program,
+                "#5",
+                "#3",
+                Some("#1"),
+                None,
+                Budget::default(),
+                counter(&world),
+                &test_themes(), &test_map_templates(), &[], 0,
+            )
+            .expect("hook should run without a nil-API error");
+
+        let mut world = world;
+        apply_batch(&mut world, &result.batch).unwrap();
+        assert_eq!(
+            world.get("#5").unwrap().attrs.get("stamped").unwrap(),
+            &serde_json::json!(true)
         );
     }
 
