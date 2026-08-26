@@ -7,7 +7,62 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
-Nothing yet.
+### Added
+
+- **Content migrations** (`hearth migrate`). The loader keys a managed object's
+  identity off its `_file_key`, so renaming or moving a file-key silently
+  orphans the old object and builds a duplicate — a restructure that renames
+  every key duplicates the whole world at the next deploy. Migrations fix
+  identity in the database *before* the loader reconciles file content against
+  it: forward-only, tracked (a `migrations` table records applied revisions, so
+  a run is idempotent and safe to redeploy) declarative rename/remove operations
+  in `<game_root>/migrations/<revision>_<slug>.toml`. Within one migration,
+  `remove`s apply before `rename`s (clear a duplicated key, then rename onto it);
+  a rename onto a still-occupied key is a hard error, and planning runs before
+  any mutation, so a migration applies fully or leaves the world untouched. Only
+  objects carrying a `_file_key` are touched, so player-created content is safe
+  by construction. Runs in-process with no server (like `session-test`), as an
+  explicit deploy step rather than a silent boot mutation. See
+  `docs/migrations.md`.
+
+### Performance
+
+- **Single-writer engine no longer scales spatial queries with world size.**
+  The engine processes every message serially in one task, so the cost of one
+  command is what every other player waits behind; three of those costs scaled
+  with total world size *N* rather than the work at hand, and this removes them
+  without touching the single-writer model.
+
+  - **A location (children) index.** `World` now keeps a `location → {refs}` map,
+    maintained incrementally through `add_object`/`remove_object` and a single
+    `relocate()` funnel (the one correct way to change an in-world object's
+    location). Room contents, inventory, container listings, and exit lookups
+    (`objects_in`/`exits_from`/`find_exit`) go from full-world scans to
+    O(occupants). A `look` in a small room used to touch every object in the
+    world; now it touches the room.
+  - **A structural epoch decoupled from the save version.** An ordinary move or
+    attribute write no longer invalidates the derived indexes (tickables /
+    globals-by-hook / troupes). A new `struct_version` bumps only when tags,
+    scripts, archetypes, or `tick_interval` change; the derived cache keys on it.
+    Previously a single mutation rebuilt the whole index — one `go` forced two
+    full rebuilds — because `get_mut` bumped the version unconditionally.
+  - **Global command dispatch** (`dispatch_fallback`, `send_commands`) resolves
+    through the `globals_by_hook` index instead of scanning every object by
+    resolved tags on every custom command.
+  - **`format_look`** tallies troupe sizes in a single pass rather than one
+    full-world scan per player in the room.
+
+- **Autosave no longer stalls the writer on a per-commit fsync.** The SQLite
+  connection now runs `synchronous=NORMAL` under WAL (plus a `busy_timeout`),
+  the correct durability point for a checkpoint-only store whose live world is
+  in memory: fsync happens at checkpoint rather than on every commit, and a
+  save (which runs synchronously in the engine task) no longer blocks it on
+  disk.
+
+### Fixed
+
+- The softcode benchmark suite (`benches/softcode.rs`) had drifted out of sync
+  with a `run_hook` signature change and no longer compiled; restored.
 
 ## 0.1.0-rc.7 — 2026-08-23
 

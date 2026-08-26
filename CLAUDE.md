@@ -153,6 +153,7 @@ docs/
   archetypes.md        Archetypes guide (is-a delegation, file-based types, hot-reload)
   commands.md          Command reference
   getting-started.md   Getting started guide
+  migrations.md        Content migrations guide (hearth migrate, rename/remove file-keys)
   softcode-guide.md    Softcode programming guide
 ```
 
