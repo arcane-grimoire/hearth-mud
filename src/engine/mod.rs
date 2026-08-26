@@ -584,7 +584,7 @@ use crate::softcode::ScheduledHook;
 
 impl Engine {
     pub fn new(rx: mpsc::UnboundedReceiver<EngineMessage>, db: Database, config: &Config) -> Self {
-        let (mut world, accounts) = if db.has_world_data() {
+        let (mut world, mut accounts) = if db.has_world_data() {
             let world = db.load_world().expect("Failed to load world from DB");
             let accounts = db.load_accounts().expect("Failed to load accounts from DB");
             tracing::info!(
@@ -596,6 +596,35 @@ impl Engine {
             tracing::info!("Fresh world initialized");
             (World::new(), AccountStore::new())
         };
+
+        // Bootstrap admin: on a truly fresh store (no accounts yet), seed the
+        // first account from `HEARTH_ADMIN_USER` / `HEARTH_ADMIN_PASSWORD` if
+        // both are set. Because the store is empty, `create` grants it the
+        // admin/builder/player scopes automatically — no separate scope path.
+        // This makes an unattended deploy (container/Fly) come up with a usable
+        // admin without anyone having to race to the login screen. It never
+        // touches an existing deployment's accounts: the moment any account
+        // exists, this is skipped. See CLAUDE.md "First account created gets
+        // admin/builder/player scopes."
+        if accounts.is_empty() {
+            match (std::env::var("HEARTH_ADMIN_USER"), std::env::var("HEARTH_ADMIN_PASSWORD")) {
+                (Ok(user), Ok(pass)) if !user.is_empty() && !pass.is_empty() => {
+                    match accounts.create(&user, &pass) {
+                        Ok(account) => {
+                            tracing::info!(username = %account.username, "Seeded bootstrap admin account from environment");
+                            if let Err(e) = db.save_accounts(&accounts) {
+                                tracing::error!(error = %e, "Failed to persist seeded admin account");
+                            }
+                        }
+                        Err(e) => tracing::error!(error = %e, "HEARTH_ADMIN_USER/PASSWORD set but admin seed failed"),
+                    }
+                }
+                (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
+                    tracing::warn!("Only one of HEARTH_ADMIN_USER / HEARTH_ADMIN_PASSWORD is set; skipping admin seed (both are required)");
+                }
+                _ => {}
+            }
+        }
 
         // Always load/reload game files — new content is created,
         // managed content is updated, non-managed content is untouched.
@@ -7720,6 +7749,29 @@ mod tests {
         });
         let handle = tokio::spawn(engine.run());
         (tx, handle)
+    }
+
+    #[test]
+    fn seeds_bootstrap_admin_from_env_on_fresh_store() {
+        // SAFETY: single-threaded within this test; unique var names not read
+        // by other tests. Edition 2024 marks env mutation unsafe.
+        unsafe {
+            std::env::set_var("HEARTH_ADMIN_USER", "bootadmin");
+            std::env::set_var("HEARTH_ADMIN_PASSWORD", "bootpass123");
+        }
+        let db = crate::db::Database::open(Path::new(":memory:")).unwrap();
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let engine = Engine::new(rx, db, &Config::default());
+        unsafe {
+            std::env::remove_var("HEARTH_ADMIN_USER");
+            std::env::remove_var("HEARTH_ADMIN_PASSWORD");
+        }
+        let admin = engine
+            .accounts
+            .get_by_username("bootadmin")
+            .expect("bootstrap admin should be seeded");
+        assert!(admin.scopes.contains(&Scope::Admin));
+        assert!(admin.scopes.contains(&Scope::Builder));
     }
 
     async fn api_call(tx: &mpsc::UnboundedSender<EngineMessage>, req: ApiRequest) -> ApiResponse {

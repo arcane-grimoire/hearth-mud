@@ -26,7 +26,11 @@ cd web && npm run dev                        # dev server (port 5173, proxies to
 cd web && npm run build                      # production build to web/dist/
 ```
 
-First account created gets admin/builder/player scopes.
+First account created gets admin/builder/player scopes. For unattended
+deploys, set `HEARTH_ADMIN_USER` and `HEARTH_ADMIN_PASSWORD` in the environment:
+on a fresh store (no accounts yet) the engine seeds that first admin account at
+boot. It's skipped the moment any account exists, so it never touches an
+existing deployment.
 
 ## Dev workflow
 
