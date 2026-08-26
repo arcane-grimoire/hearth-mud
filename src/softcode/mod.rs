@@ -2409,18 +2409,43 @@ impl SoftcodeRuntime {
                     .get_or_compile(source, file_name)
                     .map_err(|e| e.clone())?;
                 compiled.set_environment(env.clone())?;
-                compiled.call::<()>(())?;
 
-                let func: mlua::Function = env.get(test_name.as_str())?;
-
-                if world.is_some() {
-                    let ctx: mlua::Table = env.get("ctx")?;
-                    func.call::<()>(ctx)?;
+                // Run integration tests under the SAME module boundary as live
+                // hooks: publish the test env as the current hook env (see
+                // CURRENT_HOOK_ENV_KEY) so a module required inside a test can
+                // reach the per-script API, matching run_hook_level — otherwise
+                // a .test.luau for module code that calls the API would get a
+                // false nil-API failure. Unit mode (no world) has no API to
+                // expose, so its modules stay globals-only, as before.
+                let publish = world.is_some();
+                let prev_hook_env: LuaValue = if publish {
+                    let prev = self
+                        .lua
+                        .named_registry_value(CURRENT_HOOK_ENV_KEY)
+                        .unwrap_or(LuaValue::Nil);
+                    self.lua.set_named_registry_value(CURRENT_HOOK_ENV_KEY, &env)?;
+                    prev
                 } else {
-                    func.call::<()>(())?;
-                }
+                    LuaValue::Nil
+                };
 
-                Ok(())
+                let run: mlua::Result<()> = (|| {
+                    compiled.call::<()>(())?;
+                    let func: mlua::Function = env.get(test_name.as_str())?;
+                    if world.is_some() {
+                        let ctx: mlua::Table = env.get("ctx")?;
+                        func.call::<()>(ctx)?;
+                    } else {
+                        func.call::<()>(())?;
+                    }
+                    Ok(())
+                })();
+
+                if publish {
+                    self.lua
+                        .set_named_registry_value(CURRENT_HOOK_ENV_KEY, prev_hook_env)?;
+                }
+                run
             });
 
             self.lua.remove_interrupt();
@@ -5154,6 +5179,51 @@ mod tests {
             .expect("test runner should not error");
 
         assert_eq!(result.passed(), 2);
+        assert_eq!(result.failed(), 0);
+    }
+
+    #[test]
+    fn integration_test_module_reaches_per_script_api() {
+        // Parity with live hooks: a module `require`d inside a .test.luau must
+        // reach the per-script API too, else a game author testing module code
+        // that calls the API (dialog.luau, get_exits→grid_can_move) gets a
+        // false nil-API failure. The integration runner is its own path from
+        // run_hook_level, so it needs its own regression.
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let mut modules = HashMap::new();
+        modules.insert(
+            "apihelper".into(),
+            r#"
+                local M = {}
+                function M.probe(ref)
+                    set_attr(ref, "seen", true)
+                    return type(set_attr)
+                end
+                return M
+            "#
+            .into(),
+        );
+        runtime.load_modules(modules);
+
+        let result = runtime
+            .run_tests(
+                r#"
+                    function test_module_reaches_api(ctx)
+                        local M = require("apihelper")
+                        assert_eq(M.probe(ctx.this), "function",
+                            "a required module should see set_attr")
+                    end
+                "#,
+                "module_api.test.luau",
+                Some(&world),
+                None,
+                &test_map_templates(),
+                Budget::default(),
+            )
+            .expect("test runner should not error");
+
+        assert_eq!(result.passed(), 1, "{:?}", result.tests);
         assert_eq!(result.failed(), 0);
     }
 
