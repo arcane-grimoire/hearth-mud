@@ -30,6 +30,28 @@ _Avoid_: link, door, passage
 The unit of persistence and organization. A group of rooms, objects, and exits that save and load together.
 _Avoid_: zone, region
 
+### Identity & presence
+
+**Account:**
+A persistent identity a person logs in with — its credentials and Scopes. An Account owns Characters but is not itself present in the world.
+_Avoid_: user, login, profile
+
+**Character:**
+An Object of kind `player` that an Account owns and plays as. An Account may own several and plays one at a time.
+_Avoid_: player, avatar, hero
+
+**Session:**
+A live connection between a person and the world, and the lifecycle it moves through — authenticate an Account, then drive one of its Characters. Distinct from the Account (which persists) and the Character (which is an Object).
+_Avoid_: connection, client, socket
+
+**Scope:**
+A permission tier granted to an Account — `player`, `builder`, `admin` (and `puppeteer`) — gating which authoring and admin actions its Session may take. Admin implies the others.
+_Avoid_: role, permission, grant
+
+**Puppet:**
+An Object a playing Session drives in place of its Character — e.g. an admin animating an NPC. Commands route to the Puppet until it is released.
+_Avoid_: proxy, mount, avatar
+
 ### Softcode
 
 **Program:**
@@ -39,6 +61,10 @@ _Avoid_: script, verb, function, handler
 **Hook:**
 A named slot on an Object where a Program can be attached. `can_` hooks gate permission (return true/false). `on_` hooks run after an action succeeds. `cmd_` hooks define player-typeable commands.
 _Avoid_: event, trigger, callback, listener
+
+**Actor:**
+The Object on whose behalf the current action runs — the one that typed the command, fired the hook, or was made to act. Bound into every hook and Lock evaluation. Usually a Character or NPC; the Puppet when one is active.
+_Avoid_: caller, subject, agent, user
 
 **Intent:**
 A typed mutation request produced by a Program during execution. Programs cannot mutate the world directly — they enqueue Intents. The engine validates and applies the batch atomically after the script finishes.
