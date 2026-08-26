@@ -19,16 +19,32 @@ pub struct World {
     pub objects: HashMap<String, GameObject>,
     pub next_id: u64,
     /// Bumped on every potential mutation (`add_object`, `remove_object`,
-    /// `get_mut`). Derived indexes elsewhere (engine-side tick/global/troupe
-    /// caches) compare their epoch against this to know when to rebuild.
-    /// Deliberately conservative: `get_mut` may be called without an actual
-    /// write, but a spurious rebuild is only a perf cost, never a bug.
+    /// `get_mut`, `relocate`). This is the *save/dirty* epoch: it drives
+    /// incremental persistence, and being conservative here only ever costs a
+    /// redundant save, never correctness.
     pub version: u64,
+    /// Bumped only when a *structurally* relevant change happens — an object
+    /// added or removed, or one of the fields the engine's derived indexes
+    /// read (tags, script/hooks, archetype, the `tick_interval` attr). A plain
+    /// attribute write or a [`Self::relocate`] does **not** bump it, so the
+    /// engine's `DerivedIndexes` (tickables / globals-by-hook / troupes) cache
+    /// survives ordinary gameplay mutation instead of being rebuilt on every
+    /// write. Correctness rule: every mutation that could change what those
+    /// indexes contain must call [`Self::bump_struct`]. Location is handled by
+    /// the separate `children` index and is deliberately *not* structural.
+    pub struct_version: u64,
     /// Refs written via [`Self::get_mut`] / added via [`Self::add_object`]
     /// since the last drain — used for incremental persistence. Removals are
     /// recorded here with an empty entry (see [`Self::remove_object`]).
     /// Drained by the engine's save path (`db::save_world_delta`).
     pub(crate) dirty: HashMap<String, bool>,
+    /// Location → the refs contained there, for *every* kind (rooms hold
+    /// items/npcs/exits, actors hold inventory, containers hold contents).
+    /// Maintained incrementally by [`Self::add_object`], [`Self::remove_object`],
+    /// and [`Self::relocate`] so `objects_in` / `exits_from` / `find_exit`
+    /// answer in O(occupants) instead of scanning every object in the world.
+    /// Objects with no `location_ref` are absent from every bucket.
+    children: HashMap<String, HashSet<String>>,
 }
 
 impl Default for World {
@@ -43,7 +59,9 @@ impl World {
             objects: HashMap::new(),
             next_id: 0,
             version: 0,
+            struct_version: 0,
             dirty: HashMap::new(),
+            children: HashMap::new(),
         }
     }
 
@@ -55,27 +73,146 @@ impl World {
 
     pub fn add_object(&mut self, obj: GameObject) {
         self.version += 1;
+        self.struct_version += 1;
         self.dirty.insert(obj.ref_id.clone(), true);
+        self.index_insert(&obj.ref_id, obj.location_ref.as_deref());
         self.objects.insert(obj.ref_id.clone(), obj);
     }
 
     /// Remove an object, recording the removal for incremental saves.
     pub fn remove_object(&mut self, ref_id: &str) -> Option<GameObject> {
         self.version += 1;
+        self.struct_version += 1;
         self.dirty.insert(ref_id.to_string(), false);
-        self.objects.remove(ref_id)
+        let removed = self.objects.remove(ref_id);
+        if let Some(obj) = &removed {
+            self.index_remove(ref_id, obj.location_ref.as_deref());
+        }
+        removed
     }
 
     pub fn get(&self, ref_id: &str) -> Option<&GameObject> {
         self.objects.get(ref_id)
     }
 
+    /// Mutable access. Marks the object dirty for the next save. Does **not**
+    /// touch `struct_version` or the `children` index: a caller changing a
+    /// structural field must call [`Self::bump_struct`], and a caller changing
+    /// location must go through [`Self::relocate`] rather than assigning
+    /// `location_ref` directly (a direct assignment silently desyncs the
+    /// children index — see the `children_index_survives_*` tests).
     pub fn get_mut(&mut self, ref_id: &str) -> Option<&mut GameObject> {
         self.version += 1;
         if let Some(obj) = self.objects.get(ref_id) {
             self.dirty.insert(obj.ref_id.clone(), true);
         }
         self.objects.get_mut(ref_id)
+    }
+
+    /// Signal that a structural field the engine's derived indexes read
+    /// (tags, script/hooks, archetype, `tick_interval`) has changed on some
+    /// object, so the `DerivedIndexes` cache rebuilds on next access. Call
+    /// this alongside the `get_mut` that made such a change.
+    pub fn bump_struct(&mut self) {
+        self.struct_version += 1;
+    }
+
+    /// The structural epoch the engine's `DerivedIndexes` compares against.
+    pub fn struct_version(&self) -> u64 {
+        self.struct_version
+    }
+
+    /// Move `ref_id` to `new_loc` (or nowhere, if `None`), keeping the
+    /// `children` index in sync. This is the *only* correct way to change an
+    /// object's `location_ref` once it is in the world. Bumps `version` (for
+    /// the save delta) but not `struct_version` — a move never changes what the
+    /// derived indexes contain.
+    pub fn relocate(&mut self, ref_id: &str, new_loc: Option<String>) {
+        let old = self.objects.get(ref_id).and_then(|o| o.location_ref.clone());
+        if old.as_deref() == new_loc.as_deref() {
+            return;
+        }
+        self.version += 1;
+        self.dirty.insert(ref_id.to_string(), true);
+        self.index_remove(ref_id, old.as_deref());
+        self.index_insert(ref_id, new_loc.as_deref());
+        if let Some(obj) = self.objects.get_mut(ref_id) {
+            obj.location_ref = new_loc;
+        }
+    }
+
+    /// Add a tag to an object, bumping the structural epoch (a `system:global`
+    /// or `troupe:*` tag changes what the derived indexes contain). Returns
+    /// false if the ref doesn't resolve. Prefer this over `get_mut().tags`.
+    pub fn add_tag(&mut self, ref_id: &str, tag: Tag) -> bool {
+        self.struct_version += 1;
+        match self.get_mut(ref_id) {
+            Some(obj) => {
+                obj.tags.insert(tag);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Remove a tag from an object, bumping the structural epoch. Returns
+    /// whether the tag was present.
+    pub fn remove_tag(&mut self, ref_id: &str, tag: &Tag) -> bool {
+        self.struct_version += 1;
+        self.get_mut(ref_id).is_some_and(|obj| obj.tags.remove(tag))
+    }
+
+    /// Set (or clear) an object's `archetype_ref`, bumping the structural
+    /// epoch — the archetype chain decides which hooks/tags an object resolves.
+    pub fn set_object_archetype(&mut self, ref_id: &str, archetype: Option<String>) -> bool {
+        self.struct_version += 1;
+        match self.get_mut(ref_id) {
+            Some(obj) => {
+                obj.archetype_ref = archetype;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn index_insert(&mut self, ref_id: &str, loc: Option<&str>) {
+        if let Some(l) = loc {
+            self.children.entry(l.to_string()).or_default().insert(ref_id.to_string());
+        }
+    }
+
+    fn index_remove(&mut self, ref_id: &str, loc: Option<&str>) {
+        if let Some(l) = loc
+            && let Some(set) = self.children.get_mut(l)
+        {
+            set.remove(ref_id);
+            if set.is_empty() {
+                self.children.remove(l);
+            }
+        }
+    }
+
+    /// Rebuild the `children` index from scratch. Only needed if an object's
+    /// `location_ref` was changed by bypassing [`Self::relocate`]; kept for the
+    /// consistency tests and as a repair hatch, not the hot path.
+    pub fn rebuild_children_index(&mut self) {
+        let mut children: HashMap<String, HashSet<String>> = HashMap::new();
+        for obj in self.objects.values() {
+            if let Some(l) = &obj.location_ref {
+                children.entry(l.clone()).or_default().insert(obj.ref_id.clone());
+            }
+        }
+        self.children = children;
+    }
+
+    /// Refs of every object located at `location_ref`, any kind. The backing
+    /// store for the kind-filtered public queries below.
+    fn children_of(&self, location_ref: &str) -> impl Iterator<Item = &GameObject> {
+        self.children
+            .get(location_ref)
+            .into_iter()
+            .flat_map(|set| set.iter())
+            .filter_map(|ref_id| self.objects.get(ref_id))
     }
 
     /// Take the pending change set for incremental saves: refs to upsert
@@ -85,18 +222,14 @@ impl World {
     }
 
     pub fn exits_from(&self, room_ref: &str) -> Vec<&GameObject> {
-        self.objects
-            .values()
-            .filter(|o| o.kind == Kind::Exit && o.location_ref.as_deref() == Some(room_ref))
+        self.children_of(room_ref)
+            .filter(|o| o.kind == Kind::Exit)
             .collect()
     }
 
     pub fn find_exit(&self, room_ref: &str, direction: &str) -> Option<&GameObject> {
-        self.objects.values().find(|o| {
-            o.kind == Kind::Exit
-                && o.location_ref.as_deref() == Some(room_ref)
-                && o.matches_direction(direction)
-        })
+        self.children_of(room_ref)
+            .find(|o| o.kind == Kind::Exit && o.matches_direction(direction))
     }
 
     /// Objects located at `location_ref` — a room, an actor's inventory, or
@@ -105,13 +238,8 @@ impl World {
     /// builds room contents, inventory, or container listings gets the
     /// exclusion for free.
     pub fn objects_in(&self, location_ref: &str) -> Vec<&GameObject> {
-        self.objects
-            .values()
-            .filter(|o| {
-                o.location_ref.as_deref() == Some(location_ref)
-                    && o.kind != Kind::Exit
-                    && o.kind != Kind::Code
-            })
+        self.children_of(location_ref)
+            .filter(|o| o.kind != Kind::Exit && o.kind != Kind::Code)
             .collect()
     }
 
@@ -343,6 +471,161 @@ mod tests {
         // Unknown ref: no dirty entry, no panic.
         assert!(w.get_mut("#999").is_none());
         assert!(w.drain_dirty().is_empty());
+    }
+
+    // -- Children (location) index — F1: O(occupants) spatial queries --
+
+    /// Brute-force reference: the refs a full-world scan says are located at
+    /// `loc`, matching the semantics the incremental `children` index must
+    /// preserve exactly.
+    fn scan_children(world: &World, loc: &str) -> HashSet<String> {
+        world
+            .objects
+            .values()
+            .filter(|o| o.location_ref.as_deref() == Some(loc))
+            .map(|o| o.ref_id.clone())
+            .collect()
+    }
+
+    fn indexed_children(world: &World, loc: &str) -> HashSet<String> {
+        world.children_of(loc).map(|o| o.ref_id.clone()).collect()
+    }
+
+    #[test]
+    fn children_index_matches_a_full_scan_through_add_move_and_remove() {
+        let mut world = World::new();
+        let room_a = world.next_dbref();
+        let room_b = world.next_dbref();
+        world.add_object(GameObject::new(&room_a, "a", Kind::Room));
+        world.add_object(GameObject::new(&room_b, "b", Kind::Room));
+
+        let sword = world.next_dbref();
+        world.add_object(GameObject::new(&sword, "sword", Kind::Item).with_location(&room_a));
+        let goblin = world.next_dbref();
+        world.add_object(GameObject::new(&goblin, "goblin", Kind::Npc).with_location(&room_a));
+
+        // add: both are in room A by the index and by a scan.
+        assert_eq!(indexed_children(&world, &room_a), scan_children(&world, &room_a));
+        assert_eq!(indexed_children(&world, &room_a).len(), 2);
+
+        // move: the sword goes to room B.
+        world.relocate(&sword, Some(room_b.clone()));
+        assert_eq!(indexed_children(&world, &room_a), scan_children(&world, &room_a));
+        assert_eq!(indexed_children(&world, &room_b), scan_children(&world, &room_b));
+        assert!(indexed_children(&world, &room_b).contains(&sword));
+
+        // move to nowhere: the goblin leaves the world's locations entirely.
+        world.relocate(&goblin, None);
+        assert_eq!(indexed_children(&world, &room_a), scan_children(&world, &room_a));
+        assert!(indexed_children(&world, &room_a).is_empty());
+
+        // remove: the sword vanishes from room B's bucket.
+        world.remove_object(&sword);
+        assert_eq!(indexed_children(&world, &room_b), scan_children(&world, &room_b));
+        assert!(indexed_children(&world, &room_b).is_empty());
+    }
+
+    #[test]
+    fn rebuild_children_index_reproduces_the_incremental_one() {
+        let mut world = World::new();
+        let room = world.next_dbref();
+        world.add_object(GameObject::new(&room, "room", Kind::Room));
+        for i in 0..5 {
+            let r = world.next_dbref();
+            world.add_object(
+                GameObject::new(&r, &format!("item{i}"), Kind::Item).with_location(&room),
+            );
+        }
+        let before = indexed_children(&world, &room);
+        world.rebuild_children_index();
+        assert_eq!(indexed_children(&world, &room), before);
+        assert_eq!(indexed_children(&world, &room), scan_children(&world, &room));
+    }
+
+    #[test]
+    fn objects_in_and_exits_from_agree_with_a_scan() {
+        let mut world = World::new();
+        let room = world.next_dbref();
+        let other = world.next_dbref();
+        world.add_object(GameObject::new(&room, "room", Kind::Room));
+        world.add_object(GameObject::new(&other, "other", Kind::Room));
+        let item = world.next_dbref();
+        world.add_object(GameObject::new(&item, "sword", Kind::Item).with_location(&room));
+        let code = world.next_dbref();
+        world.add_object(GameObject::new(&code, "weather", Kind::Code).with_location(&room));
+        let exit = world.next_dbref();
+        world.add_object(
+            GameObject::new(&exit, "north", Kind::Exit)
+                .with_location(&room)
+                .with_target(&other)
+                .with_aliases(vec!["n"]),
+        );
+
+        // objects_in excludes Exit + Code; exits_from is only exits.
+        let contents: HashSet<&str> = world.objects_in(&room).iter().map(|o| o.ref_id.as_str()).collect();
+        assert_eq!(contents, HashSet::from([item.as_str()]));
+        let exits: HashSet<&str> = world.exits_from(&room).iter().map(|o| o.ref_id.as_str()).collect();
+        assert_eq!(exits, HashSet::from([exit.as_str()]));
+
+        // find_exit resolves by direction and alias.
+        assert_eq!(world.find_exit(&room, "north").map(|o| o.ref_id.clone()), Some(exit.clone()));
+        assert_eq!(world.find_exit(&room, "n").map(|o| o.ref_id.clone()), Some(exit.clone()));
+        assert!(world.find_exit(&room, "south").is_none());
+    }
+
+    // -- Structural epoch — F2: derived indexes survive ordinary mutation --
+
+    #[test]
+    fn a_move_bumps_version_but_not_the_structural_epoch() {
+        let mut world = World::new();
+        let room_a = world.next_dbref();
+        let room_b = world.next_dbref();
+        world.add_object(GameObject::new(&room_a, "a", Kind::Room));
+        world.add_object(GameObject::new(&room_b, "b", Kind::Room));
+        let item = world.next_dbref();
+        world.add_object(GameObject::new(&item, "sword", Kind::Item).with_location(&room_a));
+
+        let struct_before = world.struct_version();
+        let ver_before = world.version;
+        world.relocate(&item, Some(room_b.clone()));
+        assert!(world.version > ver_before, "a move must dirty the object for saving");
+        assert_eq!(
+            world.struct_version(),
+            struct_before,
+            "a move must NOT invalidate the derived indexes"
+        );
+    }
+
+    #[test]
+    fn a_plain_attr_write_does_not_bump_the_structural_epoch() {
+        let mut world = World::new();
+        let item = world.next_dbref();
+        world.add_object(GameObject::new(&item, "sword", Kind::Item));
+        let struct_before = world.struct_version();
+        world.get_mut(&item).unwrap().attrs.insert("sharp".into(), serde_json::json!(true));
+        assert_eq!(world.struct_version(), struct_before);
+    }
+
+    #[test]
+    fn tag_and_archetype_changes_bump_the_structural_epoch() {
+        let mut world = World::new();
+        let item = world.next_dbref();
+        world.add_object(GameObject::new(&item, "sword", Kind::Item));
+
+        let e0 = world.struct_version();
+        world.add_tag(&item, Tag { category: "system".into(), key: "global".into() });
+        let e1 = world.struct_version();
+        assert!(e1 > e0, "adding a tag must invalidate the derived indexes");
+
+        world.remove_tag(&item, &Tag { category: "system".into(), key: "global".into() });
+        let e2 = world.struct_version();
+        assert!(e2 > e1, "removing a tag must invalidate the derived indexes");
+
+        let base = world.next_dbref();
+        world.add_object(GameObject::new(&base, "base", Kind::Item));
+        let e3 = world.struct_version();
+        world.set_object_archetype(&item, Some(base.clone()));
+        assert!(world.struct_version() > e3, "reparenting must invalidate the derived indexes");
     }
 
     // -- Archetype (is-a) resolution — docs/plans/archetypes.md Stage 1 --

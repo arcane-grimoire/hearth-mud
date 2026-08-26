@@ -195,6 +195,13 @@ pub fn import_bundle(
     } else {
         apply(&areas, world)?
     };
+    if !dry_run {
+        // `apply` can reassign an existing object's location in place (through
+        // `get_mut`, alongside its other field updates) rather than through
+        // `World::relocate`, so rebuild the children index from scratch to pick
+        // those moves up. Cold bulk path — the O(N) rebuild is fine here.
+        world.rebuild_children_index();
+    }
     // Map + terrain sources ride the same bundle, resolved into the
     // `file_sources` table with the same three-way (dry run writes nothing).
     resolve_file_sources(path, db, !dry_run, &mut report)?;

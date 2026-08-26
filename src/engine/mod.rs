@@ -601,7 +601,7 @@ struct DerivedIndexes {
 impl DerivedIndexes {
     fn build(world: &World) -> Self {
         let mut idx = DerivedIndexes {
-            epoch: world.version,
+            epoch: world.struct_version(),
             tickables: Vec::new(),
             globals_by_hook: HashMap::new(),
             troupes: HashMap::new(),
@@ -857,7 +857,7 @@ impl Engine {
     /// so the borrow is released before callers touch the world again.
     fn indexes(&mut self) -> DerivedIndexes {
         match &self.derived {
-            Some(d) if d.epoch == self.world.version => d.clone(),
+            Some(d) if d.epoch == self.world.struct_version() => d.clone(),
             _ => {
                 let idx = DerivedIndexes::build(&self.world);
                 self.derived = Some(idx.clone());
@@ -1196,6 +1196,25 @@ impl Engine {
         {
             hooks::ensure_own_state_slot(obj).state = state;
         }
+    }
+
+    /// Set an object's script (deriving its hooks) and bump the world's
+    /// structural epoch so the derived indexes pick up any new/removed hook.
+    /// The single funnel for native (non-softcode) script writes — `set_script`
+    /// itself can't reach `World::bump_struct` across the layering boundary.
+    /// Returns false if the ref doesn't resolve.
+    fn set_object_script(&mut self, ref_id: &str, source: String) -> bool {
+        let ok = match self.world.get_mut(ref_id) {
+            Some(obj) => {
+                hooks::set_script(obj, source);
+                true
+            }
+            None => false,
+        };
+        if ok {
+            self.world.bump_struct();
+        }
+        ok
     }
 
     fn do_save(&mut self) {
@@ -1909,21 +1928,25 @@ impl Engine {
                 if let Err(e) = self.softcode.check_syntax(&source) {
                     return ApiResponse::error(format!("Syntax error: {}", e));
                 }
-                match self.world.get_mut(&ref_id) {
-                    Some(obj) => {
-                        hooks::set_script(obj, source);
-                        ApiResponse::ok()
-                    }
-                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                if self.set_object_script(&ref_id, source) {
+                    ApiResponse::ok()
+                } else {
+                    ApiResponse::error(format!("No object with ref '{}'", ref_id))
                 }
             }
             ApiRequest::ClearScript { ref_id } => {
-                match self.world.get_mut(&ref_id) {
+                let ok = match self.world.get_mut(&ref_id) {
                     Some(obj) => {
                         hooks::clear_script(obj);
-                        ApiResponse::ok()
+                        true
                     }
-                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                    None => false,
+                };
+                if ok {
+                    self.world.bump_struct();
+                    ApiResponse::ok()
+                } else {
+                    ApiResponse::error(format!("No object with ref '{}'", ref_id))
                 }
             }
             ApiRequest::ListRefCandidates { ref_source } => {
@@ -2783,12 +2806,10 @@ impl Engine {
 
                 self.softcode.ink_runtime().borrow_mut().cleanup_player(actor_ref);
 
-                if let Some(obj) = self.world.get_mut(actor_ref) {
-                    obj.tags.insert(crate::world::Tag {
-                        category: "system".to_string(),
-                        key: "offline".to_string(),
-                    });
-                }
+                self.world.add_tag(actor_ref, crate::world::Tag {
+                    category: "system".to_string(),
+                    key: "offline".to_string(),
+                });
                 if !name.is_empty() {
                     self.broadcast_to_all(&format!("{} has disconnected.\r\n", name), session_id);
                 }
@@ -3245,8 +3266,9 @@ impl Engine {
                 category: "system".to_string(),
                 key: "offline".to_string(),
             });
+            self.world.bump_struct();
             if needs_fix {
-                existing.location_ref = Some(spawn_room_ref.clone());
+                self.world.relocate(character_ref, Some(spawn_room_ref.clone()));
             }
             character_ref.to_string()
         } else {
@@ -3716,7 +3738,10 @@ impl Engine {
         }
         if parts[1].eq_ignore_ascii_case("none") {
             return match softcode::detach_object(&mut self.world, &target) {
-                Ok(()) => format!("{} detached — no longer delegates.\r\n", target),
+                Ok(()) => {
+                    self.world.bump_struct();
+                    format!("{} detached — no longer delegates.\r\n", target)
+                }
                 Err(e) => format!("{}\r\n", e),
             };
         }
@@ -3727,9 +3752,7 @@ impl Engine {
         if self.world.would_cycle_archetype(&target, &archetype) {
             return format!("'{}' would create an archetype cycle.\r\n", archetype);
         }
-        if let Some(obj) = self.world.get_mut(&target) {
-            obj.archetype_ref = Some(archetype.clone());
-        }
+        self.world.set_object_archetype(&target, Some(archetype.clone()));
         format!("{} now delegates to {}.\r\n", target, archetype)
     }
 
@@ -3994,14 +4017,13 @@ impl Engine {
         if let Err(e) = self.softcode.check_syntax(source) {
             return format!("Syntax error in program: {}\r\n", e);
         }
-        let obj = match self.world.get_mut(target_ref) {
-            Some(o) => o,
-            None => return format!("No object with ref '{}'.\r\n", target_ref),
-        };
-        hooks::set_script(obj, source.to_string());
-        let hooks_list = obj
-            .script
-            .as_ref()
+        if !self.set_object_script(target_ref, source.to_string()) {
+            return format!("No object with ref '{}'.\r\n", target_ref);
+        }
+        let hooks_list = self
+            .world
+            .get(target_ref)
+            .and_then(|o| o.script.as_ref())
             .map(|s| s.hooks.join(", "))
             .unwrap_or_default();
         format!(
@@ -4179,14 +4201,13 @@ impl Engine {
         if let Some(err) = self.check_program_write(session_id, actor_ref, &target_ref) {
             return err;
         }
-        match self.world.get_mut(&target_ref) {
-            Some(obj) => {
-                if hooks::clear_script(obj) {
-                    format!("Removed script on {}.\r\n", target_ref)
-                } else {
-                    format!("{} has no script.\r\n", target_ref)
-                }
+        let cleared = self.world.get_mut(&target_ref).map(hooks::clear_script);
+        match cleared {
+            Some(true) => {
+                self.world.bump_struct();
+                format!("Removed script on {}.\r\n", target_ref)
             }
+            Some(false) => format!("{} has no script.\r\n", target_ref),
             None => format!("No object with ref '{}'.\r\n", target_ref),
         }
     }
@@ -4717,9 +4738,7 @@ impl Engine {
         }
 
         let name = self.world.display_name(self.world.get(&item_ref).unwrap());
-        if let Some(obj) = self.world.get_mut(&item_ref) {
-            obj.location_ref = Some(actor_ref.to_string());
-        }
+        self.world.relocate(&item_ref, Some(actor_ref.to_string()));
 
         let _ = self.fire_hook(&item_ref, "on_move", actor_ref, Some(&room_ref), None);
         let _ = self.fire_hook(actor_ref, "on_receive", actor_ref, Some(&room_ref), None);
@@ -4779,9 +4798,7 @@ impl Engine {
 
         let item_display = self.world.display_name(self.world.get(&item_ref).unwrap());
         let container_display = self.world.display_name(self.world.get(&container_ref).unwrap());
-        if let Some(obj) = self.world.get_mut(&item_ref) {
-            obj.location_ref = Some(actor_ref.to_string());
-        }
+        self.world.relocate(&item_ref, Some(actor_ref.to_string()));
 
         let _ = self.fire_hook(&item_ref, "on_move", actor_ref, Some(&room_ref), None);
         let _ = self.fire_hook(actor_ref, "on_receive", actor_ref, Some(&room_ref), None);
@@ -4884,9 +4901,7 @@ impl Engine {
 
         let item_display = self.world.display_name(self.world.get(&item_ref).unwrap());
         let container_display = self.world.display_name(self.world.get(&container_ref).unwrap());
-        if let Some(obj) = self.world.get_mut(&item_ref) {
-            obj.location_ref = Some(container_ref.clone());
-        }
+        self.world.relocate(&item_ref, Some(container_ref.clone()));
 
         let _ = self.fire_hook(&item_ref, "on_move", actor_ref, Some(&room_ref), None);
         let _ = self.fire_hook(&container_ref, "on_receive", actor_ref, Some(&room_ref), None);
@@ -4903,10 +4918,17 @@ impl Engine {
 
         if let Some(room_ref) = &room_ref {
             let hook_name = format!("cmd_{}", cmd);
-            let global_tag = crate::world::Tag {
-                category: "system".into(),
-                key: "global".into(),
-            };
+            // Global objects defining this exact `cmd_*` hook come from the
+            // derived index (`system:global` resolved, own or inherited),
+            // rather than scanning every object in the world — see
+            // `DerivedIndexes`. They stay LAST in the resolution chain so a
+            // room/inventory object's command still shadows a global one.
+            let global_refs = self
+                .indexes()
+                .globals_by_hook
+                .get(&hook_name)
+                .cloned()
+                .unwrap_or_default();
             let target_ref = {
                 // Candidates, in resolution order: the room itself,
                 // objects in the room, actor's inventory, then global objects.
@@ -4917,13 +4939,7 @@ impl Engine {
                     .into_iter()
                     .filter(|o| o.ref_id != actor_ref);
                 let inv_objs = self.world.objects_in(actor_ref).into_iter();
-                // `system:global` may be inherited from an archetype (e.g. a
-                // shared "rules" archetype) — see docs/plans/archetypes.md.
-                let global_objs = self
-                    .world
-                    .objects
-                    .values()
-                    .filter(|o| self.world.resolved_tags(o).contains(&global_tag));
+                let global_objs = global_refs.iter().filter_map(|r| self.world.get(r));
                 hooks::find_cmd_hook(
                     &self.world,
                     room_itself.chain(room_objs).chain(inv_objs).chain(global_objs),
@@ -5372,22 +5388,29 @@ impl Engine {
                 }
             }
 
-            let global_tag = Tag { category: "system".into(), key: "global".into() };
+            // Local objects (the room, its contents, the actor's inventory):
+            // scan their resolved cmd_ hooks. Own hooks plus anything inherited
+            // via `archetype_ref` — an instance that delegates its `cmd_*`
+            // hooks should still show up in the command list.
             let room_itself = self.world.get(room_ref).into_iter();
             let room_objs = self.world.objects_in(room_ref).into_iter()
                 .filter(|o| o.ref_id != actor_ref);
             let inv_objs = self.world.objects_in(actor_ref).into_iter();
-            let global_objs = self.world.objects.values()
-                .filter(|o| self.world.resolved_tags(o).contains(&global_tag));
-
-            for obj in room_itself.chain(room_objs).chain(inv_objs).chain(global_objs) {
-                // Own hooks plus anything inherited via `archetype_ref` — an
-                // instance that delegates its `cmd_*` hooks should still show
-                // up in the command list.
+            for obj in room_itself.chain(room_objs).chain(inv_objs) {
                 for hook in hooks::resolve_hook_names(&self.world, obj) {
                     if let Some(cmd) = hook.strip_prefix("cmd_") {
                         cmds.push(cmd.to_string());
                     }
+                }
+            }
+
+            // Global commands come straight from the derived index: its key is
+            // the hook name (`cmd_<name>`), so the command list needs no
+            // world scan and no per-object hook resolution here.
+            let indexes = self.indexes();
+            for hook in indexes.globals_by_hook.keys() {
+                if let Some(cmd) = hook.strip_prefix("cmd_") {
+                    cmds.push(cmd.to_string());
                 }
             }
         }
@@ -5548,11 +5571,14 @@ impl Engine {
             self.world.add_object(GameObject::new(&ref_id, name, Kind::Code));
             ref_id
         });
-        let obj = self.world.get_mut(&ref_id).unwrap();
         if is_new {
-            obj.attrs.insert("tick_interval".into(), serde_json::json!(1));
+            self.world
+                .get_mut(&ref_id)
+                .unwrap()
+                .attrs
+                .insert("tick_interval".into(), serde_json::json!(1));
         }
-        hooks::set_script(obj, source.to_string());
+        self.set_object_script(&ref_id, source.to_string());
         if is_new {
             format!("Script '{}' created (ticks every 1s).\r\n", name)
         } else {
@@ -5610,7 +5636,9 @@ impl Engine {
                 }
                 let obj = self.world.get_mut(&ref_id).unwrap();
                 hooks::clear_script(obj);
-                if obj.script.is_none() && obj.libs.is_empty() {
+                let orphan = obj.script.is_none() && obj.libs.is_empty();
+                self.world.bump_struct();
+                if orphan {
                     self.world.remove_object(&ref_id);
                 }
                 format!("Script '{}' removed.\r\n", name)
@@ -5640,8 +5668,12 @@ impl Engine {
                 if self.is_ref_locked(&ref_id) {
                     return format!("{}\r\n", Self::locked_error(&ref_id));
                 }
-                let obj = self.world.get_mut(&ref_id).unwrap();
-                obj.attrs.insert("tick_interval".into(), serde_json::json!(interval));
+                self.world
+                    .get_mut(&ref_id)
+                    .unwrap()
+                    .attrs
+                    .insert("tick_interval".into(), serde_json::json!(interval));
+                self.world.bump_struct();
                 format!("Script '{}' interval set to {} tick(s).\r\n", name, interval)
             }
             None => format!("No script named '{}'.\r\n", name),
@@ -5780,8 +5812,7 @@ impl Engine {
         if self.is_ref_locked(&resolved) {
             return format!("{}\r\n", Self::locked_error(&resolved));
         }
-        if let Some(obj) = self.world.get_mut(&resolved) {
-            obj.tags.insert(tag.clone());
+        if self.world.add_tag(&resolved, tag.clone()) {
             format!("Tag '{}' added to {}.\r\n", tag.as_spec(), resolved)
         } else {
             format!("No object with ref '{}'.\r\n", resolved)
@@ -5814,14 +5845,13 @@ impl Engine {
         if self.is_ref_locked(&resolved) {
             return format!("{}\r\n", Self::locked_error(&resolved));
         }
-        if let Some(obj) = self.world.get_mut(&resolved) {
-            if obj.tags.remove(&tag) {
-                format!("Tag '{}' removed from {}.\r\n", tag.as_spec(), resolved)
-            } else {
-                format!("Object {} doesn't have tag '{}'.\r\n", resolved, tag.as_spec())
-            }
+        if self.world.get(&resolved).is_none() {
+            return format!("No object with ref '{}'.\r\n", resolved);
+        }
+        if self.world.remove_tag(&resolved, &tag) {
+            format!("Tag '{}' removed from {}.\r\n", tag.as_spec(), resolved)
         } else {
-            format!("No object with ref '{}'.\r\n", resolved)
+            format!("Object {} doesn't have tag '{}'.\r\n", resolved, tag.as_spec())
         }
     }
 
@@ -5868,6 +5898,12 @@ impl Engine {
                 // re-imported this reload.
                 crate::loader::stamp_locked(&mut self.world, &self.locked_prefixes);
                 crate::loader::validate_attr_schemas(&self.world);
+                // A bulk file reload can edit managed objects' scripts, tags,
+                // and archetypes in place (not only through add/remove), so
+                // force the derived indexes to rebuild from scratch rather than
+                // relying on per-mutation `struct_version` bumps in the loader.
+                self.derived = None;
+                self.commands_cache = None;
                 self.fire_lifecycle_hook("on_reload");
 
                 let mut msg = String::new();
@@ -5952,6 +5988,11 @@ impl Engine {
                     // `cmd_reload_world`.
                     self.softcode.invalidate_cache();
                     self.reload_map_sources_from_db();
+                    // Import can rewrite managed objects' scripts/tags/archetype
+                    // in place; force the derived indexes to rebuild. (See the
+                    // matching reset in `cmd_reload_world`.)
+                    self.derived = None;
+                    self.commands_cache = None;
                 }
                 crate::import_export::render_import_report(&report, dry_run, path)
             }
@@ -6598,17 +6639,13 @@ impl Engine {
         if self.world.get(target_ref).is_none() {
             return "That destination doesn't exist.\r\n".to_string();
         }
-        if let Some(actor) = self.world.get_mut(actor_ref) {
-            actor.location_ref = Some(target_ref.to_string());
-        }
+        self.world.relocate(actor_ref, Some(target_ref.to_string()));
 
         // Move followers (troupe members tagged troupe:<actor_ref>) — from
         // the derived index, not a full-world scan.
         let followers = self.indexes().troupes.get(actor_ref).cloned().unwrap_or_default();
         for ref_id in followers {
-            if let Some(obj) = self.world.get_mut(&ref_id) {
-                obj.location_ref = Some(target_ref.to_string());
-            }
+            self.world.relocate(&ref_id, Some(target_ref.to_string()));
         }
 
         // Fire on_move on the actor
@@ -6672,9 +6709,7 @@ impl Engine {
         }
 
         let name = self.world.display_name(self.world.get(&item_ref).unwrap());
-        if let Some(obj) = self.world.get_mut(&item_ref) {
-            obj.location_ref = Some(room_ref.clone());
-        }
+        self.world.relocate(&item_ref, Some(room_ref.clone()));
 
         let _ = self.fire_hook(&item_ref, "on_move", actor_ref, Some(&room_ref), None);
 
@@ -7424,12 +7459,10 @@ impl Engine {
             let _ = self.fire_hook(room_ref, "on_disconnect", &current_ref, Some(room_ref), None);
         }
         self.fire_global_hooks("on_disconnect", &current_ref, room.as_deref(), None);
-        if let Some(obj) = self.world.get_mut(&current_ref) {
-            obj.tags.insert(crate::world::Tag {
-                category: "system".to_string(),
-                key: "offline".to_string(),
-            });
-        }
+        self.world.add_tag(&current_ref, crate::world::Tag {
+            category: "system".to_string(),
+            key: "offline".to_string(),
+        });
 
         let username = self
             .accounts
@@ -9377,7 +9410,7 @@ mod tests {
         assert!(get.contains("don't see"), "get should not find a Code object: {}", get);
 
         // Even sitting "in" the actor's inventory, it's excluded.
-        engine.world.get_mut(&code_ref).unwrap().location_ref = Some(actor_ref.clone());
+        engine.world.relocate(&code_ref, Some(actor_ref.clone()));
         let inv = commands::do_inventory(&engine.world, &actor_ref);
         assert!(!inv.contains("Secret Script"), "inventory should not reveal a Code object: {}", inv);
     }
@@ -9606,7 +9639,7 @@ end
         engine.world.add_object(GameObject::new(&room, "hall", Kind::Room));
         let pc = engine.world.next_dbref();
         engine.world.add_object(GameObject::new(&pc, "hero", Kind::Player));
-        if let Some(o) = engine.world.get_mut(&pc) { o.location_ref = Some(room.clone()); }
+        engine.world.relocate(&pc, Some(room.clone()));
         if let Some(a) = engine.accounts.get_mut(&account_id) { a.active_character = Some(pc.clone()); }
 
         let resp = engine.handle_api_request(
@@ -9636,7 +9669,7 @@ end
         engine.world.add_object(GameObject::new(&room, "hall", Kind::Room));
         let pc = engine.world.next_dbref();
         engine.world.add_object(GameObject::new(&pc, "hero", Kind::Player));
-        if let Some(o) = engine.world.get_mut(&pc) { o.location_ref = Some(room.clone()); }
+        engine.world.relocate(&pc, Some(room.clone()));
         if let Some(a) = engine.accounts.get_mut(&account_id) { a.active_character = Some(pc.clone()); }
 
         let source = "\

@@ -435,8 +435,36 @@ pub enum Effect {
 pub fn apply_batch(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, String> {
     let mut sandbox = world.clone();
     let effects = apply_to(&mut sandbox, batch)?;
+    // Bump the structural epoch if the batch changed anything the engine's
+    // `DerivedIndexes` (tickables / globals-by-hook / troupes) read. Object
+    // add/remove already bump it via `World::{add,remove}_object`; this covers
+    // the in-place structural edits (tags, script, archetype, `tick_interval`)
+    // that go through `get_mut`. Ordinary attr writes and moves are excluded,
+    // so a busy tick loop no longer invalidates the cache on every write.
+    if batch.intents.iter().any(intent_is_structural) {
+        sandbox.bump_struct();
+    }
     *world = sandbox;
     Ok(effects)
+}
+
+/// Whether applying `intent` could change what the engine's `DerivedIndexes`
+/// contain — i.e. it touches tags, script/hooks, archetype, or the
+/// `tick_interval` attr. See [`World::struct_version`].
+fn intent_is_structural(intent: &Intent) -> bool {
+    match intent {
+        Intent::SetTag { .. }
+        | Intent::UnsetTag { .. }
+        | Intent::SetScript { .. }
+        | Intent::SetArchetype { .. }
+        | Intent::Detach { .. }
+        | Intent::Spawn { .. }
+        | Intent::CloneObject { .. }
+        | Intent::CreateExit { .. }
+        | Intent::Destroy { .. } => true,
+        Intent::SetAttr { key, .. } | Intent::UnsetAttr { key, .. } => key == "tick_interval",
+        _ => false,
+    }
 }
 
 /// Validate `batch` against `world` without applying it. Used for
@@ -699,10 +727,10 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                     cursor = parent;
                 }
                 let old_room = world.get(target).and_then(|o| o.location_ref.clone());
-                let obj = world
-                    .get_mut(target)
-                    .ok_or_else(|| format!("move_object: no object '{}'", target))?;
-                obj.location_ref = Some(destination.clone());
+                if world.get(target).is_none() {
+                    return Err(format!("move_object: no object '{}'", target));
+                }
+                world.relocate(target, Some(destination.clone()));
                 if *announce || *fire_hooks {
                     effects.push(Effect::MovedObject {
                         mover: target.clone(),

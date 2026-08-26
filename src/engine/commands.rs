@@ -1,5 +1,6 @@
 use crate::ansi;
 use crate::world::{Kind, Tag, World};
+use std::collections::{HashMap, HashSet};
 
 pub fn do_look(world: &World, actor_ref: &str) -> String {
     let actor = match world.get(actor_ref) {
@@ -47,6 +48,26 @@ pub fn format_look(
         })
         .collect();
 
+    // Troupe sizes for the players shown here, tallied in a single pass over
+    // the world rather than one full-world scan per player (was O(players·N)).
+    let player_refs: HashSet<&str> = contents
+        .iter()
+        .filter(|o| o.kind == Kind::Player)
+        .map(|o| o.ref_id.as_str())
+        .collect();
+    let mut troupe_counts: HashMap<&str, usize> = HashMap::new();
+    if !player_refs.is_empty() {
+        for o in world.objects.values() {
+            for t in &o.tags {
+                if t.category == "troupe"
+                    && let Some(&leader) = player_refs.get(t.key.as_str())
+                {
+                    *troupe_counts.entry(leader).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
     if !contents.is_empty() {
         for obj in &contents {
             if obj.kind == Kind::Npc && obj.tags.iter().any(|t| t.category == "troupe") {
@@ -54,12 +75,8 @@ pub fn format_look(
             }
             let label = match obj.kind {
                 Kind::Player => {
-                    let troupe_count = world.objects.values()
-                        .filter(|o| o.tags.contains(&Tag {
-                            category: "troupe".into(),
-                            key: obj.ref_id.clone(),
-                        }))
-                        .count();
+                    let troupe_count =
+                        troupe_counts.get(obj.ref_id.as_str()).copied().unwrap_or(0);
                     if troupe_count > 0 {
                         format!("{} is here, leading a troupe of {}.",
                             ansi::player_name(&world.display_name(obj)), troupe_count)
@@ -105,9 +122,7 @@ pub fn move_player(world: &mut World, actor_ref: &str, target_ref: &str) -> Stri
         return "That destination doesn't exist.\r\n".to_string();
     }
 
-    if let Some(actor) = world.get_mut(actor_ref) {
-        actor.location_ref = Some(target_ref.to_string());
-    }
+    world.relocate(actor_ref, Some(target_ref.to_string()));
 
     do_look(world, actor_ref)
 }
@@ -220,9 +235,7 @@ pub fn do_drop(world: &mut World, actor_ref: &str, args: &str) -> String {
     match item_ref {
         Some(ref_id) => {
             let name = world.display_name(world.get(&ref_id).unwrap());
-            if let Some(obj) = world.get_mut(&ref_id) {
-                obj.location_ref = Some(room_ref);
-            }
+            world.relocate(&ref_id, Some(room_ref));
             format!("You drop {}.\r\n", name)
         }
         None => format!("You aren't carrying '{}'.\r\n", args),

@@ -14,7 +14,22 @@ pub struct Database {
 impl Database {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        // WAL + `synchronous=NORMAL` is the right durability point for a
+        // checkpoint-only store whose live world is in memory: under WAL,
+        // NORMAL fsyncs at checkpoint rather than on every commit, so a save
+        // no longer blocks the single-writer engine task on a per-commit fsync
+        // (the writer runs every save synchronously — see `Engine::do_save`).
+        // The tradeoff is that an OS/power crash can lose the last few
+        // committed transactions (never corrupt the DB); with a 5-minute
+        // autosave of an in-memory world that is an acceptable window.
+        // `busy_timeout` makes any second connection wait for the write lock
+        // instead of erroring out immediately with SQLITE_BUSY.
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; \
+             PRAGMA synchronous=NORMAL; \
+             PRAGMA busy_timeout=5000; \
+             PRAGMA foreign_keys=ON;",
+        )?;
         let db = Self { conn };
         db.migrate()?;
         Ok(db)

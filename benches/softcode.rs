@@ -136,6 +136,7 @@ fn run(
             maps,
             no_hooks,
             0,
+            None,
         )
         .expect("hook should run")
 }
