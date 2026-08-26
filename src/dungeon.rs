@@ -419,7 +419,7 @@ pub fn generate(
                 kind: Kind::Room,
                 title: Some(title),
                 description: Some(text),
-                location,
+                location: Some(location),
                 owner: None,
                 archetype: None,
             });

@@ -474,7 +474,7 @@ pub fn instantiate(
                     kind: Kind::Room,
                     title: Some(title),
                     description: Some(description),
-                    location,
+                    location: Some(location),
                     owner: None,
                     archetype: None,
                 });
@@ -536,7 +536,7 @@ pub fn instantiate(
                         kind,
                         title: obj.title.clone(),
                         description: obj.description.clone(),
-                        location: room_ref.clone(),
+                        location: Some(room_ref.clone()),
                         owner: None,
                         archetype: None,
                     });

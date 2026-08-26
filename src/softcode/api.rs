@@ -1614,14 +1614,28 @@ pub fn install<'scope, 'env>(
             }
             let title: Option<String> = opts.get("title").ok();
             let description: Option<String> = opts.get("description").ok();
+            // `Table::get` yields `Ok(Nil)` for an absent key, and a Lua table
+            // literal can't hold an explicit `nil` value either, so `Some(Nil)`
+            // and `None` both mean "no location given" — they must resolve the
+            // same way (mirroring `owner`/`archetype` below). An explicit
+            // location resolves through `ref_of`; an absent one defaults by
+            // kind: a room becomes top-level (`None` — rooms are never nested),
+            // while an item/npc falls into the calling script's context room
+            // (or errors if there's no such room, e.g. a global/timer).
             let location: Option<Value> = opts.get("location").ok();
             let location = match location {
-                Some(v) => ref_of(&v)?,
-                None => default_loc_for_spawn.clone().ok_or_else(|| {
-                    mlua::Error::RuntimeError(
-                        "spawn: no 'location' given and no default room in context".into(),
-                    )
-                })?,
+                Some(Value::Nil) | None => {
+                    if kind == Kind::Room {
+                        None
+                    } else {
+                        Some(default_loc_for_spawn.clone().ok_or_else(|| {
+                            mlua::Error::RuntimeError(
+                                "spawn: no 'location' given and no default room in context".into(),
+                            )
+                        })?)
+                    }
+                }
+                Some(v) => Some(ref_of(&v)?),
             };
             let ref_id: Option<String> = opts.get("ref").ok();
             let ref_id = ref_id.unwrap_or_else(|| {

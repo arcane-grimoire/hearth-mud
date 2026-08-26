@@ -126,7 +126,12 @@ pub enum Intent {
         kind: Kind,
         title: Option<String>,
         description: Option<String>,
-        location: String,
+        /// Where the new object lands. `Some(ref)` nests it inside that object
+        /// (a room, a container); `None` makes it top-level — no container —
+        /// which is what a spawned room wants (rooms are never nested). The
+        /// Lua `spawn()` wrapper defaults an absent `location` per kind: rooms
+        /// → `None`, items/npcs → the calling script's context room.
+        location: Option<String>,
         owner: Option<String>,
         /// The archetype (blueprint) this instance delegates to, already
         /// resolved to a dbref — see docs/plans/archetypes.md Stage 1. `None`
@@ -881,8 +886,10 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                 if world.get(ref_id).is_some() {
                     return Err(format!("spawn: ref '{}' already exists", ref_id));
                 }
-                if world.get(location).is_none() {
-                    return Err(format!("spawn: no location '{}'", location));
+                if let Some(loc) = location
+                    && world.get(loc).is_none()
+                {
+                    return Err(format!("spawn: no location '{}'", loc));
                 }
                 if *kind == Kind::Code {
                     // Belt and suspenders: the Lua `spawn()` wrapper already
@@ -909,8 +916,10 @@ fn apply_to(world: &mut World, batch: &IntentBatch) -> Result<Vec<Effect>, Strin
                         ));
                     }
                 }
-                let mut obj = GameObject::new(ref_id.clone(), key.clone(), kind.clone())
-                    .with_location(location.clone());
+                let mut obj = GameObject::new(ref_id.clone(), key.clone(), kind.clone());
+                if let Some(loc) = location {
+                    obj = obj.with_location(loc.clone());
+                }
                 if let Some(t) = title {
                     obj = obj.with_title(t.clone());
                 }
@@ -3652,7 +3661,7 @@ mod tests {
             kind: Kind::Npc,
             title: None,
             description: None,
-            location: "#1".into(),
+            location: Some("#1".into()),
             owner: None,
             archetype: Some(archetype_ref.clone()),
         }]);
@@ -3680,13 +3689,36 @@ mod tests {
             kind: Kind::Npc,
             title: None,
             description: None,
-            location: "#1".into(),
+            location: Some("#1".into()),
             owner: None,
             archetype: Some("#999".into()),
         }]);
         let err = apply_batch(&mut world, &batch).expect_err("no such archetype");
         assert!(err.contains("no archetype"), "unexpected error: {}", err);
         assert!(world.get("#100").is_none(), "the batch should roll back entirely");
+    }
+
+    /// A location-less spawn (`location: None`) makes a top-level object — no
+    /// container — the way a spawned wilderness/instance room needs. The apply
+    /// side must neither validate nor set a location. Regression for the
+    /// `Some(Nil)`-hits-`ref_of` bug: `spawn({ kind = "room" })` with no
+    /// `location` used to throw before any object was created.
+    #[test]
+    fn spawn_without_location_is_top_level() {
+        let mut world = test_world();
+        let batch = IntentBatch::from_intents(vec![Intent::Spawn {
+            ref_id: "#100".into(),
+            key: "wilderness".into(),
+            kind: Kind::Room,
+            title: Some("A Wilderness".into()),
+            description: None,
+            location: None,
+            owner: None,
+            archetype: None,
+        }]);
+        apply_batch(&mut world, &batch).expect("location-less room spawn should succeed");
+        let room = world.get("#100").expect("room should exist");
+        assert_eq!(room.location_ref, None, "a location-less spawn is top-level");
     }
 
     /// Refuse to delete an archetype while instances still delegate to it —
@@ -5684,7 +5716,7 @@ mod tests {
                 kind: Kind::Item,
                 title: None,
                 description: None,
-                location: room.clone(),
+                location: Some(room.clone()),
                 owner: Some("#builder-a".into()),
                 archetype: None,
             }],
@@ -5718,7 +5750,7 @@ mod tests {
                 kind: Kind::Item,
                 title: None,
                 description: None,
-                location: room.clone(),
+                location: Some(room.clone()),
                 owner: None,
                 archetype: None,
             }],

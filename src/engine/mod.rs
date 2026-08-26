@@ -7643,13 +7643,19 @@ fn describe_intent(intent: &softcode::Intent, world: &World) -> String {
         Intent::UnsetTag { target, tag } => {
             format!("tag {} -{}:{}", label(target), tag.category, tag.key)
         }
-        Intent::Spawn { ref_id, key, kind, location, archetype, .. } => match archetype {
-            Some(a) => format!(
-                "spawn {} {} ({}) in {} (archetype {})",
-                kind, key, ref_id, label(location), label(a)
-            ),
-            None => format!("spawn {} {} ({}) in {}", kind, key, ref_id, label(location)),
-        },
+        Intent::Spawn { ref_id, key, kind, location, archetype, .. } => {
+            let where_ = match location {
+                Some(loc) => format!("in {}", label(loc)),
+                None => "top-level".to_string(),
+            };
+            match archetype {
+                Some(a) => format!(
+                    "spawn {} {} ({}) {} (archetype {})",
+                    kind, key, ref_id, where_, label(a)
+                ),
+                None => format!("spawn {} {} ({}) {}", kind, key, ref_id, where_),
+            }
+        }
         Intent::SetTitle { target, .. } => format!("set title of {}", label(target)),
         Intent::SetDescription { target, .. } => format!("set description of {}", label(target)),
         Intent::Destroy { target, cascade } => {
