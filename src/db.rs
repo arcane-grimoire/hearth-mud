@@ -140,6 +140,18 @@ impl Database {
                 PRIMARY KEY (obj_ref, hook)
             );",
         )?;
+
+        // Applied content migrations (≈ Alembic's alembic_version, but a full
+        // ledger rather than a single head): one row per revision that has run,
+        // so `hearth migrate` applies only the pending ones and is safe to
+        // re-run / redeploy. See `crate::migrate`.
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS migrations (
+                revision    TEXT PRIMARY KEY,
+                description TEXT NOT NULL DEFAULT '',
+                applied_at  INTEGER
+            );",
+        )?;
         // Program version history (program_blobs / program_versions) was
         // removed with the move to one script per object — drop the tables so
         // old DBs don't carry dead weight.
@@ -175,6 +187,35 @@ impl Database {
                 |row| row.get(0),
             )
             .optional()
+    }
+
+    /// The set of content-migration revisions already applied to this DB.
+    /// `hearth migrate` skips these and runs only the pending ones in order.
+    pub fn load_applied_migrations(&self) -> rusqlite::Result<HashSet<String>> {
+        let mut stmt = self.conn.prepare("SELECT revision FROM migrations")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut set = HashSet::new();
+        for r in rows {
+            set.insert(r?);
+        }
+        Ok(set)
+    }
+
+    /// Record a migration revision as applied. `applied_at` is a Unix
+    /// timestamp (seconds); pass 0 if a clock isn't available (dry runs never
+    /// call this). Idempotent: re-recording the same revision is a no-op.
+    pub fn record_migration(
+        &self,
+        revision: &str,
+        description: &str,
+        applied_at: u64,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO migrations (revision, description, applied_at) \
+             VALUES (?1, ?2, ?3)",
+            params![revision, description, applied_at as i64],
+        )?;
+        Ok(())
     }
 
     /// Persist the game-clock minute counter in the `meta` table (alongside

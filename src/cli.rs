@@ -38,6 +38,13 @@ Subcommands:
                                      (no server needed). Flags: --config PATH
                                      (game config, default hearth.toml), --db PATH
                                      (a world DB to run against; default in-memory).
+  migrate [--dry-run]               Apply pending content migrations (rename /
+                                     remove file-keys) to the world DB in-process.
+                                     A deploy step; run before the server starts.
+                                     Flags: --config PATH, --db PATH, --dry-run.
+
+Note: eval/program/import/export talk to a RUNNING server over HTTP (need a
+token); session-test and migrate build the world in-process (no server, no token).
 
 Connection (flags go after the subcommand, and may appear in any order):
   --addr HOST:PORT   Server address (default: localhost:8000)
@@ -61,7 +68,7 @@ Usage: hearth program <get|set> <ref> [FILE] [--addr ...] [--token ...]
 /// isn't a file" so back-compat is a property of this list, not of what
 /// happens to exist on disk.
 pub fn is_known_subcommand(name: &str) -> bool {
-    matches!(name, "eval" | "program" | "import" | "export" | "session-test")
+    matches!(name, "eval" | "program" | "import" | "export" | "session-test" | "migrate")
 }
 
 /// Entry point from `main.rs`. `args` is the full argv tail, e.g.
@@ -75,6 +82,7 @@ pub fn run(args: &[String]) -> i32 {
         Some("import") => cmd_import(&args[1..]),
         Some("export") => cmd_export(&args[1..]),
         Some("session-test") => cmd_session_test(&args[1..]),
+        Some("migrate") => cmd_migrate(&args[1..]),
         _ => {
             eprintln!("{}", USAGE);
             2
@@ -555,6 +563,147 @@ fn cmd_session_test(args: &[String]) -> i32 {
     if failed_files > 0 { 1 } else { 0 }
 }
 
+const MIGRATE_USAGE: &str = "\
+Usage: hearth migrate [--config PATH] [--db PATH] [--dry-run]
+
+Apply pending content migrations to the world database: declarative rename /
+remove operations that fix object identity (_file_key) before the loader
+reconciles file content against it. Forward-only, tracked, and safe to re-run
+— each revision applies at most once. Run this as a deploy step, before the
+server starts, whenever a release renames or moves world file-keys.
+
+Migration files live in <game_root>/migrations/<revision>_<slug>.toml, where
+the game root is the parent of game_dir. See src/migrate.rs for the format.
+
+  --config PATH   Game config to read game_dir + db_path from (default:
+                  hearth.toml).
+  --db PATH       World database to migrate (default: the config's db_path).
+  --dry-run       Report what would change without writing anything.
+
+Exit code: 0 on success (including nothing to do), 1 on a migration error,
+2 on a usage error.";
+
+/// `hearth migrate` — apply pending content migrations to the world DB
+/// in-process (no running server), like `session-test`. A deploy step, run
+/// before the engine comes up.
+fn cmd_migrate(args: &[String]) -> i32 {
+    let mut config_path = "hearth.toml".to_string();
+    let mut db_path: Option<String> = None;
+    let mut dry_run = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--config" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => config_path = v.clone(),
+                    None => {
+                        eprintln!("--config needs a path\n\n{}", MIGRATE_USAGE);
+                        return 2;
+                    }
+                }
+            }
+            "--db" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => db_path = Some(v.clone()),
+                    None => {
+                        eprintln!("--db needs a path\n\n{}", MIGRATE_USAGE);
+                        return 2;
+                    }
+                }
+            }
+            "--dry-run" => dry_run = true,
+            "-h" | "--help" => {
+                println!("{}", MIGRATE_USAGE);
+                return 0;
+            }
+            other => {
+                eprintln!("Unexpected argument '{}'\n\n{}", other, MIGRATE_USAGE);
+                return 2;
+            }
+        }
+        i += 1;
+    }
+
+    let config = Config::load(std::path::Path::new(&config_path));
+
+    let game_dir = match &config.game_dir {
+        Some(g) => g.clone(),
+        None => {
+            eprintln!("migrate: config has no game_dir, so there is no migrations directory to read");
+            return 2;
+        }
+    };
+    let dir = match crate::migrate::migrations_dir(std::path::Path::new(&game_dir)) {
+        Some(d) => d,
+        None => {
+            eprintln!("migrate: could not resolve a migrations directory from game_dir '{}'", game_dir);
+            return 2;
+        }
+    };
+
+    let db_file = db_path.unwrap_or_else(|| config.db_path.clone());
+    let db = match crate::db::Database::open(std::path::Path::new(&db_file)) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("migrate: failed to open database {}: {}", db_file, e);
+            return 1;
+        }
+    };
+    let mut world = match db.load_world() {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("migrate: failed to load world: {}", e);
+            return 1;
+        }
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    match crate::migrate::run(&db, &mut world, &dir, dry_run, now) {
+        Ok(report) => {
+            print_migrate_report(&report, &dir);
+            0
+        }
+        Err(e) => {
+            eprintln!("migrate: {}", e);
+            1
+        }
+    }
+}
+
+fn print_migrate_report(report: &crate::migrate::MigrateReport, dir: &std::path::Path) {
+    let tag = if report.dry_run { " (dry run — nothing written)" } else { "" };
+    if report.nothing_to_do() {
+        println!(
+            "Nothing to migrate{}: {} revision(s) already applied, none pending ({}).",
+            tag,
+            report.already_applied,
+            dir.display()
+        );
+        return;
+    }
+    println!("Applied {} migration(s){}:", report.applied.len(), tag);
+    for rev in &report.applied {
+        let desc = if rev.description.is_empty() { String::new() } else { format!("  {}", rev.description) };
+        println!("  {}{}", rev.revision, desc);
+        for key in &rev.removed {
+            println!("    - removed  {}", key);
+        }
+        for (old, new) in &rev.renamed {
+            println!("    - renamed  {}  ->  {}", old, new);
+        }
+    }
+    if report.already_applied > 0 {
+        println!("({} revision(s) were already applied and left alone.)", report.already_applied);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,6 +714,8 @@ mod tests {
         assert!(is_known_subcommand("program"));
         assert!(is_known_subcommand("import"));
         assert!(is_known_subcommand("export"));
+        assert!(is_known_subcommand("session-test"));
+        assert!(is_known_subcommand("migrate"));
         // A game config path must never accidentally match — this is the
         // property back-compat with `cargo run -- <config.toml>` rests on.
         assert!(!is_known_subcommand("../the-last-stag-mud/hearth.toml"));

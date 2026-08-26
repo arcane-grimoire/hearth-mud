@@ -25,6 +25,7 @@ pub mod loader;
 pub mod locks;
 pub mod map_template;
 pub mod markup;
+pub mod migrate;
 pub mod net;
 pub mod noise;
 pub mod session_test;

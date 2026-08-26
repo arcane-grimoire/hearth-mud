@@ -87,7 +87,8 @@ src/
   main.rs              tokio entrypoint, wires engine + telnet + web
   accounts.rs          Account, Scope (player/builder/admin), AccountStore
   ansi.rs              BBCode-style markup helpers (room_title, exit_list, etc.)
-  cli.rs               Command-line client (hearth eval/program/import/export/session-test)
+  cli.rs               Command-line client (hearth eval/program/import/export/session-test/migrate)
+  migrate.rs           Content migrations — forward-only, tracked rename/remove of file-keys
   session_test.rs      In-process .session E2E runner (drives the real session handler)
   import_export.rs     Bundle install/emit — @import, @export, three-way upgrade
   markup.rs            BBCode → ANSI (telnet) and BBCode → HTML (web) converters
@@ -176,6 +177,7 @@ docs/
 - **Visibility** — system:hidden tag + can_see hook
 - **Global commands** — system:global tag on objects makes their cmd_ hooks available everywhere
 - **File loader** — game_dir config, TOML definitions + .luau files, system:managed tag, @reload-world
+- **Content migrations** — the loader keys object identity off `_file_key`, so renaming/moving a file-key silently orphans the old object and builds a duplicate. `hearth migrate` fixes identity BEFORE reconciliation: forward-only, tracked (a `migrations` DB table records applied revisions) declarative rename/remove ops in `<game_root>/migrations/<rev>_<slug>.toml`. Within a migration, `remove`s apply before `rename`s (clear a duplicated key, then rename onto it); a rename onto an occupied key is a hard error. Only objects carrying a `_file_key` are touched, so player content is safe. Explicit deploy step (in-process, no server), never a silent boot mutation. `src/migrate.rs`
 - **Bytecode cache** — compiled Luau chunks cached by source hash, invalidated on @reload-world
 - **Dungeon layout grid** — `generate_dungeon` stores a Grid2D on the entrance room (`dungeon_layout` attr)
 - **BBCode markup** — `[b]`, `[red]`, `[cmd=go north]`, `[/]` etc. — transport-neutral styling, converted to ANSI for telnet, HTML for web
