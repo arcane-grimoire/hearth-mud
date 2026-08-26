@@ -63,12 +63,20 @@ A named slot on an Object where a Program can be attached. `can_` hooks gate per
 _Avoid_: event, trigger, callback, listener
 
 **Actor:**
-The Object on whose behalf the current action runs — the one that typed the command, fired the hook, or was made to act. Bound into every hook and Lock evaluation. Usually a Character or NPC; the Puppet when one is active.
+The Object on whose behalf the current action runs — the one that typed the command, fired the hook, or was made to act. Bound into every hook and Lock evaluation. Usually a Character or NPC; the Puppet when one is active. A playing Session distinguishes three identities that were once conflated (see ADR-0008): the **Character** it plays (the ownership/authoring identity, used by `@`-verbs), the **effective actor** it acts as for gameplay (the Puppet when one is driven, else the Character), and the account's **Scopes** (authorization, never the Puppet's).
 _Avoid_: caller, subject, agent, user
 
 **Intent:**
-A typed mutation request produced by a Program during execution. Programs cannot mutate the world directly — they enqueue Intents. The engine validates and applies the batch atomically after the script finishes.
+A typed mutation request. Programs cannot mutate the world directly — they enqueue Intents, and the engine validates and applies the batch atomically after the script finishes. Intents are the world's single mutation mechanism: the authoring surface (`@`-edits, REST writes) translates to Intents too, so a given mutation's semantics live in exactly one place. See ADR-0007.
 _Avoid_: command, action, mutation, effect
+
+**Ownership authority:**
+The authorization model for softcode mutations: a Program runs with the `authority` of the object it is attached to, and `apply_batch` refuses any Intent whose target that authority does not own. Contrast **Authoring authority**.
+_Avoid_: permission, owner check
+
+**Authoring authority:**
+The authorization model for the authoring surface: scope- and lock-gated at the transport edge (Builder/Admin Scope, `system:locked`, `system:global`), not ownership-gated — any Builder may edit any managed Object. Authorized authoring applies its Intent batch as system-trusted (`authority = None`), so `apply_batch` supplies integrity, not a second authorization. Contrast **Ownership authority**. See ADR-0007.
+_Avoid_: builder permission, edit rights
 
 **Budget:**
 An instruction count limit for Program execution. Prevents runaway scripts from blocking the world tick.

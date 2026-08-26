@@ -1,3 +1,4 @@
+mod authoring;
 mod commands;
 
 use std::cell::Cell;
@@ -363,7 +364,23 @@ enum SessionState {
     ConfirmPassword { username: String, password: String },
     SelectCharacter { account_id: String },
     CreateCharacterName { account_id: String },
+    /// `actor_ref` is the account's active **Character** (see `Session::character`).
+    /// It is *not* the effective actor while a Puppet is driven — read the
+    /// object commands act as through `Session::effective_actor`, never this
+    /// field directly on the dispatch path.
     Playing { actor_ref: String, account_id: String, puppet_ref: Option<String> },
+}
+
+/// A multi-line, engine-owned input editor a Session can be inside. Set by
+/// `@program`/`@eval`/`@dialogue`, consumed line-by-line by the matching
+/// handler, cleared when the editor finishes. This is session state the engine
+/// owns — distinct from softcode's `prompt()` callback, which lives on the
+/// Character object because only Intents can reach it (see `handle_game_input`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum EditorMode {
+    Program,
+    Eval,
+    Ink,
 }
 
 /// Maximum nesting of `run_command_as`: a forced command may itself fire hooks
@@ -374,6 +391,44 @@ const MAX_FORCE_DEPTH: u32 = 5;
 struct Session {
     tx: mpsc::UnboundedSender<ClientMessage>,
     state: SessionState,
+    /// The multi-line editor this session is inside, if any (see [`EditorMode`]).
+    /// Replaces the former `_program_editing`/`_eval_editing`/`_ink_editing`
+    /// object attrs — engine-owned session state has no business on the object.
+    editor: Option<EditorMode>,
+}
+
+impl Session {
+    /// The **Character** this session plays — the account's active PC. Stable
+    /// while puppeting (the puppet does not become the character). `None` until
+    /// login reaches `Playing`. Authoring (`@`-verbs) and ownership checks act
+    /// as the character; only gameplay follows [`Self::effective_actor`].
+    fn character(&self) -> Option<&str> {
+        match &self.state {
+            SessionState::Playing { actor_ref, .. } => Some(actor_ref),
+            _ => None,
+        }
+    }
+
+    /// The object commands act **as**: the Puppet when one is active, otherwise
+    /// the Character. Gameplay dispatch and room/output routing use this. Equal
+    /// to [`Self::character`] when not puppeting, so non-puppet behavior is
+    /// unchanged. See ADR-0008 and the CONTEXT.md Puppet term.
+    fn effective_actor(&self) -> Option<&str> {
+        match &self.state {
+            SessionState::Playing { actor_ref, puppet_ref, .. } => {
+                Some(puppet_ref.as_deref().unwrap_or(actor_ref))
+            }
+            _ => None,
+        }
+    }
+
+    /// The Puppet being driven, if any.
+    fn puppet(&self) -> Option<&str> {
+        match &self.state {
+            SessionState::Playing { puppet_ref, .. } => puppet_ref.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 struct TokenInfo {
@@ -1392,7 +1447,44 @@ impl Engine {
             return ApiResponse::error(Self::locked_error(ref_id));
         }
 
+        // Authoring writes share softcode's mutation mechanism. The preamble
+        // above is the *authorization* (Builder/Admin scope, `system:locked`,
+        // `system:global`); `apply_batch` then supplies *integrity* (atomicity,
+        // rollback, validation) with `authority = None` — system-trusted,
+        // since the caller is already authorized. Most write actions have an
+        // exact Intent twin and collapse into `authoring::write_batch`; the
+        // exceptions (creation returning a ref, `SetLocation`'s player guard,
+        // `DeleteObject`'s locked-cascade policy, program/asset authoring) fall
+        // through to the match below. See `engine/authoring.rs` and ADR-0007.
+        if let Some(result) = authoring::write_batch(&req) {
+            return match result {
+                Ok(batch) => match softcode::apply_batch(&mut self.world, &batch) {
+                    Ok(_) => ApiResponse::ok(),
+                    Err(e) => ApiResponse::error(e),
+                },
+                Err(msg) => ApiResponse::error(msg),
+            };
+        }
+
         match req {
+            // These are translated to an Intent batch and applied by the
+            // `authoring::write_batch` dispatch above, so they never reach the
+            // match at runtime. Listed explicitly (not a wildcard) to keep the
+            // match exhaustive while still forcing a compile error if a newly
+            // added ApiRequest variant goes unhandled.
+            ApiRequest::SetAttribute { .. }
+            | ApiRequest::SetDescription { .. }
+            | ApiRequest::SetTitle { .. }
+            | ApiRequest::SetAliases { .. }
+            | ApiRequest::AddTag { .. }
+            | ApiRequest::RemoveTag { .. }
+            | ApiRequest::SetLock { .. }
+            | ApiRequest::ClearLock { .. }
+            | ApiRequest::UpdateExit { .. }
+            | ApiRequest::SetArchetype { .. }
+            | ApiRequest::DetachObject { .. } => {
+                unreachable!("authoring write handled before match")
+            }
             ApiRequest::ListRooms => {
                 let rooms: Vec<serde_json::Value> = self
                     .world
@@ -1704,37 +1796,6 @@ impl Engine {
                     None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
                 }
             }
-            ApiRequest::SetAttribute { ref_id, key, value } => {
-                match self.world.get_mut(&ref_id) {
-                    Some(obj) => {
-                        if value.is_null() {
-                            obj.attrs.remove(&key);
-                        } else {
-                            obj.attrs.insert(key.clone(), value);
-                        }
-                        ApiResponse::ok()
-                    }
-                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
-                }
-            }
-            ApiRequest::SetDescription { ref_id, description } => {
-                match self.world.get_mut(&ref_id) {
-                    Some(obj) => {
-                        obj.description = description;
-                        ApiResponse::ok()
-                    }
-                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
-                }
-            }
-            ApiRequest::SetTitle { ref_id, title } => {
-                match self.world.get_mut(&ref_id) {
-                    Some(obj) => {
-                        obj.title = Some(title);
-                        ApiResponse::ok()
-                    }
-                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
-                }
-            }
             ApiRequest::SetLocation { ref_id, location } => {
                 // An object inside itself is a containment cycle — reject it.
                 if location == ref_id {
@@ -1743,85 +1804,25 @@ impl Engine {
                 if self.world.get(&location).is_none() {
                     return ApiResponse::error(format!("Location '{}' not found", location));
                 }
-                match self.world.get_mut(&ref_id) {
-                    // Relocating a live player by ref is a teleport — not a
-                    // builder-tier edit. Admins have the teleport command for it.
-                    Some(obj) if obj.kind == Kind::Player => {
-                        ApiResponse::error("Refusing to relocate a player via set_location")
-                    }
-                    Some(obj) => {
-                        obj.location_ref = Some(location);
-                        ApiResponse::ok()
-                    }
-                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                // Relocating a live player by ref is a teleport — not a
+                // builder-tier edit. Admins have the teleport command for it.
+                // This is authoring-only policy: `Intent::Move` deliberately
+                // allows moving players (builder teleporters need it), so the
+                // guard lives here rather than in the shared mechanism.
+                if self.world.get(&ref_id).map(|o| o.kind == Kind::Player).unwrap_or(false) {
+                    return ApiResponse::error("Refusing to relocate a player via set_location");
                 }
-            }
-            ApiRequest::UpdateExit { ref_id, direction, target } => {
-                // A blank direction leaves the exit un-typeable — reject it, and
-                // trim so "  up  " doesn't become the stored key.
-                let direction = match direction {
-                    Some(d) => {
-                        let trimmed = d.trim();
-                        if trimmed.is_empty() {
-                            return ApiResponse::error("Exit direction cannot be blank");
-                        }
-                        Some(trimmed.to_string())
-                    }
-                    None => None,
-                };
-                if let Some(t) = &target
-                    && self.world.get(t).is_none()
-                {
-                    return ApiResponse::error(format!("Target '{}' not found", t));
-                }
-                match self.world.get_mut(&ref_id) {
-                    Some(obj) if obj.kind == Kind::Exit => {
-                        if let Some(d) = direction {
-                            obj.key = d;
-                        }
-                        if let Some(t) = target {
-                            obj.target_ref = Some(t);
-                        }
-                        ApiResponse::ok()
-                    }
-                    Some(_) => ApiResponse::error("Object is not an exit"),
-                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
-                }
-            }
-            ApiRequest::SetAliases { ref_id, aliases } => {
-                match self.world.get_mut(&ref_id) {
-                    Some(obj) => {
-                        // Trim each entry (not just filter blank ones): a padded
-                        // "  climb  " would otherwise never match player input.
-                        obj.aliases = aliases
-                            .into_iter()
-                            .map(|a| a.trim().to_string())
-                            .filter(|a| !a.is_empty())
-                            .collect();
-                        ApiResponse::ok()
-                    }
-                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
-                }
-            }
-            ApiRequest::SetLock { ref_id, hook, expr } => {
-                if let Err(e) = locks::parse(&expr) {
-                    return ApiResponse::error(format!("Invalid lock expression: {}", e));
-                }
-                match self.world.get_mut(&ref_id) {
-                    Some(obj) => {
-                        obj.locks.insert(hook, expr);
-                        ApiResponse::ok()
-                    }
-                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
-                }
-            }
-            ApiRequest::ClearLock { ref_id, hook } => {
-                match self.world.get_mut(&ref_id) {
-                    Some(obj) => {
-                        obj.locks.remove(&hook);
-                        ApiResponse::ok()
-                    }
-                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                // Route the mutation through the Intent seam (no announce, no
+                // hooks — a builder placement is silent, exactly as before).
+                let batch = softcode::IntentBatch::from_intents(vec![softcode::Intent::Move {
+                    target: ref_id,
+                    destination: location,
+                    announce: false,
+                    fire_hooks: false,
+                }]);
+                match softcode::apply_batch(&mut self.world, &batch) {
+                    Ok(_) => ApiResponse::ok(),
+                    Err(e) => ApiResponse::error(e),
                 }
             }
             ApiRequest::CloneObject { source, location, owner } => {
@@ -1863,32 +1864,6 @@ impl Engine {
                 }
                 self.dispatch_as_actor(&ref_id, &command);
                 ApiResponse::ok()
-            }
-            ApiRequest::AddTag { ref_id, tag } => {
-                let parsed = match crate::world::Tag::parse(&tag) {
-                    Ok(t) => t,
-                    Err(e) => return ApiResponse::error(e),
-                };
-                match self.world.get_mut(&ref_id) {
-                    Some(obj) => {
-                        obj.tags.insert(parsed);
-                        ApiResponse::ok()
-                    }
-                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
-                }
-            }
-            ApiRequest::RemoveTag { ref_id, tag } => {
-                let parsed = match crate::world::Tag::parse(&tag) {
-                    Ok(t) => t,
-                    Err(e) => return ApiResponse::error(e),
-                };
-                match self.world.get_mut(&ref_id) {
-                    Some(obj) => {
-                        obj.tags.remove(&parsed);
-                        ApiResponse::ok()
-                    }
-                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
-                }
             }
             ApiRequest::DeleteObject { ref_id, cascade } => {
                 if self.world.get(&ref_id).map(|o| o.kind == Kind::Player).unwrap_or(false) {
@@ -1949,32 +1924,6 @@ impl Engine {
                         ApiResponse::ok()
                     }
                     None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
-                }
-            }
-            ApiRequest::SetArchetype { ref_id, archetype_ref } => {
-                if self.world.get(&ref_id).is_none() {
-                    return ApiResponse::error(format!("No object with ref '{}'", ref_id));
-                }
-                if let Some(a) = &archetype_ref {
-                    if self.world.get(a).is_none() {
-                        return ApiResponse::error(format!("No archetype with ref '{}'", a));
-                    }
-                    if self.world.would_cycle_archetype(&ref_id, a) {
-                        return ApiResponse::error(format!(
-                            "'{}' would create an archetype cycle",
-                            a
-                        ));
-                    }
-                }
-                if let Some(obj) = self.world.get_mut(&ref_id) {
-                    obj.archetype_ref = archetype_ref;
-                }
-                ApiResponse::ok()
-            }
-            ApiRequest::DetachObject { ref_id } => {
-                match softcode::detach_object(&mut self.world, &ref_id) {
-                    Ok(()) => ApiResponse::ok(),
-                    Err(e) => ApiResponse::error(e),
                 }
             }
             ApiRequest::ListRefCandidates { ref_source } => {
@@ -2804,6 +2753,7 @@ impl Engine {
         let session = Session {
             tx,
             state: SessionState::PromptUsername,
+            editor: None,
         };
         self.sessions.insert(session_id.clone(), session);
 
@@ -3408,32 +3358,46 @@ impl Engine {
             .unwrap_or(false)
     }
 
+    /// Put a session into (or out of) a multi-line editor. Engine-owned session
+    /// state — the input router keys on it in `handle_game_input`.
+    fn set_editor(&mut self, session_id: &str, editor: Option<EditorMode>) {
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            session.editor = editor;
+        }
+    }
+
     fn handle_game_input(&mut self, session_id: &str, input: &str) {
         if input.is_empty() {
             return;
         }
 
-        let (actor_ref, puppet_ref) = match self.sessions.get(session_id) {
-            Some(Session {
-                state: SessionState::Playing { actor_ref, puppet_ref, .. },
-                ..
-            }) => (actor_ref.clone(), puppet_ref.clone()),
-            _ => return,
+        // Three identities, resolved once through the Session interface. Input
+        // interception (softcode prompts, multi-line editors) belongs to the
+        // *human's* stream, so it keys on the Character. Gameplay dispatch and
+        // room/output routing act as the effective actor (the Puppet when one is
+        // driven). Equal when not puppeting, so ordinary play is unchanged.
+        let (character_ref, effective_ref, editor) = match self.sessions.get(session_id) {
+            Some(session) => match (session.character(), session.effective_actor()) {
+                (Some(c), Some(e)) => (c.to_string(), e.to_string(), session.editor),
+                _ => return,
+            },
+            None => return,
         };
-        let _effective_ref = puppet_ref.as_deref().unwrap_or(&actor_ref).to_string();
 
-        // Check for pending prompt — intercept input before command dispatch
-        if let Some(actor) = self.world.get(&actor_ref) {
+        // Check for pending prompt — intercept input before command dispatch.
+        // The prompt callback is registered by softcode's `prompt()` on the
+        // Character object (only Intents can reach it), so it reads the Character.
+        if let Some(actor) = self.world.get(&character_ref) {
             let prompt_obj = actor.attrs.get("_prompt_object").and_then(|v| v.as_str()).map(String::from);
             let prompt_hook = actor.attrs.get("_prompt_hook").and_then(|v| v.as_str()).map(String::from);
             if let (Some(obj_ref), Some(hook)) = (prompt_obj, prompt_hook) {
                 // Clear the prompt attrs before firing the hook
-                if let Some(actor) = self.world.get_mut(&actor_ref) {
+                if let Some(actor) = self.world.get_mut(&character_ref) {
                     actor.attrs.remove("_prompt_object");
                     actor.attrs.remove("_prompt_hook");
                 }
-                let room_ref = self.world.get(&actor_ref).and_then(|o| o.location_ref.clone());
-                let output = match self.fire_hook(&obj_ref, &hook, &actor_ref, room_ref.as_deref(), Some(input)) {
+                let room_ref = self.world.get(&character_ref).and_then(|o| o.location_ref.clone());
+                let output = match self.fire_hook(&obj_ref, &hook, &character_ref, room_ref.as_deref(), Some(input)) {
                     Ok(_) => String::new(),
                     Err(e) => {
                         tracing::warn!(hook = %hook, target = %obj_ref, error = %e, "prompt callback error");
@@ -3447,40 +3411,44 @@ impl Engine {
             }
         }
 
-        // Check for multi-line ink editor mode
-        if let Some(actor) = self.world.get(&actor_ref)
-            && actor.attrs.contains_key("_ink_editing") {
-                self.handle_ink_editor_input(session_id, &actor_ref, input);
+        // Multi-line editor modes — engine-owned session state, keyed on the
+        // Character's session (not an object attr).
+        match editor {
+            Some(EditorMode::Ink) => {
+                self.handle_ink_editor_input(session_id, &character_ref, input);
                 return;
             }
-
-        // Check for multi-line @eval editor mode
-        if let Some(actor) = self.world.get(&actor_ref)
-            && actor.attrs.contains_key("_eval_editing")
-        {
-            self.handle_eval_editor_input(session_id, &actor_ref, input);
-            return;
+            Some(EditorMode::Eval) => {
+                self.handle_eval_editor_input(session_id, &character_ref, input);
+                return;
+            }
+            Some(EditorMode::Program) => {
+                self.handle_program_editor_input(session_id, &character_ref, input);
+                return;
+            }
+            None => {}
         }
 
-        // Check for multi-line @program editor mode
-        if let Some(actor) = self.world.get(&actor_ref)
-            && actor.attrs.contains_key("_program_editing")
-        {
-            self.handle_program_editor_input(session_id, &actor_ref, input);
-            return;
-        }
-
-        self.run_command(&actor_ref, Some(session_id), input);
+        self.run_command(&character_ref, &effective_ref, Some(session_id), input);
     }
 
-    /// Dispatch one command as `actor_ref`. `session_id` is `Some` for a player
-    /// — output and room data flow to their client, and the session-only
-    /// commands (quit, who, the `@`-builder/admin verbs, character management,
-    /// help) are available. It is `None` for a session-less actor, such as a
-    /// `run_command_as`-driven NPC, which runs only the gameplay subset
-    /// (movement, get/drop/put/use, say/emote, and game `cmd_*` hooks) with no
-    /// client to echo to. Player behavior is identical to the pre-refactor path.
-    fn run_command(&mut self, actor_ref: &str, session_id: Option<&str>, input: &str) {
+    /// Dispatch one command. `character_ref` is the account's **Character** —
+    /// the authoring/ownership identity used by the `@`-verbs. `effective_ref`
+    /// is the object **gameplay acts as**: the Puppet when one is driven, else
+    /// the Character (see [`Session::effective_actor`]). The two are equal for a
+    /// session-less NPC and whenever no Puppet is active, so ordinary play is
+    /// unchanged. `session_id` is `Some` for a player — output and room data
+    /// flow to their client and the session-only verbs (quit, who, the
+    /// `@`-builder/admin verbs, character management, help) are available. It is
+    /// `None` for a `run_command_as`-driven NPC, which runs only the gameplay
+    /// subset with no client to echo to.
+    fn run_command(
+        &mut self,
+        character_ref: &str,
+        effective_ref: &str,
+        session_id: Option<&str>,
+        input: &str,
+    ) {
         if input.is_empty() {
             return;
         }
@@ -3494,34 +3462,37 @@ impl Engine {
             None => (input.to_lowercase(), String::new()),
         };
 
-        let room_before = self.world.get(actor_ref).and_then(|a| a.location_ref.clone());
+        // Gameplay presence follows the effective actor (the Puppet, when one is
+        // driven), so a move/look reports the puppeted object's room.
+        let room_before = self.world.get(effective_ref).and_then(|a| a.location_ref.clone());
 
         let output = match cmd.as_str() {
-            // Gameplay commands — available with or without a session.
-            "look" | "l" => self.cmd_look(actor_ref, &args),
+            // Gameplay commands — run as the effective actor. Available with or
+            // without a session.
+            "look" | "l" => self.cmd_look(effective_ref, &args),
             "say" | "\"" => {
                 let msg = if cmd == "\"" {
                     input[1..].trim().to_string()
                 } else {
                     args.clone()
                 };
-                self.cmd_say(sid, actor_ref, &msg)
+                self.cmd_say(sid, effective_ref, &msg)
             }
-            "go" => self.cmd_go(actor_ref, &args),
-            "inventory" | "inv" | "i" => commands::do_inventory(&self.world, actor_ref),
-            "get" | "take" => self.cmd_get(actor_ref, &args),
-            "put" | "place" => self.cmd_put(actor_ref, &args),
-            "drop" => self.cmd_drop(actor_ref, &args),
-            "use" => self.cmd_use(actor_ref, &args),
-            "examine" | "ex" => commands::do_examine(&self.world, actor_ref, &args),
-            "whisper" => self.cmd_whisper(sid, actor_ref, &args),
+            "go" => self.cmd_go(effective_ref, &args),
+            "inventory" | "inv" | "i" => commands::do_inventory(&self.world, effective_ref),
+            "get" | "take" => self.cmd_get(effective_ref, &args),
+            "put" | "place" => self.cmd_put(effective_ref, &args),
+            "drop" => self.cmd_drop(effective_ref, &args),
+            "use" => self.cmd_use(effective_ref, &args),
+            "examine" | "ex" => commands::do_examine(&self.world, effective_ref, &args),
+            "whisper" => self.cmd_whisper(sid, effective_ref, &args),
             "emote" | "pose" | ":" => {
                 let msg = if cmd == ":" {
                     input[1..].trim().to_string()
                 } else {
                     args.clone()
                 };
-                self.do_emote(sid, actor_ref, &msg)
+                self.do_emote(sid, effective_ref, &msg)
             }
 
             // Session-only commands (quit, who, the `@`-builder/admin verbs,
@@ -3539,43 +3510,45 @@ impl Engine {
                     "who" => self.do_who(session_id),
                     "@password" => self.cmd_password(session_id, &args),
                     "@email" => self.cmd_email(session_id, &args),
-                    "@dig" => self.cmd_dig(session_id, actor_ref, &args),
-                    "@open" => self.cmd_open(session_id, actor_ref, &args),
-                    "@describe" | "@desc" => self.cmd_describe(session_id, actor_ref, &args),
-                    "@create" => self.cmd_create(session_id, actor_ref, &args),
-                    "@destroy" => self.cmd_destroy(session_id, actor_ref, &args),
-                    "@set" => self.cmd_set(session_id, actor_ref, &args),
-                    "@teleport" | "@tel" => self.cmd_teleport(session_id, actor_ref, &args),
-                    "@name" => self.cmd_name(session_id, actor_ref, &args),
-                    "@program" => self.cmd_program(session_id, actor_ref, &args),
-                    "@programs" => self.cmd_programs(session_id, actor_ref, &args),
-                    "@rmprogram" => self.cmd_rmprogram(session_id, actor_ref, &args),
-                    "@tag" => self.cmd_tag(session_id, actor_ref, &args),
-                    "@untag" => self.cmd_untag(session_id, actor_ref, &args),
-                    "@script" => self.cmd_script(session_id, actor_ref, &args),
+                    "@dig" => self.cmd_dig(session_id, character_ref, &args),
+                    "@open" => self.cmd_open(session_id, character_ref, &args),
+                    "@describe" | "@desc" => self.cmd_describe(session_id, character_ref, &args),
+                    "@create" => self.cmd_create(session_id, character_ref, &args),
+                    "@destroy" => self.cmd_destroy(session_id, character_ref, &args),
+                    "@set" => self.cmd_set(session_id, character_ref, &args),
+                    "@teleport" | "@tel" => self.cmd_teleport(session_id, character_ref, &args),
+                    "@name" => self.cmd_name(session_id, character_ref, &args),
+                    "@program" => self.cmd_program(session_id, character_ref, &args),
+                    "@programs" => self.cmd_programs(session_id, character_ref, &args),
+                    "@rmprogram" => self.cmd_rmprogram(session_id, character_ref, &args),
+                    "@tag" => self.cmd_tag(session_id, character_ref, &args),
+                    "@untag" => self.cmd_untag(session_id, character_ref, &args),
+                    "@script" => self.cmd_script(session_id, character_ref, &args),
                     "@scripts" => self.cmd_scripts(session_id),
-                    "@rmscript" => self.cmd_rmscript(session_id, actor_ref, &args),
+                    "@rmscript" => self.cmd_rmscript(session_id, character_ref, &args),
                     "@script-interval" => self.cmd_script_interval(session_id, &args),
-                    "@lib" => self.cmd_lib(session_id, actor_ref, &args),
+                    "@lib" => self.cmd_lib(session_id, character_ref, &args),
                     "@libs" => self.cmd_libs(session_id),
-                    "@rmlib" => self.cmd_rmlib(session_id, actor_ref, &args),
-                    "@lock" => self.cmd_lock(session_id, actor_ref, &args),
-                    "@alias" => self.cmd_alias(session_id, actor_ref, &args),
-                    "@clone" => self.cmd_clone(session_id, actor_ref, &args),
-                    "@force" => self.cmd_force(session_id, actor_ref, &args),
-                    "@unlock" => self.cmd_unlock(session_id, actor_ref, &args),
-                    "@locks" => self.cmd_locks(session_id, actor_ref, &args),
+                    "@rmlib" => self.cmd_rmlib(session_id, character_ref, &args),
+                    "@lock" => self.cmd_lock(session_id, character_ref, &args),
+                    "@alias" => self.cmd_alias(session_id, character_ref, &args),
+                    "@clone" => self.cmd_clone(session_id, character_ref, &args),
+                    "@force" => self.cmd_force(session_id, character_ref, &args),
+                    "@unlock" => self.cmd_unlock(session_id, character_ref, &args),
+                    "@locks" => self.cmd_locks(session_id, character_ref, &args),
 
                     "@charlist" => self.cmd_charlist(session_id),
                     "@charcreate" => self.cmd_charcreate(session_id, &args),
                     "@charswitch" => self.cmd_charswitch(session_id, &args),
                     "@chardelete" => self.cmd_chardelete(session_id, &args),
-                    "@puppet" => self.cmd_puppet(session_id, actor_ref, &args),
+                    // Ownership is the Character's, never the Puppet's — a
+                    // puppeteer must not gain authority through the object.
+                    "@puppet" => self.cmd_puppet(session_id, character_ref, &args),
                     "@unpuppet" => self.cmd_unpuppet(session_id),
 
                     "@chown" => self.cmd_chown(session_id, &args),
-                    "@archetype" | "@chparent" => self.cmd_archetype(session_id, actor_ref, &args),
-                    "@dialogue" | "@dialog" => self.cmd_dialogue(session_id, actor_ref, &args),
+                    "@archetype" | "@chparent" => self.cmd_archetype(session_id, character_ref, &args),
+                    "@dialogue" | "@dialog" => self.cmd_dialogue(session_id, character_ref, &args),
 
                     "@grant" => self.cmd_grant(session_id, &args),
                     "@revoke" => self.cmd_revoke(session_id, &args),
@@ -3585,36 +3558,39 @@ impl Engine {
                     "@save" => self.cmd_save(session_id),
                     "@shutdown" => self.cmd_shutdown(session_id),
                     "@reload-world" => self.cmd_reload_world(session_id),
-                    "@eval" => self.cmd_eval(session_id, actor_ref, &args),
+                    "@eval" => self.cmd_eval(session_id, character_ref, &args),
                     "@import" => self.cmd_import(session_id, &args),
                     "@export" => self.cmd_export(session_id, &args),
                     "@maxchars" => self.cmd_maxchars(session_id, &args),
                     "@test" => self.cmd_test(session_id, &args),
-                    "@reload" => self.cmd_reload(session_id, actor_ref, &args),
+                    "@reload" => self.cmd_reload(session_id, character_ref, &args),
 
                     "@token" | "@tokens" => self.cmd_token(session_id, &args),
-                    "@display" => self.cmd_display(actor_ref, &args),
+                    "@display" => self.cmd_display(character_ref, &args),
 
                     "help" | "?" => {
                         let is_builder = self.session_has_scope(session_id, Scope::Builder);
                         let is_admin = self.session_has_scope(session_id, Scope::Admin);
                         commands::do_help_with_roles(is_builder, is_admin)
                     }
-                    _ => self.dispatch_fallback(actor_ref, &cmd, &args),
+                    // An unknown verb is a custom game `cmd_*` hook — gameplay,
+                    // so it runs as the effective actor.
+                    _ => self.dispatch_fallback(effective_ref, &cmd, &args),
                 }
             }
             // Session-less actor (an NPC): an unknown verb resolves to a game
             // `cmd_*` hook, same as for players.
-            _ => self.dispatch_fallback(actor_ref, &cmd, &args),
+            _ => self.dispatch_fallback(effective_ref, &cmd, &args),
         };
 
         if let Some(session_id) = session_id {
             self.send(session_id, &output);
 
-            let room_after = self.world.get(actor_ref).and_then(|a| a.location_ref.clone());
+            // Room panels follow the effective actor's location.
+            let room_after = self.world.get(effective_ref).and_then(|a| a.location_ref.clone());
             if matches!(cmd.as_str(), "look" | "l") || room_before != room_after {
-                self.send_room_data(session_id, actor_ref);
-                self.send_commands(session_id, actor_ref);
+                self.send_room_data(session_id, effective_ref);
+                self.send_commands(session_id, effective_ref);
             }
         }
     }
@@ -4069,10 +4045,10 @@ impl Engine {
                 .map(|s| s.source.clone())
                 .unwrap_or_default();
             if let Some(actor) = self.world.get_mut(actor_ref) {
-                actor.attrs.insert("_program_editing".into(), serde_json::json!(true));
                 actor.attrs.insert("_program_buffer".into(), serde_json::json!(current));
                 actor.attrs.insert("_program_target".into(), serde_json::json!(target_ref));
             }
+            self.set_editor(session_id, Some(EditorMode::Program));
             return "Enter Luau source (define hooks as functions). Type '.' on a line by itself to install it, '@abort' to cancel:\r\n"
                 .to_string();
         }
@@ -4113,8 +4089,8 @@ impl Engine {
                     .to_string();
                 (buffer, target_ref)
             };
+            self.set_editor(session_id, None);
             if let Some(actor) = self.world.get_mut(actor_ref) {
-                actor.attrs.remove("_program_editing");
                 actor.attrs.remove("_program_buffer");
                 actor.attrs.remove("_program_target");
             }
@@ -4125,8 +4101,8 @@ impl Engine {
             let output = self.install_program(actor_ref, &target_ref, &buffer);
             self.send(session_id, &output);
         } else if input == "@abort" {
+            self.set_editor(session_id, None);
             if let Some(actor) = self.world.get_mut(actor_ref) {
-                actor.attrs.remove("_program_editing");
                 actor.attrs.remove("_program_buffer");
                 actor.attrs.remove("_program_target");
             }
@@ -4565,7 +4541,8 @@ impl Engine {
             // included), exactly as before.
             self.handle_game_input(&session_id, command);
         } else if self.world.get(target).map(|o| o.kind == Kind::Npc).unwrap_or(false) {
-            self.run_command(target, None, command);
+            // A forced NPC has no Puppet: character and effective actor are one.
+            self.run_command(target, target, None, command);
         }
         self.force_depth = self.force_depth.saturating_sub(1);
     }
@@ -6089,6 +6066,8 @@ impl Engine {
                 }
             }
             "edit" => {
+                // `_ink_editing` holds the target being edited (working data);
+                // the routing flag is `Session.editor`.
                 if let Some(actor) = self.world.get_mut(actor_ref) {
                     actor.attrs.insert(
                         "_ink_editing".into(),
@@ -6098,6 +6077,7 @@ impl Engine {
                         .attrs
                         .insert("_ink_buffer".into(), serde_json::json!(""));
                 }
+                self.set_editor(session_id, Some(EditorMode::Ink));
                 "Enter .ink source. Type '.' on a line by itself to finish, '@abort' to cancel:\r\n"
                     .to_string()
             }
@@ -6163,6 +6143,7 @@ impl Engine {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            self.set_editor(session_id, None);
             if let Some(actor) = self.world.get_mut(actor_ref) {
                 actor.attrs.remove("_ink_editing");
                 actor.attrs.remove("_ink_buffer");
@@ -6194,6 +6175,7 @@ impl Engine {
                 }
             }
         } else if input == "@abort" {
+            self.set_editor(session_id, None);
             if let Some(actor) = self.world.get_mut(actor_ref) {
                 actor.attrs.remove("_ink_editing");
                 actor.attrs.remove("_ink_buffer");
@@ -6233,11 +6215,9 @@ impl Engine {
             if let Some(actor) = self.world.get_mut(actor_ref) {
                 actor
                     .attrs
-                    .insert("_eval_editing".into(), serde_json::json!(true));
-                actor
-                    .attrs
                     .insert("_eval_buffer".into(), serde_json::json!(""));
             }
+            self.set_editor(session_id, Some(EditorMode::Eval));
             return "Enter Luau source. Type '.' on a line by itself to run it, '@abort' to cancel:\r\n"
                 .to_string();
         }
@@ -6253,8 +6233,8 @@ impl Engine {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            self.set_editor(session_id, None);
             if let Some(actor) = self.world.get_mut(actor_ref) {
-                actor.attrs.remove("_eval_editing");
                 actor.attrs.remove("_eval_buffer");
             }
             if buffer.is_empty() {
@@ -6264,8 +6244,8 @@ impl Engine {
             let output = self.eval_and_report(actor_ref, &buffer);
             self.send(session_id, &output);
         } else if input == "@abort" {
+            self.set_editor(session_id, None);
             if let Some(actor) = self.world.get_mut(actor_ref) {
-                actor.attrs.remove("_eval_editing");
                 actor.attrs.remove("_eval_buffer");
             }
             self.send(session_id, "Eval cancelled.\r\n");
@@ -8108,6 +8088,7 @@ mod tests {
                     account_id,
                     puppet_ref: None,
                 },
+                editor: None,
             },
         );
 
@@ -9251,15 +9232,12 @@ mod tests {
             .and_then(|a| a.location_ref.clone())
             .expect("actor should be in a room");
 
-        // Bare `@eval` enters the multi-line editor.
+        // Bare `@eval` enters the multi-line editor — engine-owned session
+        // state now, not an object attr.
         engine.handle_input(&session_id, "@eval");
-        assert!(
-            engine
-                .world
-                .get(&actor_ref)
-                .unwrap()
-                .attrs
-                .contains_key("_eval_editing")
+        assert_eq!(
+            engine.sessions.get(&session_id).unwrap().editor,
+            Some(EditorMode::Eval)
         );
 
         engine.handle_input(&session_id, &format!(r#"set_attr("{}", "line_one", 1)"#, target));
@@ -9267,14 +9245,7 @@ mod tests {
         engine.handle_input(&session_id, ".");
 
         // Editor state is cleared once the buffer runs.
-        assert!(
-            !engine
-                .world
-                .get(&actor_ref)
-                .unwrap()
-                .attrs
-                .contains_key("_eval_editing")
-        );
+        assert_eq!(engine.sessions.get(&session_id).unwrap().editor, None);
         let attrs = &engine.world.get(&target).unwrap().attrs;
         assert_eq!(attrs["line_one"], 1);
         assert_eq!(attrs["line_two"], 2);
@@ -9287,13 +9258,93 @@ mod tests {
         engine.handle_input(&session_id, "should_never_run()");
         engine.handle_input(&session_id, "@abort");
 
-        assert!(
-            !engine
-                .world
-                .get(&actor_ref)
-                .unwrap()
-                .attrs
-                .contains_key("_eval_editing")
+        assert_eq!(engine.sessions.get(&session_id).unwrap().editor, None);
+    }
+
+    // -- Puppeting: the effective-actor routing that ADR-0008 completes --
+
+    /// Build an NPC in `room` and return its ref.
+    fn add_npc(engine: &mut Engine, room: &str, key: &str) -> String {
+        let npc_ref = engine.world.next_dbref();
+        let npc = GameObject::new(&npc_ref, key, Kind::Npc)
+            .with_title(key)
+            .with_location(room);
+        engine.world.add_object(npc);
+        npc_ref
+    }
+
+    #[test]
+    fn session_accessors_split_character_from_effective_actor() {
+        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
+        let room = engine.world.get(&actor_ref).unwrap().location_ref.clone().unwrap();
+        let npc = add_npc(&mut engine, &room, "goblin");
+
+        // Not puppeting: effective actor == character.
+        {
+            let s = engine.sessions.get(&session_id).unwrap();
+            assert_eq!(s.character(), Some(actor_ref.as_str()));
+            assert_eq!(s.effective_actor(), Some(actor_ref.as_str()));
+            assert_eq!(s.puppet(), None);
+        }
+
+        engine.handle_input(&session_id, &format!("@puppet {}", npc));
+
+        // Puppeting: character is unchanged, effective actor is the NPC.
+        let s = engine.sessions.get(&session_id).unwrap();
+        assert_eq!(s.character(), Some(actor_ref.as_str()));
+        assert_eq!(s.effective_actor(), Some(npc.as_str()));
+        assert_eq!(s.puppet(), Some(npc.as_str()));
+    }
+
+    #[test]
+    fn puppet_routes_gameplay_to_the_npc_not_the_character() {
+        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
+        let room1 = engine.world.get(&actor_ref).unwrap().location_ref.clone().unwrap();
+
+        // A second room, an exit "north" from room1 to it, and an NPC in room1.
+        let room2 = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&room2, "north_room", Kind::Room).with_title("North"));
+        let exit_ref = engine.world.next_dbref();
+        engine.world.add_object(
+            GameObject::new(&exit_ref, "north", Kind::Exit)
+                .with_location(&room1)
+                .with_target(&room2),
+        );
+        let npc = add_npc(&mut engine, &room1, "goblin");
+
+        engine.handle_input(&session_id, &format!("@puppet {}", npc));
+        engine.handle_input(&session_id, "go north");
+
+        // The PUPPET moved; the character stayed put. This is the behavior the
+        // feature described but never delivered before ADR-0008.
+        assert_eq!(
+            engine.world.get(&npc).unwrap().location_ref.as_deref(),
+            Some(room2.as_str()),
+            "gameplay routes to the effective actor"
+        );
+        assert_eq!(
+            engine.world.get(&actor_ref).unwrap().location_ref.as_deref(),
+            Some(room1.as_str()),
+            "the character does not move while puppeting"
+        );
+    }
+
+    #[test]
+    fn charswitch_would_drop_the_puppet() {
+        // enter_world rebuilds Playing with puppet_ref: None, so any path that
+        // re-enters the world (charswitch, reconnect) releases the puppet.
+        let (mut engine, session_id, actor_ref) = test_engine_with_session(true);
+        let room = engine.world.get(&actor_ref).unwrap().location_ref.clone().unwrap();
+        let npc = add_npc(&mut engine, &room, "goblin");
+        engine.handle_input(&session_id, &format!("@puppet {}", npc));
+        assert_eq!(engine.sessions.get(&session_id).unwrap().puppet(), Some(npc.as_str()));
+
+        engine.handle_input(&session_id, "@unpuppet");
+        assert_eq!(engine.sessions.get(&session_id).unwrap().puppet(), None);
+        // After releasing, gameplay is the character again.
+        assert_eq!(
+            engine.sessions.get(&session_id).unwrap().effective_actor(),
+            Some(actor_ref.as_str())
         );
     }
 
@@ -10211,7 +10262,9 @@ end
             ApiRequest::UpdateExit { ref_id: exit.clone(), direction: None, target: Some("#999999".into()) },
             Some(token.clone()),
         );
-        assert!(bad.error.as_deref().unwrap().contains("not found"));
+        // Routed through Intent::UpdateExit, whose refusal names the missing
+        // destination (the unified authoring/softcode message).
+        assert!(bad.error.as_deref().unwrap().contains("no destination"));
         let notexit = engine.handle_api_request(
             ApiRequest::UpdateExit { ref_id: a, direction: Some("x".into()), target: None },
             Some(token.clone()),
@@ -10745,6 +10798,7 @@ end
                     account_id: "acct".into(),
                     puppet_ref: None,
                 },
+                editor: None,
             },
         );
 
