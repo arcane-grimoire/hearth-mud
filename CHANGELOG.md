@@ -7,6 +7,23 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## Unreleased
 
+### Added
+
+- **`just release` cuts a release; the changelog rule is enforced, not trusted.**
+  `just release` takes the next rc (`just release 0.1.0` for anything else) and
+  runs the whole procedure: refuse a dirty tree, stamp `## Unreleased` with the
+  version and today's date, commit that alone, bump `Cargo.toml`, build, run the
+  suite, make a version-only `Release` commit, gate, tag, push. The release
+  commit's body *is* the changelog section, so the summary and the changelog
+  cannot drift — there's one copy of the prose. `PUSH=0` stops before pushing.
+- **A release gate that runs in both places** (`scripts/check-release.sh`, also
+  `just release-check vX.Y.Z`): the tag, `Cargo.toml`, and a stamped
+  `## X.Y.Z` changelog section must agree, and it warns if the release commit
+  touches more than the version files. The `Release` workflow runs it as a
+  `guard` job that every publishing job depends on, so a release missing its
+  changelog entry ships no binaries, no GitHub release, and no ghcr image —
+  the rule now fails closed instead of relying on whoever's cutting it.
+
 ### Docs
 
 - **The changelog is now a documented rule, not a habit.** `CLAUDE.md`,

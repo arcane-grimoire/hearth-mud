@@ -9,7 +9,20 @@ permissions:
   packages: write
 
 jobs:
+  # Gate: the tag, Cargo.toml, and CHANGELOG.md must agree before anything
+  # publishes. Everything below needs this, so a release that skipped its
+  # changelog entry ships no binaries, no GitHub release, and no ghcr image.
+  # Same script `just release-check` runs locally, so the answer can't differ.
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: scripts/check-release.sh "${GITHUB_REF_NAME}"
+
   build:
+    needs: guard
     strategy:
       matrix:
         include:
@@ -72,6 +85,7 @@ jobs:
           path: dist/${{ matrix.name }}.tar.gz
 
   docker:
+    needs: guard
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
