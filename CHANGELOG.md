@@ -5,7 +5,51 @@ history — earlier changes are in the git log.
 
 The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 0.1.0-rc.18 — 2026-08-26
+
+### Fixed
+
+- **The builder's Help panel no longer drags the editor off-screen.** Opening
+  the scripting reference shifted the whole code pane sideways — toolbar, tab
+  bar, and panel clipped under the explorer tree. The panel's rows use
+  `white-space: nowrap` for their one-line hook docs, so its min-content width
+  is the longest doc string (measured 1560px), and the flex default
+  `min-width: auto` made that a floor it refused to shrink below: the editor row
+  grew to twice its container, and focusing the search box on open made the
+  browser scroll the (`overflow: hidden`) workspace pane ~900px sideways to
+  reveal it. `min-width: 0` clamps the panel — the nowrap rows ellipsize, as
+  they were always styled to — and the dock now clips rather than reflowing its
+  neighbour.
+
+- **`game_smoke` had been passing without loading anything.** The test pointed
+  at `../the-last-stag-mud/world`, which stopped existing when the game split
+  into content and code tiers under `game/`; the missing path took the "sibling
+  repo not checked out" branch and returned green, so the one test that loads
+  the real game world was a no-op through the whole one-script-per-object
+  migration. It now reads `HEARTH_GAME_DIR` or `../the-last-stag-mud/game`, and
+  the skip discriminates: an absent sibling repo still skips (for CI), but a
+  present repo with a missing game dir fails and says so. Assertions rewritten
+  for the current structure — one `system:global` object per command file, the
+  multi-file `cmd_combat`, and the `derive_hooks` string-literal guard on
+  `onboarding`.
+
+### Docs
+
+- **The global command surface is code, not a hidden item.** The softcode
+  guide, the README, and the softcode skill all taught modelling a game-wide
+  rules or command object as `kind = "item"` plus `system:hidden` — a fake thing
+  on the floor that then has to be hidden. `Kind::Code` is the honest model and
+  costs nothing: `World::contents` already filters it out of room contents,
+  `look`, inventory, and `get`/`put`, and global dispatch never consults kind
+  (the index keys off the `system:global` tag and the hooks a script defines).
+  Scoped deliberately to the *global* surface — object-local commands on a real
+  physical thing (`cmd_spin` on a roulette wheel, `cmd_talk` on an NPC) belong
+  on that object.
+- Refreshed the stale `../the-last-stag-mud/world` game-directory paths in
+  getting-started and the softcode / softcode-test skills to the current
+  `game/` layout (`world/` content, `std/` code).
+
+## 0.1.0-rc.17 — 2026-08-26
 
 ### Added
 
