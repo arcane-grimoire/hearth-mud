@@ -456,11 +456,24 @@ Create an object with `system:global` tag and a script defining `cmd_` hooks:
 ```toml
 [[objects]]
 key = "rules"
-kind = "item"
+kind = "code"
 title = "Game Rules"
-tags = ["system:global"]
+tags = ["system:global", "system:hidden"]
 script = { source = 'function cmd_help(this, actor, room, args) emit(actor, "...") end' }
 ```
+
+Use `kind = "code"` — not a hidden item. Code objects are "code with no physical
+presence": the engine never lists them in room contents, `look`, inventory, or
+`get`/`put`. Dispatch ignores kind entirely (the global index keys off the
+`system:global` tag and the hooks the script defines), so the only thing a fake
+item buys you is a thing on the floor you then have to hide. `system:hidden` on
+top is belt-and-braces, and harmless.
+
+This applies to the *global* surface only. A command that belongs to a real,
+physical object — `cmd_spin` on a roulette wheel, `cmd_pull` on a lever,
+`cmd_talk` on an NPC — stays on that item or NPC, where it reads as the thing's
+own behavior. The smell is a typed-anywhere command surface wearing an item's
+clothes, not commands on items.
 
 ### Persistent state on objects
 

@@ -158,7 +158,7 @@ This lets a single global rules object handle game-wide events:
 ```toml
 [[objects]]
 key = "rules"
-kind = "item"
+kind = "code"
 tags = ["system:global", "system:hidden"]
 script = "rules.luau"   # one script defining on_enter, on_connect, etc.
 ```
@@ -172,6 +172,20 @@ local function refresh_map(actor) ... end
 function on_enter(this, actor, room) refresh_map(actor) end
 function on_connect(this, actor, room) refresh_map(actor) end
 ```
+
+**Give the global surface `kind = "code"`, not a hidden item.** `Kind::Code`
+means "code with no physical presence": the engine already leaves those objects
+out of room contents, `look`, inventory, and `get`/`put`, so a global rules or
+command object stops pretending to be a thing lying on the floor. Dispatch
+doesn't care — the global index keys off the `system:global` tag and the hooks a
+script defines, not the kind. (`system:hidden` on top is belt-and-braces, and
+harmless.)
+
+This is about the *global* surface only. A command that belongs to a real,
+physical object — `cmd_spin` on a roulette wheel, `cmd_pull` on a lever,
+`cmd_talk` on an NPC — stays on that item or NPC, where it reads as the thing's
+own behavior. The smell is a typed-anywhere command surface wearing an item's
+clothes, not commands on items.
 
 ## Hook parameters
 

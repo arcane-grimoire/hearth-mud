@@ -90,7 +90,7 @@ Programs are Luau functions attached to objects. The engine calls them at specif
 | `on_save` | Before each world save |
 | `cmd_<name>` | Custom command — `cmd_talk` handles the `talk` command |
 
-Objects tagged `system:global` receive `cmd_*` hooks from anywhere and lifecycle hooks (`on_enter`, `on_leave`, `on_connect`, `on_disconnect`) from all rooms.
+Objects tagged `system:global` receive `cmd_*` hooks from anywhere and lifecycle hooks (`on_enter`, `on_leave`, `on_connect`, `on_disconnect`) from all rooms. Give them `kind = "code"` — dispatch ignores kind, and Code objects are never listed as physical things (see the softcode guide).
 
 ## Softcode API
 
