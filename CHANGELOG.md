@@ -5,6 +5,29 @@ history — earlier changes are in the git log.
 
 The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.1.0-rc.19 — 2026-08-26
+
+### Fixed
+
+- **A managed object now adopts its file's `kind` on reload.** The loader's
+  update-existing branch refreshed everything a file owns — title, description,
+  location, archetype, attrs, locks, tags, script, `attr_schema` — except
+  `kind`, which only `GameObject::new` ever set, in the create branch. So
+  editing `kind` in a file and redeploying silently did nothing: the object kept
+  the kind it was born with, and converting existing content meant destroying
+  and recreating it, or wiping the database. Kind is part of the definition the
+  file owns, so it's adopted like the rest. Objects created in-game carry no
+  `system:managed` tag and are untouched. One consequence worth knowing:
+  `World::objects_in` excludes `Code` and `Exit`, so flipping an object that
+  holds contents to `code` stops those contents listing.
+
+### Changed
+
+- **An exit's destination is clickable in the builder.** A room's Exits row
+  points at two different objects — the exit and the room it leads to — but the
+  whole row opened the exit. The direction chip keeps that; the room name now
+  opens the room.
+
 ## 0.1.0-rc.18 — 2026-08-26
 
 ### Fixed
