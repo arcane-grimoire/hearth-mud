@@ -28,7 +28,26 @@ release-candidate pre-release:
 Match the existing tag style (`git tag --sort=-creatordate | head -3`) — don't
 invent a new format.
 
-## Steps
+## The short version
+
+```sh
+just release            # next rc: stamp changelog, bump, test, commit, tag, push
+just release 0.1.0      # any other version (rc -> final, minor, major)
+PUSH=0 just release     # everything except the push
+```
+
+`scripts/release.sh` runs the steps below in order and refuses to skip them: a
+dirty tree, a missing or empty `## Unreleased` section, or a tag that disagrees
+with `Cargo.toml` each abort before anything is committed. The release commit's
+body is the changelog section itself, so there's one copy of the prose. Set
+`RELEASE_TRAILERS` to add commit trailers (agents: your `Co-Authored-By` +
+`Claude-Session` lines).
+
+**Still decide the version yourself**, and make sure the `## Unreleased` section
+actually describes this release before running it — the script enforces that an
+entry exists, not that it's any good.
+
+## Steps (what the script does; do this by hand for anything unusual)
 
 1. **Confirm the tree is clean and land real work first.**
    ```sh

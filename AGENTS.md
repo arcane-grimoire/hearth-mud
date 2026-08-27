@@ -168,8 +168,13 @@ diff. Cutting a release stamps that section as the version being cut
 Keep the entry in its own commit. A `Release vX.Y.Z` commit touches
 `Cargo.toml` + `Cargo.lock` and nothing else, then gets an annotated `vX.Y.Z`
 tag — pushing that tag is what builds the published binaries and the
-`ghcr.io/arcane-grimoire/hearth-mud` image that games pin. The `cut-version`
-skill has the full procedure.
+`ghcr.io/arcane-grimoire/hearth-mud` image that games pin.
+
+Use `just release` (next rc) or `just release X.Y.Z`; it runs the whole
+procedure and aborts on a dirty tree or an unstamped changelog. `just
+release-check vX.Y.Z` runs the gate alone — the same script the `Release`
+workflow's `guard` job runs, so nothing publishes without its entry. The
+`cut-version` skill has the full procedure.
 
 ## Don't
 

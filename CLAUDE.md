@@ -310,7 +310,12 @@ diff. Cutting a release stamps that section as the version being cut
 
 The changelog entry is its **own commit**, never folded into the `Release
 vX.Y.Z` commit — a release commit touches `Cargo.toml` + `Cargo.lock` and
-nothing else. See the `cut-version` skill for the full release procedure.
+nothing else.
+
+`just release` does all of it (next rc; `just release 0.1.0` for anything else)
+and refuses to cut one without a stamped entry, as does the `Release` workflow's
+`guard` job — so the rule fails closed rather than relying on memory. See the
+`cut-version` skill.
 
 ## Design decisions
 
