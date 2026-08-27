@@ -712,6 +712,19 @@ pub fn load_game_dir(
             let archetype_ref = resolve_archetype(&ref_id, area_name, &object.archetype, &key_map);
             if let Some(existing) = world.get_mut(&ref_id) {
                 if existing.tags.contains(&managed) {
+                    // Kind is part of the file's *definition*, so a managed
+                    // object adopts it on reload like it adopts title, tags,
+                    // and script. Without this, changing `kind` in a file did
+                    // nothing to an object that already existed — only a fresh
+                    // create picked it up — so converting content (e.g. a
+                    // command object from a hidden `item` to `code`) meant
+                    // destroying and recreating it, or wiping the database.
+                    // In-game-created objects aren't managed, so they're
+                    // untouched. Note a kind change can change visibility:
+                    // `World::objects_in` excludes Code and Exit, so flipping
+                    // a container-ish object to `code` stops listing whatever
+                    // sits inside it.
+                    existing.kind = kind;
                     if let Some(title) = &object.title {
                         existing.title = Some(title.clone());
                     }
@@ -1458,6 +1471,71 @@ archetype = "loop/a"
 
         assert_eq!(key_map2.get("town/crossroads"), Some(&ref_id));
         assert_eq!(world.get(&ref_id).unwrap().description, "New description.");
+    }
+
+    /// Kind is part of a managed object's file-owned definition: changing it
+    /// in the file and redeploying converts the existing object in place,
+    /// rather than requiring a destroy-and-recreate (or a database wipe).
+    /// The motivating case is a `system:global` command object moving from the
+    /// hidden-`item` pattern to `code`.
+    #[test]
+    fn reload_adopts_a_changed_kind_on_a_managed_object() {
+        let dir = TempGameDir::new();
+        let area = |kind: &str| {
+            format!(
+                r#"
+                area = "std"
+                [[rooms]]
+                key = "void"
+                title = "Void"
+                [[objects]]
+                key = "cmd_hero"
+                kind = "{kind}"
+                title = "Command: hero"
+                tags = ["system:global", "system:hidden"]
+            "#
+            )
+        };
+
+        let mut world = World::new();
+        dir.write_area("std", "rules.toml", &area("item"));
+        let key_map1 = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap().key_map;
+        let ref_id = key_map1.get("std/cmd_hero").unwrap().clone();
+        assert_eq!(world.get(&ref_id).unwrap().kind, Kind::Item);
+
+        dir.write_area("std", "rules.toml", &area("code"));
+        let key_map2 = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap().key_map;
+
+        // Converted in place: same dbref, new kind.
+        assert_eq!(key_map2.get("std/cmd_hero"), Some(&ref_id));
+        assert_eq!(world.get(&ref_id).unwrap().kind, Kind::Code);
+    }
+
+    /// The flip side: an object built in-game carries no `system:managed` tag,
+    /// so a file that happens to share its dbref never rewrites its kind.
+    #[test]
+    fn reload_leaves_an_unmanaged_objects_kind_alone() {
+        let dir = TempGameDir::new();
+        dir.write_area(
+            "town",
+            "town.toml",
+            r#"
+                area = "town"
+                [[rooms]]
+                key = "crossroads"
+                title = "The Crossroads"
+            "#,
+        );
+        let mut world = World::new();
+        load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+
+        // A builder's own item, never file-managed.
+        let ref_id = world.next_dbref();
+        world.add_object(GameObject::new(&ref_id, "lantern", Kind::Item));
+
+        load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+        assert_eq!(world.get(&ref_id).unwrap().kind, Kind::Item);
+        assert!(!world.get(&ref_id).unwrap().tags.contains(&managed_tag()));
     }
 
     /// A room with one inline program, so tests can vary just the parts they

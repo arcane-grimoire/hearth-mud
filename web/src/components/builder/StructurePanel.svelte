@@ -116,8 +116,12 @@
       <div class="rows">
         {#each exits as e (e.ref_id)}
           <div class="row-item" class:armed={confirmExit === e.ref_id}>
-            <span class="dir">{e.direction}</span>
-            <button class="link" onclick={() => onedit(e.ref_id)} title="Edit this exit">→ {roomName(e.target_ref)}</button>
+            <!-- Two destinations in one row, so each gets its own control: the
+                 direction chip opens the exit object (aliases, locks, hooks),
+                 the room name opens the room it leads to. Reading the row
+                 left to right matches what each click does. -->
+            <Tooltip text="Edit this exit"><button class="dir" onclick={() => onedit(e.ref_id)}>{e.direction}</button></Tooltip>
+            <button class="link" onclick={() => onedit(e.target_ref)} title={`Open ${roomName(e.target_ref)}`}>→ {roomName(e.target_ref)}</button>
             {#if confirmExit === e.ref_id}
               <span class="confirm-q">Delete this exit?</span>
               <button class="confirm-go" onclick={() => deleteExit(e)}>Delete</button>
@@ -190,7 +194,8 @@
   .cnt { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-meta); opacity: 0.8; }
   .rows { display: flex; flex-direction: column; gap: 5px; }
   .row-item { display: flex; align-items: center; gap: 9px; padding: 6px 8px; background: var(--bg-inset, #12100c); border: 1px solid var(--border-muted, #211d16); border-radius: 7px; }
-  .dir { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-badge); text-transform: uppercase; color: var(--bg-primary, #12100c); background: var(--edge, #9c8863); border-radius: 4px; padding: 1px 6px; }
+  .dir { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-badge); text-transform: uppercase; color: var(--bg-primary, #12100c); background: var(--edge, #9c8863); border: none; border-radius: 4px; padding: 1px 6px; cursor: pointer; }
+  .dir:hover { background: var(--accent-amber, #c9956b); }
   .kind { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--fs-badge); text-transform: uppercase; color: var(--bg-primary, #12100c); background: var(--edge, #9c8863); border-radius: 4px; padding: 1px 6px; }
   .link { flex: 1; text-align: left; background: none; border: none; cursor: pointer; font: inherit; font-size: 12.5px; color: var(--text-primary, #ece0c8); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .link:hover { color: var(--accent-amber, #c9956b); text-decoration: underline; }
