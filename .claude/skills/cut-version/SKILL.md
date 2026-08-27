@@ -5,11 +5,16 @@ description: Cut a new hearth-mud version — bump the version in Cargo.toml, wr
 # Cutting a version
 
 Hearth-mud releases are a **version-only commit + annotated tag** pair — no
-release script, no changelog file. The version lives in `Cargo.toml`
-(`version = "X.Y.Z"`, currently a `0.1.0-rc.N` pre-release) and is mirrored into
-`Cargo.lock`. Each release is a commit titled `Release vX.Y.Z` whose body
-summarizes what changed since the previous release, plus a matching annotated tag
-`vX.Y.Z`.
+release script. The version lives in `Cargo.toml` (`version = "X.Y.Z"`, currently
+a `0.1.0-rc.N` pre-release) and is mirrored into `Cargo.lock`. Each release is a
+commit titled `Release vX.Y.Z` whose body summarizes what changed since the
+previous release, plus a matching annotated tag `vX.Y.Z`.
+
+`CHANGELOG.md` is kept too, and it is **not** part of the release commit. Land
+the entry in its own commit first (see step 1), then cut a release commit that
+touches only `Cargo.toml` + `Cargo.lock`. Note the file starts partway through
+the project's history and has gaps (rc.8–rc.16 have no sections), so don't
+assume a missing section means a version wasn't released.
 
 ## Pick the new version
 
@@ -31,7 +36,11 @@ invent a new format.
    git status --short           # the release commit contains ONLY Cargo.toml + Cargo.lock
    ```
    All feature work goes in its own commits before the release; never fold
-   changes into the Release commit.
+   changes into the Release commit — the CHANGELOG entry included.
+
+   If `CHANGELOG.md` has an `## Unreleased` section, stamp it as the version
+   being cut (`## X.Y.Z — YYYY-MM-DD`) and add any entries this release still
+   needs, then commit that on its own before step 2.
 
 2. **Bump `version`** in `Cargo.toml` to the chosen value.
 
