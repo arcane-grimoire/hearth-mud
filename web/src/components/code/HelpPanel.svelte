@@ -274,6 +274,14 @@
 
 <style>
   .hp {
+    /* min-width: 0 is load-bearing. The panel's rows use `white-space: nowrap`
+       for their one-line docs, so its min-content width is the width of the
+       longest doc string (~1500px). As a flex item the default `min-width: auto`
+       makes that a floor, so the panel refused to shrink into its docked column,
+       overflowed the editor pane, and focusing the search box scrolled the
+       (overflow:hidden) workspace pane sideways — dragging the whole editor
+       off to the left. Clamp it; the nowrap rows ellipsize instead. */
+    min-width: 0;
     display: flex; flex-direction: column; min-height: 0; position: relative;
     border-left: 1px solid var(--border-default, #2a2419);
     background: var(--bg-surface, #17140f);

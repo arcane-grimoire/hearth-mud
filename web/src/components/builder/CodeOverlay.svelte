@@ -395,9 +395,11 @@
   /* While dragging, suppress text selection and force the resize cursor. */
   .mid.resizing { cursor: col-resize; user-select: none; }
   .edit { flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
-  .side { flex: none; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg-surface, #17140f); }
-  .help-wrap { flex: 1 1 0; min-height: 140px; display: flex; }
-  .help-wrap :global(.hp) { flex: 1; min-height: 0; border-left: none; }
+  /* overflow: hidden so a panel whose content is wider than the dock can never
+     push the editor around — it clips (and scrolls internally) instead. */
+  .side { flex: none; min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; background: var(--bg-surface, #17140f); }
+  .help-wrap { flex: 1 1 0; min-width: 0; min-height: 140px; display: flex; }
+  .help-wrap :global(.hp) { flex: 1; min-width: 0; min-height: 0; border-left: none; }
 
   /* Preview-fire sidebar panel: context pickers on top, results filling below. */
   .test-panel { flex: 1 1 0; min-height: 180px; display: flex; flex-direction: column; min-width: 0; }
