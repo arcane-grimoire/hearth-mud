@@ -39,8 +39,8 @@ configured, a fresh `cargo run` drops you into a single empty room described
 `game_dir` at one in `hearth.toml`, e.g.:
 
 ```toml
-game_dir = "../the-last-stag-mud/world"
-spawn_room = "town/crossroads"   # <area>/<key> of the room to spawn in
+game_dir = "../the-last-stag-mud/game"
+spawn_room = "world/town/crossroads"   # <area>/<key> of the room to spawn in
 ```
 
 Then `look` shows the loaded world and you can move with `north`/`n`/etc. The

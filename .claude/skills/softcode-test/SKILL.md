@@ -94,7 +94,7 @@ In-game (as a builder):
 @test lib/str.test.luau        -- run one file
 ```
 
-The `cargo test` harness looks for the game directory at `../the-last-stag-mud/world/` or the `HEARTH_GAME_DIR` environment variable. It skips gracefully if not found.
+The `cargo test` harness looks for the game directory at `../the-last-stag-mud/game/` or the `HEARTH_GAME_DIR` environment variable. It skips gracefully if not found.
 
 ## When writing tests
 
@@ -110,4 +110,4 @@ The `cargo test` harness looks for the game directory at `../the-last-stag-mud/w
 - `src/softcode/mod.rs` — `SoftcodeRuntime::run_tests()`, assertion helpers, Rust test harness
 - `src/loader.rs` — `discover_test_files()`, `TestFile` struct
 - `src/engine/mod.rs` — `@test` builder command
-- Game test files live in the game directory (e.g., `../the-last-stag-mud/world/lib/str.test.luau`)
+- Game test files live in the game directory (e.g., `../the-last-stag-mud/game/lib/str.test.luau`)

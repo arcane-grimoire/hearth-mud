@@ -4,7 +4,7 @@ description: Write Luau softcode for Hearth MUD — hooks, commands, game conten
 
 # Writing Hearth MUD softcode
 
-Hearth MUD games are built in two layers: **TOML area files** define the world (rooms, NPCs, items, exits) and **Luau scripts** bring it to life (hooks, commands, behaviors). Both live in the game directory (e.g. `../the-last-stag-mud/world/`). The engine is never modified for game logic.
+Hearth MUD games are built in two layers: **TOML area files** define the world (rooms, NPCs, items, exits) and **Luau scripts** bring it to life (hooks, commands, behaviors). Both live in the game directory named by `game_dir` in `hearth.toml` (The Last Stag's is `../the-last-stag-mud/game/`, split into `world/` content and `std/` code). The engine is never modified for game logic.
 
 ## Architecture
 
