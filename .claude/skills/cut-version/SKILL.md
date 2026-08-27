@@ -38,13 +38,27 @@ invent a new format.
    All feature work goes in its own commits before the release; never fold
    changes into the Release commit — the CHANGELOG entry included.
 
-   If `CHANGELOG.md` has an `## Unreleased` section, stamp it as the version
-   being cut (`## X.Y.Z — YYYY-MM-DD`) and add any entries this release still
-   needs, then commit that on its own before step 2.
+2. **Update `CHANGELOG.md` — required, before the version bump.** This is a
+   project rule (`CLAUDE.md`, `AGENTS.md`), not a nicety: no release ships
+   without its entry.
 
-2. **Bump `version`** in `Cargo.toml` to the chosen value.
+   ```sh
+   git log --oneline <previous-tag>..HEAD    # everything this release carries
+   grep -n '^## ' CHANGELOG.md               # current sections
+   ```
 
-3. **Build** so `Cargo.lock` picks it up and the release compiles; run tests for
+   Stamp the `## Unreleased` section as the version being cut
+   (`## X.Y.Z — YYYY-MM-DD`), and add entries for anything in that log that
+   reached origin without one. Write what changed and why it matters to someone
+   using Hearth, grouped under `### Added` / `### Fixed` / `### Changed` /
+   `### Performance` / `### Docs` — not a restated diff.
+
+   **Commit this on its own** (`Changelog: X.Y.Z`) before step 3. It must not
+   ride along with the version bump.
+
+3. **Bump `version`** in `Cargo.toml` to the chosen value.
+
+4. **Build** so `Cargo.lock` picks it up and the release compiles; run tests for
    a real release:
    ```sh
    cargo build
@@ -52,14 +66,11 @@ invent a new format.
    cargo test                                                  # should be all green
    ```
 
-4. **Write the summary.** Diff since the previous tag and group by area
-   (Security / Softcode / World / Clients / Docs — whatever applies), a few
-   lines each, not a raw commit dump:
-   ```sh
-   git log --oneline <previous-tag>..HEAD
-   ```
+5. **Write the summary.** Group the same log by area (Security / Softcode /
+   World / Clients / Docs — whatever applies), a few lines each, not a raw
+   commit dump. The changelog entry from step 2 is the raw material.
 
-5. **Commit, tag, push** (version files only):
+6. **Commit, tag, push** (version files only):
    ```sh
    git add Cargo.toml Cargo.lock
    git commit -F - <<'MSG'
@@ -73,8 +84,8 @@ invent a new format.
    git push && git push origin vX.Y.Z
    ```
 
-6. **(Optional) restart a running local backend** so the release goes live — the
-   built binary is already current after step 3:
+7. **(Optional) restart a running local backend** so the release goes live — the
+   built binary is already current after step 4:
    ```sh
    PID=$(lsof -nP -iTCP:8000 -sTCP:LISTEN -t); [ -n "$PID" ] && kill $PID
    ./target/debug/hearth-mud ../the-last-stag-mud/hearth.toml   # run detached
@@ -87,3 +98,12 @@ invent a new format.
 - Tags are annotated (`git tag -a`), named `vX.Y.Z`, pointing at the Release
   commit (recent releases all have a matching tag).
 - The release commit is **version-only**. Keep everything else out of it.
+- **No release without a changelog entry.** The same rule governs ordinary
+  pushes (`CLAUDE.md` / `AGENTS.md`: an entry under `## Unreleased` before
+  anything lands on origin), so by release time the section is usually already
+  written and step 2 is just stamping it with the version and date.
+- Pushing the tag is what publishes: the `Release` workflow builds the platform
+  binaries, cuts the GitHub release, and pushes
+  `ghcr.io/arcane-grimoire/hearth-mud:X.Y.Z` — the image games pin in their
+  Dockerfile. A hearth release alone doesn't move a game's production; that
+  needs the game repo to bump its `FROM` pin and redeploy.

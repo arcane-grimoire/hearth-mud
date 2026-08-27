@@ -9,13 +9,14 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Docs
 
-- **The changelog is now a documented rule, not a habit.** `CLAUDE.md` and
-  `AGENTS.md` both say it: update `CHANGELOG.md` before pushing to origin and
-  before cutting a release, keep the entry in its own commit, and leave the
-  `Release vX.Y.Z` commit touching `Cargo.toml` + `Cargo.lock` alone. Written
-  down because it had already been missed twice — rc.8 through rc.16 have no
-  sections at all, and rc.17's entry sat under `## Unreleased` until rc.18 was
-  cut.
+- **The changelog is now a documented rule, not a habit.** `CLAUDE.md`,
+  `AGENTS.md`, and the `cut-version` skill all say it: update `CHANGELOG.md`
+  before pushing to origin and before cutting a release, keep the entry in its
+  own commit, and leave the `Release vX.Y.Z` commit touching `Cargo.toml` +
+  `Cargo.lock` alone. In the skill it's a required numbered step ahead of the
+  version bump, not a footnote. Written down because it had already been missed
+  twice — rc.8 through rc.16 have no sections at all, and rc.17's entry sat
+  under `## Unreleased` until rc.18 was cut.
 
 ## 0.1.0-rc.19 — 2026-08-26
 
