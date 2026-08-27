@@ -5,6 +5,18 @@ history — earlier changes are in the git log.
 
 The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Docs
+
+- **The changelog is now a documented rule, not a habit.** `CLAUDE.md` and
+  `AGENTS.md` both say it: update `CHANGELOG.md` before pushing to origin and
+  before cutting a release, keep the entry in its own commit, and leave the
+  `Release vX.Y.Z` commit touching `Cargo.toml` + `Cargo.lock` alone. Written
+  down because it had already been missed twice — rc.8 through rc.16 have no
+  sections at all, and rc.17's entry sat under `## Unreleased` until rc.18 was
+  cut.
+
 ## 0.1.0-rc.19 — 2026-08-26
 
 ### Fixed

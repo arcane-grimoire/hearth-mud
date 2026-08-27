@@ -300,6 +300,18 @@ change). A reload is vocal: a file change shadowed by an in-game edit is reporte
 never silently dropped. The Last Stag's `game/` directory is the reference layout
 (`game/world/*` content, `game/std/*` code, `locked = ["std"]`).
 
+## Changelog + releases
+
+**Update `CHANGELOG.md` before pushing to origin, and before cutting a
+release.** Anything that lands on origin gets an entry under `## Unreleased`
+first — describe the change and why it matters to someone using Hearth, not the
+diff. Cutting a release stamps that section as the version being cut
+(`## X.Y.Z — YYYY-MM-DD`).
+
+The changelog entry is its **own commit**, never folded into the `Release
+vX.Y.Z` commit — a release commit touches `Cargo.toml` + `Cargo.lock` and
+nothing else. See the `cut-version` skill for the full release procedure.
+
 ## Design decisions
 
 See `docs/adr/` (6 ADRs). See `CONTEXT.md` for domain glossary.

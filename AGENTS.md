@@ -157,8 +157,24 @@ object (`area/system/item/rules`) carries hero, troupe, and combat commands.
 - Web client has no automated tests — verify UI changes by running
   the Vite dev server (`cd web && npm run dev`) and testing in browser
 
+## Changelog + releases
+
+**Update `CHANGELOG.md` before pushing to origin, and before cutting a
+release.** Anything that lands on origin gets an entry under `## Unreleased`
+first — what changed and why it matters to someone using Hearth, not a restated
+diff. Cutting a release stamps that section as the version being cut
+(`## X.Y.Z — YYYY-MM-DD`).
+
+Keep the entry in its own commit. A `Release vX.Y.Z` commit touches
+`Cargo.toml` + `Cargo.lock` and nothing else, then gets an annotated `vX.Y.Z`
+tag — pushing that tag is what builds the published binaries and the
+`ghcr.io/arcane-grimoire/hearth-mud` image that games pin. The `cut-version`
+skill has the full procedure.
+
 ## Don't
 
+- Don't push to origin without a `CHANGELOG.md` entry for what you're pushing
+- Don't fold the changelog entry (or anything else) into the Release commit
 - Don't add features, refactoring, or abstractions beyond what the task requires
 - Don't change the intent/batch architecture (ADR 0001)
 - Don't make the engine multi-threaded (ADR 0002)
