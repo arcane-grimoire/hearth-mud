@@ -11,6 +11,27 @@ pub struct Database {
     conn: Connection,
 }
 
+/// One row of softcode version history, without the source body.
+#[derive(Debug, Clone)]
+pub struct ScriptVersionMeta {
+    pub version: i64,
+    pub author: String,
+    pub origin: String,
+    pub created_at: i64,
+    pub hash: String,
+    pub merged_from: Option<i64>,
+}
+
+/// A person-held edit lock on an object script (`name == None`) or lib module.
+#[derive(Debug, Clone)]
+pub struct ScriptLock {
+    pub ref_id: String,
+    pub name: Option<String>,
+    pub held_by: String,
+    pub held_at: i64,
+    pub expires_at: i64,
+}
+
 impl Database {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
@@ -157,6 +178,38 @@ impl Database {
         // old DBs don't carry dead weight.
         let _ = self.conn.execute("DROP TABLE IF EXISTS program_versions", []);
         let _ = self.conn.execute("DROP TABLE IF EXISTS program_blobs", []);
+
+        // Softcode versioning + edit locks — see docs/plans/softcode-versioning.md.
+        // `script_versions` is an append-only history of every authored write to
+        // an object script or lib module; the live object still holds current
+        // source, this is the log behind it. `name` is '' for object scripts,
+        // the module name for libs. `source_hash` is blake3 (matching
+        // file_hashes), used to suppress no-op re-writes. `merged_from` records
+        // the version a stale-base publish merged across.
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS script_versions (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                ref_id      TEXT    NOT NULL,
+                kind        TEXT    NOT NULL,
+                name        TEXT    NOT NULL DEFAULT '',
+                version     INTEGER NOT NULL,
+                source      TEXT    NOT NULL,
+                source_hash TEXT    NOT NULL,
+                author      TEXT    NOT NULL,
+                origin      TEXT    NOT NULL,
+                merged_from INTEGER,
+                created_at  INTEGER NOT NULL,
+                UNIQUE(ref_id, kind, name, version)
+            );
+            CREATE TABLE IF NOT EXISTS script_locks (
+                ref_id     TEXT NOT NULL,
+                name       TEXT NOT NULL DEFAULT '',
+                held_by    TEXT NOT NULL,
+                held_at    INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                PRIMARY KEY (ref_id, name)
+            );",
+        )?;
 
         Ok(())
     }
@@ -395,6 +448,166 @@ impl Database {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         rows.collect()
+    }
+
+    // --- Softcode versioning + edit locks (docs/plans/softcode-versioning.md) ---
+
+    /// The latest recorded version for a target, if any. `name` is `None` for
+    /// object scripts, `Some(module)` for libs. Used both to number the next
+    /// version and to suppress a no-op write (same `hash`).
+    pub fn latest_script_version(
+        &self,
+        ref_id: &str,
+        kind: &str,
+        name: Option<&str>,
+    ) -> rusqlite::Result<Option<ScriptVersionMeta>> {
+        self.conn
+            .query_row(
+                "SELECT version, author, origin, created_at, source_hash, merged_from
+                 FROM script_versions
+                 WHERE ref_id = ?1 AND kind = ?2 AND name = ?3
+                 ORDER BY version DESC LIMIT 1",
+                params![ref_id, kind, name.unwrap_or("")],
+                |row| {
+                    Ok(ScriptVersionMeta {
+                        version: row.get(0)?,
+                        author: row.get(1)?,
+                        origin: row.get(2)?,
+                        created_at: row.get(3)?,
+                        hash: row.get(4)?,
+                        merged_from: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    /// Append a new version, numbering it one past the latest. Returns the new
+    /// version number. Callers suppress no-ops (identical hash) themselves.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_script_version(
+        &self,
+        ref_id: &str,
+        kind: &str,
+        name: Option<&str>,
+        source: &str,
+        source_hash: &str,
+        author: &str,
+        origin: &str,
+        merged_from: Option<i64>,
+    ) -> rusqlite::Result<i64> {
+        let next = self
+            .latest_script_version(ref_id, kind, name)?
+            .map(|m| m.version + 1)
+            .unwrap_or(1);
+        self.conn.execute(
+            "INSERT INTO script_versions
+               (ref_id, kind, name, version, source, source_hash, author, origin, merged_from, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                ref_id,
+                kind,
+                name.unwrap_or(""),
+                next,
+                source,
+                source_hash,
+                author,
+                origin,
+                merged_from,
+                Self::now_secs(),
+            ],
+        )?;
+        Ok(next)
+    }
+
+    /// Version history for a target, newest first, without the bodies.
+    pub fn list_script_versions(
+        &self,
+        ref_id: &str,
+        kind: &str,
+        name: Option<&str>,
+    ) -> rusqlite::Result<Vec<ScriptVersionMeta>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT version, author, origin, created_at, source_hash, merged_from
+             FROM script_versions
+             WHERE ref_id = ?1 AND kind = ?2 AND name = ?3
+             ORDER BY version DESC",
+        )?;
+        let rows = stmt.query_map(params![ref_id, kind, name.unwrap_or("")], |row| {
+            Ok(ScriptVersionMeta {
+                version: row.get(0)?,
+                author: row.get(1)?,
+                origin: row.get(2)?,
+                created_at: row.get(3)?,
+                hash: row.get(4)?,
+                merged_from: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// The source of one specific version, if it exists.
+    pub fn get_script_version(
+        &self,
+        ref_id: &str,
+        kind: &str,
+        name: Option<&str>,
+        version: i64,
+    ) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT source FROM script_versions
+                 WHERE ref_id = ?1 AND kind = ?2 AND name = ?3 AND version = ?4",
+                params![ref_id, kind, name.unwrap_or(""), version],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+    }
+
+    /// All edit locks (used to seed the in-memory map at boot). Expired ones are
+    /// filtered by the engine, not here.
+    pub fn load_script_locks(&self) -> rusqlite::Result<Vec<ScriptLock>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT ref_id, name, held_by, held_at, expires_at FROM script_locks")?;
+        let rows = stmt.query_map([], |row| {
+            let name: String = row.get(1)?;
+            Ok(ScriptLock {
+                ref_id: row.get(0)?,
+                name: if name.is_empty() { None } else { Some(name) },
+                held_by: row.get(2)?,
+                held_at: row.get(3)?,
+                expires_at: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn save_script_lock(&self, lock: &ScriptLock) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO script_locks (ref_id, name, held_by, held_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(ref_id, name) DO UPDATE SET
+               held_by = excluded.held_by,
+               held_at = excluded.held_at,
+               expires_at = excluded.expires_at",
+            params![
+                lock.ref_id,
+                lock.name.as_deref().unwrap_or(""),
+                lock.held_by,
+                lock.held_at,
+                lock.expires_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_script_lock(&self, ref_id: &str, name: Option<&str>) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM script_locks WHERE ref_id = ?1 AND name = ?2",
+            params![ref_id, name.unwrap_or("")],
+        )?;
+        Ok(())
     }
 
     pub fn save_world(&self, world: &World) -> rusqlite::Result<()> {

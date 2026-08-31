@@ -1,0 +1,157 @@
+{
+  "name": "hearth-mud",
+  "displayName": "Hearth MUD",
+  "description": "Edit Hearth MUD softcode (Luau hooks + libraries) straight against a running server's REST API.",
+  "version": "0.1.0",
+  "publisher": "arcane-grimoire",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Hearth MUD",
+      "properties": {
+        "hearth.serverUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "Base URL of the Hearth server's web/API port (POST <serverUrl>/api)."
+        },
+        "hearth.token": {
+          "type": "string",
+          "default": "",
+          "description": "API token. Mint one in-game with `@token create <label>` (telnet or the web command input), then paste it here.",
+          "markdownDescription": "API token. Mint one in-game with `@token create <label>` (telnet or the web command input), then paste it here."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "hearth",
+          "title": "Hearth MUD",
+          "icon": "media/hearth.svg"
+        }
+      ]
+    },
+    "views": {
+      "hearth": [
+        {
+          "id": "hearthObjects",
+          "name": "Programs",
+          "icon": "media/hearth.svg"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "hearth.connect",
+        "title": "Hearth: Connect / Test Connection"
+      },
+      {
+        "command": "hearth.refresh",
+        "title": "Hearth: Refresh Programs",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "hearth.runTests",
+        "title": "Hearth: Run Tests for Object",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "hearth.openObject",
+        "title": "Hearth: Open Script"
+      },
+      {
+        "command": "hearth.openLib",
+        "title": "Hearth: Open Library"
+      },
+      {
+        "command": "hearth.publish",
+        "title": "Hearth: Publish to Server",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "hearth.lock",
+        "title": "Hearth: Claim Edit Lock",
+        "icon": "$(lock)"
+      },
+      {
+        "command": "hearth.unlock",
+        "title": "Hearth: Release Edit Lock",
+        "icon": "$(unlock)"
+      },
+      {
+        "command": "hearth.history",
+        "title": "Hearth: Version History",
+        "icon": "$(history)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "hearth.publish",
+        "key": "ctrl+alt+p",
+        "mac": "cmd+alt+p",
+        "when": "resourceScheme == hearth"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "hearth.refresh",
+          "when": "view == hearthObjects",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "hearth.runTests",
+          "when": "view == hearthObjects && viewItem == hearthObject",
+          "group": "inline"
+        },
+        {
+          "command": "hearth.lock",
+          "when": "view == hearthObjects && viewItem == hearthObject",
+          "group": "1_lock"
+        },
+        {
+          "command": "hearth.unlock",
+          "when": "view == hearthObjects && viewItem == hearthObject",
+          "group": "1_lock"
+        },
+        {
+          "command": "hearth.history",
+          "when": "view == hearthObjects && viewItem == hearthObject",
+          "group": "2_history"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "hearth.publish",
+          "when": "resourceScheme == hearth",
+          "group": "navigation"
+        },
+        {
+          "command": "hearth.history",
+          "when": "resourceScheme == hearth",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}

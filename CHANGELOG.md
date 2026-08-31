@@ -9,6 +9,25 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Softcode versioning, server-side merge, and edit locks (REST).** Every
+  versioned `set_script`/`set_lib` now appends to an append-only history
+  (`script_versions`), so softcode edits are no longer last-write-wins with no
+  trail. Passing a `base_version` opts into optimistic concurrency: if the script
+  moved on the server since you opened it, the engine does a 3-way merge and
+  applies it, or returns a `conflict` with all three sides for the client to
+  reconcile. New actions `list_script_versions`, `get_script_version`, and
+  `revert_script` (rollback re-applies an old version as a new one) expose the
+  history; `get_script`/`list_libs`/`list_programs_all` now carry `version`.
+  Person-held **edit locks** (`lock_script`/`unlock_script`, 30-minute expiry
+  renewed on publish, admin force-unlock) let a builder claim a script so a
+  teammate's write is refused rather than silently clobbered — distinct from the
+  file-authoritative `system:locked` tier. A new `me` action returns the token's
+  account so a client can tell "held by you" from "held by someone else". See
+  `docs/plans/softcode-versioning.md`.
+- **VS Code extension** (`clients/vscode/`) for editing Hearth softcode against a
+  running server over REST: a Programs explorer, open/edit object scripts and lib
+  modules with Luau LSP support, explicit Publish with the conflict-reconcile
+  flow, version history + diff + revert, and Claim/Release edit-lock commands.
 - **`just release` cuts a release; the changelog rule is enforced, not trusted.**
   `just release` takes the next rc (`just release 0.1.0` for anything else) and
   runs the whole procedure: refuse a dirty tree, stamp `## Unreleased` with the

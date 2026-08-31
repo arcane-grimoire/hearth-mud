@@ -30,6 +30,7 @@ noise = "0.9"
 bladeink = "2.0.0"
 bladeink-compiler = "2.0.0"
 blake3 = "1"
+diffy = "0.4"
 similar = "2"
 ureq = { version = "2", features = ["json"] }
 full_moon = { version = "2.2.0", features = ["luau"] }

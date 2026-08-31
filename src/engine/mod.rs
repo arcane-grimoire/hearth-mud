@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 
 use crate::accounts::{AccountStore, Scope};
 use crate::config::Config;
-use crate::db::Database;
+use crate::db::{Database, ScriptLock};
 use crate::locks::{self, AccessContext};
 use crate::softcode::hooks::{self};
 use crate::softcode::{self, Budget, Effect, SoftcodeRuntime};
@@ -154,8 +154,16 @@ pub enum ApiRequest {
         cascade: bool,
     },
     /// Set an object's whole behavior script (hooks as functions in one shared
-    /// scope). Replaces the object's existing script.
-    SetScript { ref_id: String, source: String },
+    /// scope). Replaces the object's existing script. `base_version` opts into
+    /// versioned, merge-aware writes (see docs/plans/softcode-versioning.md):
+    /// with it, a stale base triggers a server 3-way merge or a conflict
+    /// response; without it, a plain overwrite (legacy behavior).
+    SetScript {
+        ref_id: String,
+        source: String,
+        #[serde(default)]
+        base_version: Option<i64>,
+    },
     /// Remove an object's script entirely.
     ClearScript { ref_id: String },
     /// Point an object at an existing archetype (or clear it with null).
@@ -173,10 +181,31 @@ pub enum ApiRequest {
     /// An object's script: `{ source, hooks: [..], enabled }` (or null).
     GetScript { ref_id: String },
     /// Set a `require`able lib module on a `Kind::Code` object, keyed by bare
-    /// `<name>` (loaded as `require("<name>")`).
-    SetLib { ref_id: String, name: String, source: String },
+    /// `<name>` (loaded as `require("<name>")`). `base_version` opts into the
+    /// same versioned merge path as `SetScript`.
+    SetLib {
+        ref_id: String,
+        name: String,
+        source: String,
+        #[serde(default)]
+        base_version: Option<i64>,
+    },
     /// Remove a lib module by bare `<name>`.
     RemoveLib { ref_id: String, name: String },
+    /// Who am I — the account behind the token. Authenticated but not
+    /// builder-gated; the client needs it to render lock ownership.
+    Me,
+    /// Softcode version history for a target (object script when `name` is
+    /// omitted, a lib module otherwise), newest first, bodies excluded.
+    ListScriptVersions { ref_id: String, #[serde(default)] name: Option<String> },
+    /// The source of one historical version.
+    GetScriptVersion { ref_id: String, #[serde(default)] name: Option<String>, version: i64 },
+    /// Re-apply a historical version's source as a new version (rollback).
+    RevertScript { ref_id: String, #[serde(default)] name: Option<String>, version: i64 },
+    /// Claim the person-held edit lock on a script/lib.
+    LockScript { ref_id: String, #[serde(default)] name: Option<String> },
+    /// Release an edit lock (holder or admin).
+    UnlockScript { ref_id: String, #[serde(default)] name: Option<String> },
     /// Create a new standalone library: find-or-create a `Kind::Code` host for
     /// `<name>` and seed a starter module — the builder-facing, file-free
     /// counterpart of `@lib`. Refuses an existing name (edit it via `set_lib`).
@@ -513,6 +542,11 @@ pub struct Engine {
     accounts: AccountStore,
     sessions: HashMap<String, Session>,
     db: Database,
+    /// Person-held softcode edit locks, keyed by (ref_id, name) — `name` is
+    /// `None` for object scripts, `Some(module)` for libs. Seeded from the DB
+    /// at boot (expired entries dropped), persisted on claim/release. See
+    /// docs/plans/softcode-versioning.md.
+    script_locks: HashMap<(String, Option<String>), ScriptLock>,
     softcode: SoftcodeRuntime,
     rx: mpsc::UnboundedReceiver<EngineMessage>,
     tick_count: u64,
@@ -820,11 +854,26 @@ impl Engine {
             softcode.set_game_time(Some(cfg.to_json(game_minute)));
         }
 
-        Self {
+        // Seed edit locks, dropping any already expired.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let mut script_locks = HashMap::new();
+        if let Ok(locks) = db.load_script_locks() {
+            for lock in locks {
+                if lock.expires_at > now_secs {
+                    script_locks.insert((lock.ref_id.clone(), lock.name.clone()), lock);
+                }
+            }
+        }
+
+        let engine = Self {
             world,
             accounts,
             sessions: HashMap::new(),
             db,
+            script_locks,
             softcode,
             rx,
             tick_count: 0,
@@ -849,7 +898,11 @@ impl Engine {
             locked_prefixes: config.locked.clone(),
             derived: None,
             commands_cache: None,
-        }
+        };
+        // Snapshot file-authored programs into history (no-op after the first
+        // boot unless a file changed) — see docs/plans/softcode-versioning.md.
+        engine.record_file_program_versions();
+        engine
     }
 
     /// Derived world indexes, rebuilt lazily in one pass when the world has
@@ -1315,6 +1368,185 @@ impl Engine {
             .unwrap_or_default()
     }
 
+    // --- Softcode versioning + edit locks (docs/plans/softcode-versioning.md) ---
+
+    fn wall_secs() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+
+    /// Edit-lock lifetime: 30 minutes, renewed on each publish.
+    const LOCK_TTL_SECS: i64 = 30 * 60;
+
+    /// Resolve an author id to a display name: `system:*` pass through, an
+    /// account id resolves to its username (falling back to the id).
+    fn author_display(&self, author: &str) -> String {
+        if author.starts_with("system:") {
+            return author.to_string();
+        }
+        self.accounts
+            .get(author)
+            .map(|a| a.username.clone())
+            .unwrap_or_else(|| author.to_string())
+    }
+
+    /// Append a version for a softcode write, suppressing a no-op (identical
+    /// source to the current version). Returns the new version number, or the
+    /// existing one when suppressed. `name` is `None` for object scripts.
+    fn record_script_version(
+        &self,
+        ref_id: &str,
+        name: Option<&str>,
+        source: &str,
+        author: &str,
+        origin: &str,
+        merged_from: Option<i64>,
+    ) -> i64 {
+        let kind = if name.is_some() { "lib" } else { "script" };
+        let hash = crate::import_export::blake3_hex(source);
+        match self.db.latest_script_version(ref_id, kind, name) {
+            Ok(Some(latest)) if latest.hash == hash => latest.version,
+            _ => self
+                .db
+                .append_script_version(ref_id, kind, name, source, &hash, author, origin, merged_from)
+                .unwrap_or(0),
+        }
+    }
+
+    /// Snapshot every File-origin script + lib into version history. Called
+    /// after boot load, `@reload-world`, and `@import`, so a file/deploy change
+    /// lands in history authored as `system:file`. Hash-suppressed, so an
+    /// unchanged file is a no-op — only actual changes append a version.
+    fn record_file_program_versions(&self) {
+        let mut writes: Vec<(String, Option<String>, String)> = Vec::new();
+        for obj in self.world.objects.values() {
+            if let Some(s) = obj.script.as_ref()
+                && s.origin == hooks::ProgramOrigin::File
+                && (!s.source.is_empty() || !s.hooks.is_empty())
+            {
+                writes.push((obj.ref_id.clone(), None, s.source.clone()));
+            }
+            for (name, m) in &obj.libs {
+                if m.origin == hooks::ProgramOrigin::File {
+                    writes.push((obj.ref_id.clone(), Some(name.clone()), m.source.clone()));
+                }
+            }
+        }
+        for (ref_id, name, source) in writes {
+            self.record_script_version(&ref_id, name.as_deref(), &source, "system:file", "file", None);
+        }
+    }
+
+    /// The active (unexpired) edit lock on a target, if any.
+    fn active_edit_lock(&self, ref_id: &str, name: Option<&str>) -> Option<&ScriptLock> {
+        let key = (ref_id.to_string(), name.map(str::to_string));
+        self.script_locks
+            .get(&key)
+            .filter(|l| l.expires_at > Self::wall_secs())
+    }
+
+    /// JSON for a lock, resolving the holder's display name.
+    fn edit_lock_json(&self, lock: &ScriptLock) -> serde_json::Value {
+        serde_json::json!({
+            "held_by": lock.held_by,
+            "held_by_name": self.author_display(&lock.held_by),
+            "held_at": lock.held_at,
+            "expires_at": lock.expires_at,
+        })
+    }
+
+    /// Refuse a write when someone else holds an active edit lock. The holder
+    /// (or a target with no active lock) passes.
+    fn check_edit_lock(&self, ref_id: &str, name: Option<&str>, account: &str) -> Result<(), String> {
+        if let Some(lock) = self.active_edit_lock(ref_id, name)
+            && lock.held_by != account
+        {
+            return Err(format!(
+                "locked by {} — claim released or expires at {}",
+                self.author_display(&lock.held_by),
+                lock.expires_at
+            ));
+        }
+        Ok(())
+    }
+
+    /// Renew the holder's lock (push expiry out) after a successful publish.
+    fn renew_edit_lock(&mut self, ref_id: &str, name: Option<&str>, account: &str) {
+        let key = (ref_id.to_string(), name.map(str::to_string));
+        if let Some(lock) = self.script_locks.get_mut(&key)
+            && lock.held_by == account
+        {
+            lock.expires_at = Self::wall_secs() + Self::LOCK_TTL_SECS;
+            let snapshot = lock.clone();
+            let _ = self.db.save_script_lock(&snapshot);
+        }
+    }
+
+    /// Resolve a versioned write against its base. Returns the source to store
+    /// and the version it merged across (if any). `Err` carries a ready-made
+    /// conflict `ApiResponse`. `current_live` is the object's current source.
+    fn resolve_versioned_write(
+        &self,
+        ref_id: &str,
+        name: Option<&str>,
+        incoming: &str,
+        base_version: Option<i64>,
+        current_live: &str,
+    ) -> Result<(String, Option<i64>), ApiResponse> {
+        let base = match base_version {
+            None => return Ok((incoming.to_string(), None)),
+            Some(b) => b,
+        };
+        let kind = if name.is_some() { "lib" } else { "script" };
+        let current = self.db.latest_script_version(ref_id, kind, name).ok().flatten();
+        match current {
+            Some(cur) if cur.version != base => {
+                let base_src = self
+                    .db
+                    .get_script_version(ref_id, kind, name, base)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                match diffy::merge(&base_src, incoming, current_live) {
+                    Ok(merged) => Ok((merged, Some(cur.version))),
+                    Err(_) => Err(ApiResponse {
+                        ok: false,
+                        error: Some("conflict".to_string()),
+                        data: Some(serde_json::json!({
+                            "conflict": true,
+                            "base": base_src,
+                            "theirs": current_live,
+                            "ours": incoming,
+                            "current_version": cur.version,
+                        })),
+                    }),
+                }
+            }
+            // base == current, or no history yet → clean apply.
+            _ => Ok((incoming.to_string(), None)),
+        }
+    }
+
+    /// Version + lock JSON for a read response (object script when `name` is
+    /// `None`). Returns `(version, lock?)`.
+    fn version_and_lock(
+        &self,
+        ref_id: &str,
+        name: Option<&str>,
+    ) -> (Option<i64>, Option<serde_json::Value>) {
+        let kind = if name.is_some() { "lib" } else { "script" };
+        let version = self
+            .db
+            .latest_script_version(ref_id, kind, name)
+            .ok()
+            .flatten()
+            .map(|m| m.version);
+        let lock = self.active_edit_lock(ref_id, name).map(|l| self.edit_lock_json(l));
+        (version, lock)
+    }
+
     fn handle_api_request(&mut self, req: ApiRequest, token: Option<String>) -> ApiResponse {
         // `ListPrograms` deliberately does NOT sit in this set — it serves
         // full Program source, which is not something to hand out
@@ -1344,6 +1576,7 @@ impl Engine {
             ApiRequest::ListRooms
                 | ApiRequest::ListObjects { .. }
                 | ApiRequest::ListExits { .. }
+                | ApiRequest::Me
         );
 
         // The specific object a request mutates, if any — used by both the
@@ -1366,6 +1599,8 @@ impl Engine {
             | ApiRequest::DetachObject { ref_id }
             | ApiRequest::SetLib { ref_id, .. }
             | ApiRequest::RemoveLib { ref_id, .. }
+            | ApiRequest::RevertScript { ref_id, .. }
+            | ApiRequest::LockScript { ref_id, .. }
             | ApiRequest::InkSave { ref_id, .. } => Some(ref_id.as_str()),
             _ => None,
         };
@@ -1924,15 +2159,32 @@ impl Engine {
                     ApiResponse::error(format!("No object with ref '{}'", ref_id))
                 }
             }
-            ApiRequest::SetScript { ref_id, source } => {
+            ApiRequest::SetScript { ref_id, source, base_version } => {
+                let account = acting_account.clone().unwrap_or_default();
                 if let Err(e) = self.softcode.check_syntax(&source) {
                     return ApiResponse::error(format!("Syntax error: {}", e));
                 }
-                if self.set_object_script(&ref_id, source) {
-                    ApiResponse::ok()
-                } else {
-                    ApiResponse::error(format!("No object with ref '{}'", ref_id))
+                if let Err(e) = self.check_edit_lock(&ref_id, None, &account) {
+                    return ApiResponse::error(e);
                 }
+                let current_live = match self.world.get(&ref_id) {
+                    Some(obj) => obj.script.as_ref().map(|s| s.source.clone()).unwrap_or_default(),
+                    None => return ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                };
+                let (final_source, merged_from) =
+                    match self.resolve_versioned_write(&ref_id, None, &source, base_version, &current_live) {
+                        Ok(pair) => pair,
+                        Err(conflict) => return conflict,
+                    };
+                self.set_object_script(&ref_id, final_source.clone());
+                let version =
+                    self.record_script_version(&ref_id, None, &final_source, &account, "in_game", merged_from);
+                self.renew_edit_lock(&ref_id, None, &account);
+                ApiResponse::success(serde_json::json!({
+                    "version": version,
+                    "merged_from": merged_from,
+                    "source": final_source,
+                }))
             }
             ApiRequest::ClearScript { ref_id } => {
                 let ok = match self.world.get_mut(&ref_id) {
@@ -1955,19 +2207,34 @@ impl Engine {
                 }))
             }
             ApiRequest::GetScript { ref_id } => {
-                match self.world.get(&ref_id) {
-                    Some(obj) => {
-                        let script = obj.script.as_ref().map(|s| serde_json::json!({
-                            "source": s.source,
-                            "hooks": s.hooks,
-                            "enabled": s.enabled,
-                        }));
-                        ApiResponse::success(serde_json::json!(script))
-                    }
-                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                if self.world.get(&ref_id).is_none() {
+                    return ApiResponse::error(format!("No object with ref '{}'", ref_id));
                 }
+                let (version, lock) = self.version_and_lock(&ref_id, None);
+                let obj = self.world.get(&ref_id).unwrap();
+                // When the object exists but carries no script yet, still return
+                // an (empty) script object so `version`/`lock` can ride — a lock
+                // can be claimed before the first script is written.
+                let script = match obj.script.as_ref() {
+                    Some(s) => serde_json::json!({
+                        "source": s.source,
+                        "hooks": s.hooks,
+                        "enabled": s.enabled,
+                        "version": version,
+                        "lock": lock,
+                    }),
+                    None => serde_json::json!({
+                        "source": "",
+                        "hooks": [],
+                        "enabled": true,
+                        "version": version,
+                        "lock": lock,
+                    }),
+                };
+                ApiResponse::success(script)
             }
-            ApiRequest::SetLib { ref_id, name, source } => {
+            ApiRequest::SetLib { ref_id, name, source, base_version } => {
+                let account = acting_account.clone().unwrap_or_default();
                 if self.softcode.is_shipped_module(&name) {
                     return ApiResponse::error(format!(
                         "'{}' is a shipped module — choose a different name for your library",
@@ -1977,13 +2244,179 @@ impl Engine {
                 if let Err(e) = self.softcode.check_syntax(&source) {
                     return ApiResponse::error(format!("Syntax error: {}", e));
                 }
+                if let Err(e) = self.check_edit_lock(&ref_id, Some(&name), &account) {
+                    return ApiResponse::error(e);
+                }
+                let current_live = match self.world.get(&ref_id) {
+                    Some(obj) => obj.libs.get(&name).map(|l| l.source.clone()).unwrap_or_default(),
+                    None => return ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                };
+                let (final_source, merged_from) = match self.resolve_versioned_write(
+                    &ref_id,
+                    Some(&name),
+                    &source,
+                    base_version,
+                    &current_live,
+                ) {
+                    Ok(pair) => pair,
+                    Err(conflict) => return conflict,
+                };
                 match self.world.get_mut(&ref_id) {
                     Some(obj) => {
-                        hooks::set_lib(obj, &name, source, hooks::ProgramOrigin::InGame);
+                        hooks::set_lib(obj, &name, final_source.clone(), hooks::ProgramOrigin::InGame);
+                    }
+                    None => return ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                }
+                self.softcode.invalidate_module_cache();
+                let version = self.record_script_version(
+                    &ref_id,
+                    Some(&name),
+                    &final_source,
+                    &account,
+                    "in_game",
+                    merged_from,
+                );
+                self.renew_edit_lock(&ref_id, Some(&name), &account);
+                ApiResponse::success(serde_json::json!({
+                    "version": version,
+                    "merged_from": merged_from,
+                    "source": final_source,
+                }))
+            }
+            ApiRequest::Me => {
+                let account_id = acting_account.clone().unwrap_or_default();
+                match self.accounts.get(&account_id) {
+                    Some(acc) => ApiResponse::success(serde_json::json!({
+                        "account_id": acc.id,
+                        "username": acc.username,
+                        "scopes": acc.scope_labels(),
+                        "email": acc.email,
+                        "active_character": acc.active_character,
+                    })),
+                    None => ApiResponse::error("Unknown account"),
+                }
+            }
+            ApiRequest::ListScriptVersions { ref_id, name } => {
+                let kind = if name.is_some() { "lib" } else { "script" };
+                match self.db.list_script_versions(&ref_id, kind, name.as_deref()) {
+                    Ok(versions) => {
+                        let out: Vec<_> = versions
+                            .iter()
+                            .map(|m| {
+                                serde_json::json!({
+                                    "version": m.version,
+                                    "author": m.author,
+                                    "author_name": self.author_display(&m.author),
+                                    "origin": m.origin,
+                                    "created_at": m.created_at,
+                                    "hash": m.hash,
+                                    "merged_from": m.merged_from,
+                                })
+                            })
+                            .collect();
+                        ApiResponse::success(serde_json::json!({ "versions": out }))
+                    }
+                    Err(e) => ApiResponse::error(format!("{e}")),
+                }
+            }
+            ApiRequest::GetScriptVersion { ref_id, name, version } => {
+                let kind = if name.is_some() { "lib" } else { "script" };
+                match self.db.get_script_version(&ref_id, kind, name.as_deref(), version) {
+                    Ok(Some(source)) => ApiResponse::success(serde_json::json!({ "source": source })),
+                    Ok(None) => {
+                        ApiResponse::error(format!("No version {} for '{}'", version, ref_id))
+                    }
+                    Err(e) => ApiResponse::error(format!("{e}")),
+                }
+            }
+            ApiRequest::RevertScript { ref_id, name, version } => {
+                let account = acting_account.clone().unwrap_or_default();
+                if let Err(e) = self.check_edit_lock(&ref_id, name.as_deref(), &account) {
+                    return ApiResponse::error(e);
+                }
+                let kind = if name.is_some() { "lib" } else { "script" };
+                let source = match self.db.get_script_version(&ref_id, kind, name.as_deref(), version) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => {
+                        return ApiResponse::error(format!("No version {} for '{}'", version, ref_id))
+                    }
+                    Err(e) => return ApiResponse::error(format!("{e}")),
+                };
+                if let Err(e) = self.softcode.check_syntax(&source) {
+                    return ApiResponse::error(format!("Syntax error in stored version: {}", e));
+                }
+                match &name {
+                    None => {
+                        if !self.set_object_script(&ref_id, source.clone()) {
+                            return ApiResponse::error(format!("No object with ref '{}'", ref_id));
+                        }
+                    }
+                    Some(n) => {
+                        match self.world.get_mut(&ref_id) {
+                            Some(obj) => {
+                                hooks::set_lib(obj, n, source.clone(), hooks::ProgramOrigin::InGame)
+                            }
+                            None => {
+                                return ApiResponse::error(format!("No object with ref '{}'", ref_id))
+                            }
+                        }
                         self.softcode.invalidate_module_cache();
+                    }
+                }
+                let new_version =
+                    self.record_script_version(&ref_id, name.as_deref(), &source, &account, "in_game", None);
+                self.renew_edit_lock(&ref_id, name.as_deref(), &account);
+                ApiResponse::success(serde_json::json!({ "version": new_version, "source": source }))
+            }
+            ApiRequest::LockScript { ref_id, name } => {
+                let account = acting_account.clone().unwrap_or_default();
+                if let Some(existing) = self.active_edit_lock(&ref_id, name.as_deref())
+                    && existing.held_by != account
+                {
+                    let data = self.edit_lock_json(existing);
+                    return ApiResponse {
+                        ok: false,
+                        error: Some(format!(
+                            "locked by {}",
+                            self.author_display(&existing.held_by)
+                        )),
+                        data: Some(data),
+                    };
+                }
+                let now = Self::wall_secs();
+                let lock = ScriptLock {
+                    ref_id: ref_id.clone(),
+                    name: name.clone(),
+                    held_by: account.clone(),
+                    held_at: now,
+                    expires_at: now + Self::LOCK_TTL_SECS,
+                };
+                let _ = self.db.save_script_lock(&lock);
+                let json = self.edit_lock_json(&lock);
+                self.script_locks.insert((ref_id.clone(), name.clone()), lock);
+                ApiResponse::success(json)
+            }
+            ApiRequest::UnlockScript { ref_id, name } => {
+                let account = acting_account.clone().unwrap_or_default();
+                let is_admin = self
+                    .accounts
+                    .get(&account)
+                    .map(|a| a.is_admin())
+                    .unwrap_or(false);
+                let key = (ref_id.clone(), name.clone());
+                match self.script_locks.get(&key) {
+                    Some(lock) if lock.held_by == account || is_admin => {
+                        self.script_locks.remove(&key);
+                        let _ = self.db.delete_script_lock(&ref_id, name.as_deref());
                         ApiResponse::ok()
                     }
-                    None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
+                    Some(_) => ApiResponse::error(
+                        "Lock held by another builder — only the holder or an admin can release it",
+                    ),
+                    None => {
+                        let _ = self.db.delete_script_lock(&ref_id, name.as_deref());
+                        ApiResponse::ok()
+                    }
                 }
             }
             ApiRequest::RemoveLib { ref_id, name } => {
@@ -2014,16 +2447,27 @@ impl Engine {
                 }
             }
             ApiRequest::ListLibs { ref_id } => {
-                match self.world.get(&ref_id) {
-                    Some(obj) => {
-                        let mut libs: Vec<serde_json::Value> = obj.libs
-                            .iter()
-                            .map(|(name, m)| serde_json::json!({
-                                "name": name,
-                                "source": m.source,
-                            }))
+                let entries: Option<Vec<(String, String)>> = self.world.get(&ref_id).map(|obj| {
+                    obj.libs
+                        .iter()
+                        .map(|(name, m)| (name.clone(), m.source.clone()))
+                        .collect()
+                });
+                match entries {
+                    Some(mut entries) => {
+                        entries.sort_by(|a, b| a.0.cmp(&b.0));
+                        let libs: Vec<serde_json::Value> = entries
+                            .into_iter()
+                            .map(|(name, source)| {
+                                let (version, lock) = self.version_and_lock(&ref_id, Some(&name));
+                                serde_json::json!({
+                                    "name": name,
+                                    "source": source,
+                                    "version": version,
+                                    "lock": lock,
+                                })
+                            })
                             .collect();
-                        libs.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
                         ApiResponse::success(serde_json::json!(libs))
                     }
                     None => ApiResponse::error(format!("No object with ref '{}'", ref_id)),
@@ -2237,6 +2681,16 @@ impl Engine {
                     })
                     .collect();
                 out.sort_by(|a, b| a["ref_id"].as_str().cmp(&b["ref_id"].as_str()));
+                // Second pass (world borrow released): attach the object
+                // script's version + any active edit lock, so the tree renders
+                // both without a per-node call.
+                for v in out.iter_mut() {
+                    if let Some(ref_id) = v["ref_id"].as_str().map(str::to_string) {
+                        let (version, lock) = self.version_and_lock(&ref_id, None);
+                        v["version"] = serde_json::json!(version);
+                        v["lock"] = lock.unwrap_or(serde_json::Value::Null);
+                    }
+                }
                 ApiResponse::success(serde_json::json!(out))
             }
             ApiRequest::WorldCheck => {
@@ -2591,6 +3045,7 @@ impl Engine {
                     Ok(report) => {
                         if !dry_run {
                             self.reload_map_sources_from_db();
+                            self.record_file_program_versions();
                         }
                         let output = crate::import_export::render_import_report(&report, dry_run, &path);
                         ApiResponse::success(serde_json::json!({ "output": output }))
@@ -4013,13 +4468,18 @@ impl Engine {
 
     /// Check syntax and write the object's whole script — the shared tail of
     /// both the single-line and multi-line `@program` paths.
-    fn install_program(&mut self, _actor_ref: &str, target_ref: &str, source: &str) -> String {
+    fn install_program(&mut self, session_id: &str, _actor_ref: &str, target_ref: &str, source: &str) -> String {
         if let Err(e) = self.softcode.check_syntax(source) {
             return format!("Syntax error in program: {}\r\n", e);
         }
         if !self.set_object_script(target_ref, source.to_string()) {
             return format!("No object with ref '{}'.\r\n", target_ref);
         }
+        // Record the version, authored by the account behind this session.
+        let author = self
+            .session_account_id(session_id)
+            .unwrap_or_else(|| "system:script".to_string());
+        self.record_script_version(target_ref, None, source, &author, "in_game", None);
         let hooks_list = self
             .world
             .get(target_ref)
@@ -4074,7 +4534,7 @@ impl Engine {
             return "Enter Luau source (define hooks as functions). Type '.' on a line by itself to install it, '@abort' to cancel:\r\n"
                 .to_string();
         }
-        self.install_program(actor_ref, &target_ref, source)
+        self.install_program(session_id, actor_ref, &target_ref, source)
     }
 
     /// Resolve a bare object-ref argument (a `#N` ref, or `here` for the
@@ -4120,7 +4580,7 @@ impl Engine {
                 self.send(session_id, "Empty source, nothing installed.\r\n");
                 return;
             }
-            let output = self.install_program(actor_ref, &target_ref, &buffer);
+            let output = self.install_program(session_id, actor_ref, &target_ref, &buffer);
             self.send(session_id, &output);
         } else if input == "@abort" {
             self.set_editor(session_id, None);
@@ -5904,6 +6364,8 @@ impl Engine {
                 // relying on per-mutation `struct_version` bumps in the loader.
                 self.derived = None;
                 self.commands_cache = None;
+                // Capture any file program changes into version history.
+                self.record_file_program_versions();
                 self.fire_lifecycle_hook("on_reload");
 
                 let mut msg = String::new();
@@ -5993,6 +6455,7 @@ impl Engine {
                     // matching reset in `cmd_reload_world`.)
                     self.derived = None;
                     self.commands_cache = None;
+                    self.record_file_program_versions();
                 }
                 crate::import_export::render_import_report(&report, dry_run, path)
             }
@@ -8004,6 +8467,7 @@ mod tests {
         let resp = api_call(&tx, ApiRequest::SetScript {
             ref_id: item_ref.clone(),
             source: "function on_get(this, actor, room) emit(actor, \"Hum!\") end".into(),
+            base_version: None,
         }).await;
         assert!(resp.ok);
 
@@ -8022,7 +8486,11 @@ mod tests {
         let resp = api_call(&tx, ApiRequest::GetScript {
             ref_id: item_ref.clone(),
         }).await;
-        assert!(resp.data.unwrap().is_null());
+        // A cleared script now returns an empty-script object (so version/lock
+        // can still ride), not null — its source is empty and no hooks remain.
+        let script = resp.data.unwrap();
+        assert_eq!(script["source"], "");
+        assert_eq!(script["hooks"], serde_json::json!([]));
 
         drop(tx);
         let _ = handle.await;
@@ -8056,9 +8524,164 @@ mod tests {
         let resp = api_call(&tx, ApiRequest::SetScript {
             ref_id: item_ref,
             source: "function on_get(this actor room) end".into(),
+            base_version: None,
         }).await;
         assert!(!resp.ok);
         assert!(resp.error.unwrap().contains("Syntax error"));
+
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn api_softcode_versioning_history_and_revert() {
+        let (tx, handle) = test_engine().await;
+        let item = create_test_item(&tx).await;
+
+        // First versioned write → version 1.
+        let v1 = api_call(&tx, ApiRequest::SetScript {
+            ref_id: item.clone(),
+            source: "local a = 1\nlocal b = 2\n".into(),
+            base_version: Some(0),
+        }).await;
+        assert!(v1.ok, "{:?}", v1.error);
+        assert_eq!(v1.data.unwrap()["version"], 1);
+
+        // GetScript now carries the version.
+        let got = api_call(&tx, ApiRequest::GetScript { ref_id: item.clone() }).await;
+        assert_eq!(got.data.unwrap()["version"], 1);
+
+        // History lists it, resolving the author to the account username.
+        let hist = api_call(&tx, ApiRequest::ListScriptVersions {
+            ref_id: item.clone(),
+            name: None,
+        }).await;
+        let versions = hist.data.unwrap();
+        let versions = versions["versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0]["author_name"], "test_builder");
+        assert_eq!(versions[0]["origin"], "in_game");
+
+        // Diverge to v2 so a revert has something to undo.
+        let v2 = api_call(&tx, ApiRequest::SetScript {
+            ref_id: item.clone(),
+            source: "local a = 100\n".into(),
+            base_version: Some(1),
+        }).await;
+        assert_eq!(v2.data.unwrap()["version"], 2);
+
+        // Revert to v1 makes a NEW version (3) whose body matches v1.
+        let reverted = api_call(&tx, ApiRequest::RevertScript {
+            ref_id: item.clone(),
+            name: None,
+            version: 1,
+        }).await;
+        assert!(reverted.ok, "{:?}", reverted.error);
+        let rv = reverted.data.unwrap();
+        assert_eq!(rv["version"], 3);
+        assert!(rv["source"].as_str().unwrap().contains("local a = 1"));
+
+        // A no-op write (identical to the now-current source) does not append.
+        let noop = api_call(&tx, ApiRequest::SetScript {
+            ref_id: item.clone(),
+            source: "local a = 1\nlocal b = 2\n".into(),
+            base_version: Some(3),
+        }).await;
+        assert_eq!(noop.data.unwrap()["version"], 3, "identical source must not bump the version");
+
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn api_softcode_stale_base_merges_cleanly() {
+        let (tx, handle) = test_engine().await;
+        let item = create_test_item(&tx).await;
+
+        // v1: baseline. The `pad` lines are unchanged anchors between the two
+        // regions each side edits, so a line-based 3-way merge stays clean.
+        let base = "local a = 1\nlocal pad1 = 0\nlocal pad2 = 0\nlocal pad3 = 0\nlocal b = 2\n";
+        api_call(&tx, ApiRequest::SetScript {
+            ref_id: item.clone(),
+            source: base.into(),
+            base_version: Some(0),
+        }).await;
+
+        // "Theirs": someone edits the `b` region → v2.
+        api_call(&tx, ApiRequest::SetScript {
+            ref_id: item.clone(),
+            source: "local a = 1\nlocal pad1 = 0\nlocal pad2 = 0\nlocal pad3 = 0\nlocal b = 99\n".into(),
+            base_version: Some(1),
+        }).await;
+
+        // "Ours": still based on v1, edits the far-apart `a` region. Non-overlapping
+        // → the server merges cleanly and records what it merged across.
+        let merged = api_call(&tx, ApiRequest::SetScript {
+            ref_id: item.clone(),
+            source: "local a = 42\nlocal pad1 = 0\nlocal pad2 = 0\nlocal pad3 = 0\nlocal b = 2\n".into(),
+            base_version: Some(1),
+        }).await;
+        assert!(merged.ok, "{:?}", merged.error);
+        let m = merged.data.unwrap();
+        assert_eq!(m["merged_from"], 2);
+        let src = m["source"].as_str().unwrap();
+        assert!(src.contains("a = 42") && src.contains("b = 99"), "merged both edits: {src}");
+
+        // A conflicting edit (also touches the `b` region) is refused with the 3 sides.
+        let conflict = api_call(&tx, ApiRequest::SetScript {
+            ref_id: item.clone(),
+            source: "local a = 1\nlocal pad1 = 0\nlocal pad2 = 0\nlocal pad3 = 0\nlocal b = 7\n".into(),
+            base_version: Some(1),
+        }).await;
+        assert!(!conflict.ok);
+        assert_eq!(conflict.error.as_deref(), Some("conflict"));
+        assert_eq!(conflict.data.unwrap()["conflict"], true);
+
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn api_edit_lock_claim_release_and_me() {
+        let (tx, handle) = test_engine().await;
+        let item = create_test_item(&tx).await;
+
+        // whoami resolves the token's account.
+        let me = api_call(&tx, ApiRequest::Me).await;
+        let me = me.data.unwrap();
+        assert_eq!(me["username"], "test_builder");
+        let account_id = me["account_id"].as_str().unwrap().to_string();
+
+        // Give the object a script so GetScript returns an object to carry the lock.
+        api_call(&tx, ApiRequest::SetScript {
+            ref_id: item.clone(),
+            source: "function on_get() end\n".into(),
+            base_version: None,
+        }).await;
+
+        // Claim the edit lock; it then shows on GetScript, held by us.
+        let claim = api_call(&tx, ApiRequest::LockScript { ref_id: item.clone(), name: None }).await;
+        assert!(claim.ok, "{:?}", claim.error);
+        assert_eq!(claim.data.unwrap()["held_by"], account_id);
+
+        let got = api_call(&tx, ApiRequest::GetScript { ref_id: item.clone() }).await;
+        let lock = got.data.unwrap();
+        assert_eq!(lock["lock"]["held_by"], account_id);
+        assert_eq!(lock["lock"]["held_by_name"], "test_builder");
+
+        // The holder can still write.
+        let write = api_call(&tx, ApiRequest::SetScript {
+            ref_id: item.clone(),
+            source: "local x = 1\n".into(),
+            base_version: None,
+        }).await;
+        assert!(write.ok, "holder must be able to publish: {:?}", write.error);
+
+        // Release clears it.
+        let unlock = api_call(&tx, ApiRequest::UnlockScript { ref_id: item.clone(), name: None }).await;
+        assert!(unlock.ok);
+        let got = api_call(&tx, ApiRequest::GetScript { ref_id: item.clone() }).await;
+        assert!(got.data.unwrap()["lock"].is_null());
 
         drop(tx);
         let _ = handle.await;
@@ -10157,7 +10780,7 @@ end
         let (mut engine, token, _) = engine_with_api_token(&[Scope::Builder]);
         let r = mk_room(&mut engine, &token, "town", "hall");
         let set = engine.handle_api_request(
-            ApiRequest::SetScript { ref_id: r.clone(), source: "function on_enter(this, actor, room) end".into() },
+            ApiRequest::SetScript { ref_id: r.clone(), source: "function on_enter(this, actor, room) end".into(), base_version: None },
             Some(token.clone()),
         );
         assert!(set.ok, "{:?}", set.error);
@@ -11318,7 +11941,7 @@ end
         let locked = create_locked_item(&tx).await;
 
         let edits = [
-            ApiRequest::SetScript { ref_id: locked.clone(), source: "function on_get() end".into() },
+            ApiRequest::SetScript { ref_id: locked.clone(), source: "function on_get() end".into(), base_version: None },
             ApiRequest::SetTitle { ref_id: locked.clone(), title: "hax".into() },
             ApiRequest::SetDescription { ref_id: locked.clone(), description: "hax".into() },
             ApiRequest::SetAttribute { ref_id: locked.clone(), key: "hp".into(), value: serde_json::json!(10) },
