@@ -5,6 +5,31 @@ history — earlier changes are in the git log.
 
 The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Added
+
+- **Compute-only WASM plugins.** Softcode can now call out to sandboxed
+  WebAssembly modules via `wasm_call(module, func, arg?)` — a second extension
+  language alongside Luau, for pure data-in → data-out work an author would
+  rather write in Rust/AssemblyScript/etc. and ship as a compiled `.wasm`.
+  Plugins never touch world state (Luau stays the only thing that emits
+  intents), and every call runs under a fuel budget so a runaway plugin traps
+  instead of hanging the engine. Modules are code, not editable content: they
+  load from `<game_dir>/wasm/*.wasm` on every boot / `@reload-world` and are
+  never persisted. A reference plugin — a deterministic, seedable Markov name
+  generator — lives in `plugins/names/`. Hosted on `wasmi` (pure-Rust
+  interpreter, deterministic by construction). See `src/softcode/wasm.rs`.
+- **WASM plugin functions bound as native Luau.** The engine introspects a
+  plugin's wasm exports and binds every one matching the plugin ABI as a real
+  Luau function under a table named after the module — so a `names.wasm`
+  exporting `generate` is callable as `names.generate({ ... })`, no manifest
+  required. The wasm is the source of truth for what exists; an optional
+  sidecar `<stem>.toml` manifest only annotates (descriptions, a renamed Luau
+  name, a different namespace) and can't invent bindings for exports that
+  aren't there, so the two can't drift. `wasm_call` remains as the low-level
+  escape hatch.
+
 ## 0.1.0-rc.20 — 2026-08-31
 
 ### Added

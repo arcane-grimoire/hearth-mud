@@ -438,6 +438,7 @@ pub fn install<'scope, 'env>(
     tick_count: u64,
     game_time: Option<serde_json::Value>,
     ink_runtime: &'env RefCell<ink::InkRuntime>,
+    wasm_host: &'env RefCell<super::wasm::WasmHost>,
 ) -> mlua::Result<Table> {
     // -- Object proxy (issue #19) --
     // Hook-facing objects (`this`, `actor`, `get_object`, …) are EMPTY tables
@@ -2526,8 +2527,87 @@ pub fn install<'scope, 'env>(
         )?,
     )?;
 
+    // -- WASM compute plugins --
+    //
+    // `wasm_call(module, func, arg?)` runs a compute-only WASM plugin from
+    // `<game_dir>/wasm/<module>.wasm`, marshalling `arg` (any JSON-able Lua
+    // value; defaults to `null`) in and the plugin's JSON result out. The
+    // plugin never sees or touches world state — it's pure data-in/data-out.
+    env.set(
+        "wasm_call",
+        scope.create_function(
+            move |lua, (module, func, arg): (String, String, Option<Value>)| {
+                let input = match arg {
+                    Some(v) => lua.from_value::<serde_json::Value>(v)?,
+                    None => serde_json::Value::Null,
+                };
+                let input_bytes = serde_json::to_vec(&input).map_err(mlua::Error::external)?;
+                let out_bytes = wasm_host
+                    .borrow()
+                    .call(&module, &func, &input_bytes, WASM_CALL_FUEL)
+                    .map_err(mlua::Error::external)?;
+                let out: serde_json::Value = serde_json::from_slice(&out_bytes).map_err(|e| {
+                    mlua::Error::external(format!("wasm plugin returned invalid JSON: {e}"))
+                })?;
+                lua.to_value(&out)
+            },
+        )?,
+    )?;
+
+    // Manifest-driven bindings: expose each plugin's ABI-matching exports as
+    // real Luau functions under a table named after the module, so authors can
+    // call `names.generate({ ... })` instead of the stringly-typed `wasm_call`.
+    // Bindings are derived from the wasm's actual exports (see
+    // `WasmHost::binding_specs`); `wasm_call` remains as the low-level escape
+    // hatch. Owned specs first, so the host borrow is dropped before we build
+    // closures that re-borrow it.
+    let specs = wasm_host.borrow().binding_specs();
+    for spec in specs {
+        // Never shadow an existing engine global or API function — a colliding
+        // plugin namespace stays reachable through `wasm_call`.
+        if !env.get::<Value>(spec.ns.as_str())?.is_nil() {
+            tracing::debug!(
+                ns = %spec.ns,
+                "wasm plugin namespace collides with an existing global; use wasm_call instead",
+            );
+            continue;
+        }
+        let tbl = lua.create_table()?;
+        for (lua_name, export) in spec.functions {
+            let module = spec.module.clone();
+            tbl.set(
+                lua_name,
+                scope.create_function(move |lua, arg: Option<Value>| {
+                    let input = match arg {
+                        Some(v) => lua.from_value::<serde_json::Value>(v)?,
+                        None => serde_json::Value::Null,
+                    };
+                    let input_bytes =
+                        serde_json::to_vec(&input).map_err(mlua::Error::external)?;
+                    let out_bytes = wasm_host
+                        .borrow()
+                        .call(&module, &export, &input_bytes, WASM_CALL_FUEL)
+                        .map_err(mlua::Error::external)?;
+                    let out: serde_json::Value =
+                        serde_json::from_slice(&out_bytes).map_err(|e| {
+                            mlua::Error::external(format!(
+                                "wasm plugin returned invalid JSON: {e}"
+                            ))
+                        })?;
+                    lua.to_value(&out)
+                })?,
+            )?;
+        }
+        env.set(spec.ns, tbl)?;
+    }
+
     Ok(obj_mt)
 }
+
+/// Per-call fuel budget for a `wasm_call`. Generous for the compute-only
+/// workloads this is meant for (generators, transforms), while still trapping
+/// a runaway plugin instead of hanging the engine's single task.
+const WASM_CALL_FUEL: u64 = 50_000_000;
 
 fn npc_ink_source(world: &World, npc_ref: &str) -> mlua::Result<String> {
     world

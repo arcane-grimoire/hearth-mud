@@ -9,6 +9,7 @@
 pub mod api;
 pub mod hooks;
 pub mod ink;
+pub mod wasm;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -1394,6 +1395,9 @@ pub struct SoftcodeRuntime {
     /// per-hook-fire syncs become no-ops while libs are unchanged.
     libs_dirty: std::cell::Cell<bool>,
     ink: RefCell<ink::InkRuntime>,
+    /// Compute-only WASM plugins, callable from Luau via `wasm_call`. Loaded
+    /// from `<game_dir>/wasm/*.wasm` at boot / `@reload-world`.
+    wasm: RefCell<wasm::WasmHost>,
     /// The current in-world clock as a `get_time()` table, set by the engine
     /// whenever `game_minute` advances (`None` when no clock is configured).
     /// Read at each `api::install` so `get_time()` reflects live game time.
@@ -1479,6 +1483,7 @@ impl SoftcodeRuntime {
             // Start dirty: nothing has been synced yet.
             libs_dirty: std::cell::Cell::new(true),
             ink: RefCell::new(ink::InkRuntime::new()),
+            wasm: RefCell::new(wasm::WasmHost::new()),
             current_game_time: RefCell::new(None),
         }
     }
@@ -1696,6 +1701,10 @@ impl SoftcodeRuntime {
         &self.ink
     }
 
+    pub fn wasm_host(&self) -> &RefCell<wasm::WasmHost> {
+        &self.wasm
+    }
+
     /// Compile `source` without running it. Used by `@program` to reject
     /// syntax errors before they're saved to an object.
     pub fn check_syntax(&self, source: &str) -> Result<(), String> {
@@ -1909,6 +1918,7 @@ impl SoftcodeRuntime {
             ctx.tick_count,
             self.current_game_time.borrow().clone(),
             &self.ink,
+            &self.wasm,
         )?;
 
         // `pass()` — invoke the inherited version of THIS hook: the next
@@ -2058,6 +2068,7 @@ impl SoftcodeRuntime {
                 tick_count,
                 self.current_game_time.borrow().clone(),
                 &self.ink,
+                &self.wasm,
             )?;
 
             // The caller running the eval, for convenience — same name a
@@ -2413,6 +2424,7 @@ impl SoftcodeRuntime {
                         0,
                         self.current_game_time.borrow().clone(),
                         &self.ink,
+                        &self.wasm,
                     )?;
 
                     let ctx = self.lua.create_table()?;
@@ -3466,6 +3478,107 @@ mod tests {
         runtime
             .run_hook_rec(world, &program, "#5", "#3", Some("#1"), None, Budget::default(), counter(world), &test_themes(), &test_map_templates(), &[], 0)
             .expect("script should run")
+    }
+
+    #[test]
+    fn wasm_call_from_luau() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        // Load the real compiled demo plugin into this runtime's host.
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/wasm/names.wasm"
+        ))
+        .expect("names.wasm fixture present");
+        runtime
+            .wasm_host()
+            .borrow_mut()
+            .add_module("names", &bytes)
+            .unwrap();
+
+        let program = TestProgram::new(
+            "on_get",
+            r#"
+            function on_get(this, actor, room)
+                local a = wasm_call("names", "generate", { seed = 42, kind = "elf" })
+                local b = wasm_call("names", "generate", { seed = 42, kind = "elf" })
+                set_attr(this, "name", a.name)
+                set_attr(this, "deterministic", a.name == b.name)
+            end
+        "#,
+        );
+        let result = runtime
+            .run_hook_rec(
+                &world,
+                &program,
+                "#5",
+                "#3",
+                Some("#1"),
+                None,
+                Budget::default(),
+                counter(&world),
+                &test_themes(),
+                &test_map_templates(),
+                &[],
+                0,
+            )
+            .expect("script should run");
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        let obj = w.get("#5").unwrap();
+        assert_eq!(obj.attrs["deterministic"], true);
+        let name = obj.attrs["name"].as_str().unwrap();
+        assert!(!name.is_empty());
+        assert!(name.chars().next().unwrap().is_uppercase());
+    }
+
+    #[test]
+    fn wasm_manifest_binding_from_luau() {
+        let world = test_world();
+        let runtime = SoftcodeRuntime::new();
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/wasm/names.wasm"
+        ))
+        .expect("names.wasm fixture present");
+        // No manifest set — the `generate` export is bound automatically by
+        // introspection, so `names.generate(...)` just works.
+        runtime
+            .wasm_host()
+            .borrow_mut()
+            .add_module("names", &bytes)
+            .unwrap();
+
+        let program = TestProgram::new(
+            "on_get",
+            r#"
+            function on_get(this, actor, room)
+                local out = names.generate({ seed = 7, kind = "dwarf" })
+                set_attr(this, "name", out.name)
+            end
+        "#,
+        );
+        let result = runtime
+            .run_hook_rec(
+                &world,
+                &program,
+                "#5",
+                "#3",
+                Some("#1"),
+                None,
+                Budget::default(),
+                counter(&world),
+                &test_themes(),
+                &test_map_templates(),
+                &[],
+                0,
+            )
+            .expect("script should run");
+        let mut w = world.clone();
+        apply_batch(&mut w, &result.batch).unwrap();
+        let name = w.get("#5").unwrap().attrs["name"].as_str().unwrap().to_string();
+        assert!(!name.is_empty());
+        assert!(name.chars().next().unwrap().is_uppercase());
     }
 
     #[test]

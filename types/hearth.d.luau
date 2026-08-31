@@ -509,6 +509,15 @@ declare function ink_get_var(actor: ObjectRef, npc: ObjectRef, name: string): an
 declare function ink_set_var(actor: ObjectRef, npc: ObjectRef, name: string, val: any): ()
 
 -- ═══════════════════════════════════════
+-- WASM PLUGINS
+-- ═══════════════════════════════════════
+
+--- Call a compute-only WASM plugin loaded from `<game_dir>/wasm/<module>.wasm`.
+--- `arg` (any JSON-able value) is marshalled in as JSON and the plugin's JSON
+--- result is returned. Plugins never touch world state — pure data in, data out.
+declare function wasm_call(module: string, func: string, arg: any?): any
+
+-- ═══════════════════════════════════════
 -- UTILITY
 -- ═══════════════════════════════════════
 

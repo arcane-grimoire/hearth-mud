@@ -761,6 +761,10 @@ impl Engine {
                 tracing::info!("load_world_files = false — skipping boot-time world content load");
             }
             softcode.load_modules(crate::loader::load_modules(game_path));
+            softcode
+                .wasm_host()
+                .borrow_mut()
+                .load_dir(&game_path.join("wasm"));
             softcode.ink_runtime().borrow_mut().set_ink_dir(game_path.to_path_buf());
             let ink_files = crate::loader::load_ink_files(game_path);
             for source in ink_files.values() {
@@ -6337,6 +6341,11 @@ impl Engine {
         self.softcode.invalidate_cache();
         self.softcode
             .load_modules(crate::loader::load_modules(game_path));
+        {
+            let mut host = self.softcode.wasm_host().borrow_mut();
+            host.clear();
+            host.load_dir(&game_path.join("wasm"));
+        }
         let ink_files = crate::loader::load_ink_files(game_path);
         for source in ink_files.values() {
             if let Err(e) = self.softcode.ink_runtime().borrow_mut().compile(source) {

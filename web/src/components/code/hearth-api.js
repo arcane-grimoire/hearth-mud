@@ -104,6 +104,9 @@ export const API_FUNCTIONS = [
   ['ink_set_var', 'ink_set_var(actor, npc, name, value)', 'Set an Ink variable.'],
   ['ink_end', 'ink_end(actor, npc, save?)', 'End the Ink story, optionally saving state.'],
 
+  // WASM compute plugins.
+  ['wasm_call', 'wasm_call(module, func, arg?)', 'Call a compute-only WASM plugin with a JSON arg; returns its JSON result.'],
+
   // Noise & procedural generation (installed as globals by src/noise.rs).
   ['simplex2d', 'simplex2d(seed, x, y)', '2D simplex noise in [-1, 1].'],
   ['simplex3d', 'simplex3d(seed, x, y, z)', '3D simplex noise in [-1, 1].'],

@@ -1,4 +1,6 @@
 /target
+# WASM plugin build caches (the built .wasm ships as a test fixture instead)
+plugins/*/target
 hearth.db
 hearth.db-wal
 hearth.db-shm
