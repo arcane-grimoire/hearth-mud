@@ -21,3 +21,16 @@ Thumbs.db
 # Claude Code scratch worktrees (ephemeral; project skills under .claude/skills
 # are still tracked).
 .claude/worktrees/
+
+# Python bytecode caches
+__pycache__/
+*.pyc
+
+# SvelteKit generated output
+web/.svelte-kit/
+
+# Local dev runtime state (hearth --dev: socket, pid, dev DB + backups)
+.hearth/
+
+# Generated docs site
+site/
