@@ -5,7 +5,7 @@ history — earlier changes are in the git log.
 
 The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 0.1.0-rc.20 — 2026-08-31
 
 ### Added
 
