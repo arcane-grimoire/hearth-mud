@@ -23,12 +23,25 @@
 //! The host allocates, writes the input, calls the function, and reads the
 //! result back out. Every call runs under a fuel budget (mirroring the Luau
 //! `Budget`), so a runaway plugin traps instead of hanging the engine.
+//!
+//! ## Optional: instance pooling via `reset`
+//!
+//! By default each call gets a fresh instance, so a guest can never leak memory
+//! across calls. A guest that exports `reset()` (no params, no results) opts
+//! into **pooling**: the host keeps one instance resident and calls `reset`
+//! before each invocation instead of re-instantiating — the fast path for hot
+//! callers. To make that safe the guest allocates every call's buffers from a
+//! per-call arena that `reset` rewinds, so memory never grows across calls
+//! (see `plugins/names` for a reference bump allocator). A trap evicts the
+//! pooled instance, so the next call rebuilds it fresh.
 
 use std::collections::HashMap;
 use std::path::Path;
 
+use std::cell::RefCell;
+
 use serde::Deserialize;
-use wasmi::{Config, Engine, ExternType, Linker, Module, Store, ValType};
+use wasmi::{Config, Engine, ExternType, Instance, Linker, Memory, Module, Store, TypedFunc, ValType};
 
 /// A sidecar manifest (`<stem>.toml` next to `<stem>.wasm`) declaring which of
 /// a plugin's exports to bind as Luau functions. Optional — a module with no
@@ -86,6 +99,21 @@ pub struct WasmHost {
     modules: HashMap<String, Module>,
     /// Per-module manifests, keyed by module name. Absent = no Luau bindings.
     manifests: HashMap<String, Manifest>,
+    /// Resident instances for modules that opt into pooling by exporting
+    /// `reset` — reused across calls instead of re-instantiated. Keyed by
+    /// module name; a call that traps evicts its entry so a poisoned instance
+    /// is never reused. `RefCell` so `call` stays `&self` (the store inside
+    /// needs `&mut` per call, but never re-entrantly — plugins have no imports).
+    instances: RefCell<HashMap<String, Pooled>>,
+}
+
+/// A resident instance kept alive across calls, with the handles a call needs.
+struct Pooled {
+    store: Store<()>,
+    instance: Instance,
+    memory: Memory,
+    alloc: TypedFunc<u32, u32>,
+    reset: TypedFunc<(), ()>,
 }
 
 impl Default for WasmHost {
@@ -105,6 +133,7 @@ impl WasmHost {
             engine,
             modules: HashMap::new(),
             manifests: HashMap::new(),
+            instances: RefCell::new(HashMap::new()),
         }
     }
 
@@ -172,16 +201,21 @@ impl WasmHost {
     /// Compile and register a module from raw bytes (`.wasm` or, with the
     /// `wat` feature, `.wat` text). Overwrites any module of the same name.
     pub fn add_module(&mut self, name: impl Into<String>, bytes: &[u8]) -> Result<(), String> {
+        let name = name.into();
         let module = Module::new(&self.engine, bytes)
             .map_err(|e| format!("failed to compile wasm module: {e}"))?;
-        self.modules.insert(name.into(), module);
+        // Drop any resident instance of the previous version of this module.
+        self.instances.get_mut().remove(&name);
+        self.modules.insert(name, module);
         Ok(())
     }
 
-    /// Drop all modules and manifests (used before a reload re-populates).
+    /// Drop all modules, manifests, and resident instances (used before a
+    /// reload re-populates).
     pub fn clear(&mut self) {
         self.modules.clear();
         self.manifests.clear();
+        self.instances.get_mut().clear();
     }
 
     pub fn has_module(&self, name: &str) -> bool {
@@ -238,6 +272,12 @@ impl WasmHost {
     /// Invoke `module.func(input)` under a `fuel` budget, moving `input` bytes
     /// in and the result bytes out through the guest's linear memory per the
     /// ABI documented above.
+    ///
+    /// A module that exports `reset()` opts into **instance pooling**: the host
+    /// keeps one instance resident and calls `reset` before each invocation
+    /// (rewinding the guest's per-call arena) instead of re-instantiating —
+    /// the fast path for hot callers. A module without `reset` gets a fresh
+    /// instance per call, so its memory can never grow across calls.
     pub fn call(
         &self,
         module: &str,
@@ -245,53 +285,149 @@ impl WasmHost {
         input: &[u8],
         fuel: u64,
     ) -> Result<Vec<u8>, String> {
-        let module = self
+        let m = self
             .modules
             .get(module)
             .ok_or_else(|| format!("no wasm module '{module}'"))?;
 
-        // Pure-compute: no host imports. A fresh store per call means no
-        // state leaks between invocations.
+        if module_supports_pooling(m) {
+            self.call_pooled(module, m, func, input, fuel)
+        } else {
+            let (mut store, instance, memory) = self.instantiate(m, fuel)?;
+            Self::invoke(&mut store, &instance, &memory, func, input)
+        }
+    }
+
+    /// Pooled path: reuse (or first build) the resident instance, re-arm fuel,
+    /// rewind the arena, then invoke. A trap evicts the entry so a poisoned
+    /// instance is never reused.
+    fn call_pooled(
+        &self,
+        name: &str,
+        m: &Module,
+        func: &str,
+        input: &[u8],
+        fuel: u64,
+    ) -> Result<Vec<u8>, String> {
+        let mut cache = self.instances.borrow_mut();
+        if !cache.contains_key(name) {
+            let (store, instance, memory) = self.instantiate(m, fuel)?;
+            let alloc = instance
+                .get_typed_func::<u32, u32>(&store, "alloc")
+                .map_err(|_| "wasm module has no 'alloc(u32) -> u32' export".to_string())?;
+            let reset = instance
+                .get_typed_func::<(), ()>(&store, "reset")
+                .map_err(|_| "wasm module has no 'reset()' export".to_string())?;
+            cache.insert(
+                name.to_string(),
+                Pooled {
+                    store,
+                    instance,
+                    memory,
+                    alloc,
+                    reset,
+                },
+            );
+        }
+
+        let p = cache.get_mut(name).expect("just inserted");
+        let result = (|| -> Result<Vec<u8>, String> {
+            p.store
+                .set_fuel(fuel)
+                .map_err(|e| format!("failed to set fuel: {e}"))?;
+            p.reset
+                .call(&mut p.store, ())
+                .map_err(|e| format!("wasm reset trapped: {e}"))?;
+            let ptr = p
+                .alloc
+                .call(&mut p.store, input.len() as u32)
+                .map_err(|e| format!("wasm alloc trapped: {e}"))?;
+            p.memory
+                .write(&mut p.store, ptr as usize, input)
+                .map_err(|e| format!("failed to write wasm input: {e}"))?;
+            let run = p
+                .instance
+                .get_typed_func::<(u32, u32), u64>(&p.store, func)
+                .map_err(|_| format!("wasm module has no '{func}(u32, u32) -> u64' export"))?;
+            let packed = run
+                .call(&mut p.store, (ptr, input.len() as u32))
+                .map_err(|e| format!("wasm '{func}' trapped: {e}"))?;
+            read_packed(&p.store, &p.memory, packed)
+        })();
+        if result.is_err() {
+            cache.remove(name); // a trap may have poisoned the instance
+        }
+        result
+    }
+
+    /// Build a fresh instance with fuel armed, returning the pieces a call needs.
+    fn instantiate(&self, m: &Module, fuel: u64) -> Result<(Store<()>, Instance, Memory), String> {
         let mut store = Store::new(&self.engine, ());
         store
             .set_fuel(fuel)
             .map_err(|e| format!("failed to set fuel: {e}"))?;
-
         let linker: Linker<()> = Linker::new(&self.engine);
         let instance = linker
-            .instantiate_and_start(&mut store, module)
+            .instantiate_and_start(&mut store, m)
             .map_err(|e| format!("failed to instantiate wasm module: {e}"))?;
-
         let memory = instance
             .get_memory(&store, "memory")
             .ok_or_else(|| "wasm module has no 'memory' export".to_string())?;
+        Ok((store, instance, memory))
+    }
 
+    /// One invocation on a store: alloc → write input → run → read output.
+    fn invoke(
+        store: &mut Store<()>,
+        instance: &Instance,
+        memory: &Memory,
+        func: &str,
+        input: &[u8],
+    ) -> Result<Vec<u8>, String> {
         let alloc = instance
-            .get_typed_func::<u32, u32>(&store, "alloc")
+            .get_typed_func::<u32, u32>(&*store, "alloc")
             .map_err(|_| "wasm module has no 'alloc(u32) -> u32' export".to_string())?;
         let ptr = alloc
-            .call(&mut store, input.len() as u32)
+            .call(&mut *store, input.len() as u32)
             .map_err(|e| format!("wasm alloc trapped: {e}"))?;
-
         memory
-            .write(&mut store, ptr as usize, input)
+            .write(&mut *store, ptr as usize, input)
             .map_err(|e| format!("failed to write wasm input: {e}"))?;
-
         let run = instance
-            .get_typed_func::<(u32, u32), u64>(&store, func)
+            .get_typed_func::<(u32, u32), u64>(&*store, func)
             .map_err(|_| format!("wasm module has no '{func}(u32, u32) -> u64' export"))?;
         let packed = run
-            .call(&mut store, (ptr, input.len() as u32))
+            .call(&mut *store, (ptr, input.len() as u32))
             .map_err(|e| format!("wasm '{func}' trapped: {e}"))?;
-
-        let out_ptr = (packed >> 32) as usize;
-        let out_len = (packed & 0xffff_ffff) as usize;
-        let mut buf = vec![0u8; out_len];
-        memory
-            .read(&store, out_ptr, &mut buf)
-            .map_err(|e| format!("failed to read wasm output: {e}"))?;
-        Ok(buf)
+        read_packed(&*store, memory, packed)
     }
+
+    /// Test/introspection helper: is a resident instance currently pooled for
+    /// `module`?
+    #[cfg(test)]
+    pub fn is_pooled(&self, module: &str) -> bool {
+        self.instances.borrow().contains_key(module)
+    }
+}
+
+/// Read the `(out_ptr << 32) | out_len` result out of linear memory.
+fn read_packed(store: &Store<()>, memory: &Memory, packed: u64) -> Result<Vec<u8>, String> {
+    let out_ptr = (packed >> 32) as usize;
+    let out_len = (packed & 0xffff_ffff) as usize;
+    let mut buf = vec![0u8; out_len];
+    memory
+        .read(store, out_ptr, &mut buf)
+        .map_err(|e| format!("failed to read wasm output: {e}"))?;
+    Ok(buf)
+}
+
+/// A module opts into instance pooling by exporting `reset()` (no params, no
+/// results) — the host's signal that it can rewind the guest between calls.
+fn module_supports_pooling(m: &Module) -> bool {
+    m.exports().any(|e| {
+        e.name() == "reset"
+            && matches!(e.ty(), ExternType::Func(ft) if ft.params().is_empty() && ft.results().is_empty())
+    })
 }
 
 #[cfg(test)]
@@ -419,6 +555,39 @@ mod tests {
         assert_eq!(a, b, "same seed+kind must reproduce the same name");
         assert!(!a.is_empty());
         assert!(a.chars().next().unwrap().is_uppercase());
+    }
+
+    #[test]
+    fn names_plugin_pools_its_instance() {
+        // names.wasm exports `reset`, so it takes the pooled path.
+        let host = names_host();
+        assert!(!host.is_pooled("names"));
+        gen_name(&host, 1, "elf");
+        assert!(host.is_pooled("names"), "reset-exporting module should pool");
+    }
+
+    #[test]
+    fn pooled_calls_stay_correct_over_many_invocations() {
+        // The whole point of the arena+reset design: a resident instance must
+        // not accumulate state or exhaust memory across many reused calls.
+        let host = names_host();
+        let first = gen_name(&host, 42, "elf");
+        for s in 0..3000u64 {
+            let name = gen_name(&host, s, ["elf", "dwarf", "human"][(s % 3) as usize]);
+            assert!(!name.is_empty(), "call {s} produced an empty name");
+        }
+        // Same seed, thousands of reused calls later, still identical — no
+        // state bled across calls on the pooled instance.
+        assert_eq!(gen_name(&host, 42, "elf"), first);
+    }
+
+    #[test]
+    fn echo_module_is_not_pooled() {
+        // The WAT echo module has no `reset` export, so it uses the fresh path.
+        let mut host = WasmHost::new();
+        host.add_module("echo", ECHO_WAT.as_bytes()).unwrap();
+        host.call("echo", "echo", b"x", 1_000_000).unwrap();
+        assert!(!host.is_pooled("echo"));
     }
 
     #[test]

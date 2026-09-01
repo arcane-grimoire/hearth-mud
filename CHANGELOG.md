@@ -29,6 +29,13 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   name, a different namespace) and can't invent bindings for exports that
   aren't there, so the two can't drift. `wasm_call` remains as the low-level
   escape hatch.
+- **WASM instance pooling for hot callers.** A plugin that exports `reset()`
+  opts into instance reuse: the host keeps one instance resident and rewinds
+  the guest's per-call arena before each call instead of re-instantiating,
+  cutting the dominant per-call cost. Plugins without `reset` keep the
+  fresh-instance-per-call path, so they can never leak memory across calls; a
+  trap evicts a pooled instance so a poisoned one is never reused. The
+  `plugins/names` demo ships a reference bump allocator + `reset`.
 
 ## 0.1.0-rc.20 — 2026-08-31
 

@@ -16,6 +16,52 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
+// -- Arena allocator + `reset` export ------------------------------------
+//
+// Opts this plugin into host-side instance pooling (see `src/softcode/wasm.rs`):
+// the host keeps one instance resident and calls `reset` before each `generate`
+// instead of re-instantiating. A per-call bump arena makes that safe — every
+// allocation (input buffer, the Markov model, the output) comes from one arena
+// that `reset` rewinds to the start, so memory can't grow across calls. `dealloc`
+// is a no-op; the whole arena is reclaimed wholesale on the next `reset`.
+
+const ARENA_SIZE: usize = 4 * 1024 * 1024;
+
+#[repr(C, align(16))]
+struct Arena(core::cell::UnsafeCell<[u8; ARENA_SIZE]>);
+// Single-threaded wasm: no real concurrency to guard against.
+unsafe impl Sync for Arena {}
+
+static ARENA: Arena = Arena(core::cell::UnsafeCell::new([0; ARENA_SIZE]));
+static OFFSET: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+struct BumpAlloc;
+
+unsafe impl core::alloc::GlobalAlloc for BumpAlloc {
+    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+        let base = ARENA.0.get() as usize;
+        let cur = OFFSET.load(core::sync::atomic::Ordering::Relaxed);
+        let aligned = (base + cur + layout.align() - 1) & !(layout.align() - 1);
+        let new_off = aligned - base + layout.size();
+        if new_off > ARENA_SIZE {
+            return core::ptr::null_mut();
+        }
+        OFFSET.store(new_off, core::sync::atomic::Ordering::Relaxed);
+        aligned as *mut u8
+    }
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
+}
+
+#[global_allocator]
+static ALLOC: BumpAlloc = BumpAlloc;
+
+/// Rewind the arena — the host calls this before each `generate` so a pooled
+/// instance starts every call with a clean heap.
+#[no_mangle]
+pub extern "C" fn reset() {
+    OFFSET.store(0, core::sync::atomic::Ordering::Relaxed);
+}
+
 #[derive(Deserialize)]
 struct Input {
     #[serde(default)]

@@ -81,3 +81,13 @@ Core WebAssembly only — no WASI, no Component Model. A guest module exports:
 
 The host allocates, writes the input, calls the function, and reads the result
 back out of linear memory. See `src/softcode/wasm.rs` for the host side.
+
+### Instance pooling (`reset`)
+
+This plugin also exports `reset()` (no params, no results), which opts into
+**instance pooling**: the host keeps one instance resident and calls `reset`
+before each `generate` instead of re-instantiating — the fast path for hot
+callers. It's safe because every call's allocations (input, the Markov model,
+the output) come from a per-call bump arena that `reset` rewinds, so memory
+never grows across calls. A plugin that omits `reset` simply gets a fresh
+instance per call. See the arena allocator in `src/lib.rs`.
