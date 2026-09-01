@@ -51,6 +51,8 @@ fn last_stag_world_loads_and_derives_hooks() {
     assert!(hooks::object_defines_hook(by_key("cmd_wilderness"), "cmd_wilderness"));
     assert!(hooks::object_defines_hook(by_key("cmd_combat"), "cmd_attack"));
     assert!(hooks::object_defines_hook(by_key("cmd_combat"), "cmd_endturn"));
+    // `cmd_name` calls the `names` WASM plugin — the compute-only plugin demo.
+    assert!(hooks::object_defines_hook(by_key("cmd_name"), "cmd_name"));
 
     // `onboarding` runs the map + tutorial hooks. Its derived hooks must
     // include the lifecycle ones — and must NOT include the functions that
