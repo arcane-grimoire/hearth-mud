@@ -7120,6 +7120,29 @@ impl Engine {
             self.world.relocate(&ref_id, Some(target_ref.to_string()));
         }
 
+        // Coordinate exit: an exit carrying `_dest_x`/`_dest_y` stamps the
+        // arrival cell onto the actor (the grid/wilderness model is one room
+        // with position tracked as `_x`/`_y` attrs — no room per cell). Applied
+        // after the relocate and before `on_enter`/`on_look`, so the room's
+        // hooks render the cell the actor actually landed on. Generic: the
+        // engine only copies the exit's declared arrival coordinates; it knows
+        // nothing about "wilderness". Followers land on the same cell so a
+        // troupe stays together on the grid.
+        let dest_xy = self.world.get(exit_ref).and_then(|e| {
+            let dx = e.attrs.get("_dest_x").and_then(|v| v.as_i64())?;
+            let dy = e.attrs.get("_dest_y").and_then(|v| v.as_i64())?;
+            Some((dx, dy))
+        });
+        if let Some((dx, dy)) = dest_xy {
+            let followers = self.indexes().troupes.get(actor_ref).cloned().unwrap_or_default();
+            for ref_id in std::iter::once(actor_ref.to_string()).chain(followers) {
+                if let Some(obj) = self.world.get_mut(&ref_id) {
+                    obj.attrs.insert("_x".into(), serde_json::json!(dx));
+                    obj.attrs.insert("_y".into(), serde_json::json!(dy));
+                }
+            }
+        }
+
         // Fire on_move on the actor
         let _ = self.fire_hook(actor_ref, "on_move", actor_ref, Some(target_ref), None);
 
@@ -11367,6 +11390,62 @@ end
         );
         assert!(!bad.ok);
         assert_eq!(bad.error.as_deref(), Some("Target is not a player or NPC"));
+    }
+
+    /// A coordinate exit (`_dest_x`/`_dest_y` on the exit) stamps the arrival
+    /// cell onto the actor as `_x`/`_y` when it is traversed — the room→map-cell
+    /// entry for the one-room grid/wilderness model. Followers land there too.
+    #[test]
+    fn coordinate_exit_sets_actor_grid_position_on_traverse() {
+        let (mut engine, _admin, _) = engine_with_api_token(&[Scope::Admin]);
+
+        // Room A → wilderness room B via a north exit carrying arrival coords.
+        let a = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&a, "rooma", Kind::Room));
+        let b = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&b, "wilds", Kind::Room));
+        let exit = engine.world.next_dbref();
+        let mut exit_obj =
+            GameObject::new(&exit, "north", Kind::Exit).with_location(&a).with_target(&b);
+        exit_obj.attrs.insert("_dest_x".into(), serde_json::json!(5));
+        exit_obj.attrs.insert("_dest_y".into(), serde_json::json!(12));
+        engine.world.add_object(exit_obj);
+
+        // A player in A, plus a troupe follower tagged to them.
+        let pc = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&pc, "hero", Kind::Player).with_location(&a));
+        let hench = engine.world.next_dbref();
+        let mut hench_obj = GameObject::new(&hench, "squire", Kind::Npc).with_location(&a);
+        hench_obj.tags.insert(crate::world::Tag {
+            category: "troupe".into(),
+            key: pc.clone(),
+        });
+        engine.world.add_object(hench_obj);
+
+        engine.do_move(&pc, &exit, &b);
+
+        let hero = engine.world.get(&pc).unwrap();
+        assert_eq!(hero.location_ref.as_deref(), Some(b.as_str()));
+        assert_eq!(hero.attrs.get("_x"), Some(&serde_json::json!(5)));
+        assert_eq!(hero.attrs.get("_y"), Some(&serde_json::json!(12)));
+
+        let squire = engine.world.get(&hench).unwrap();
+        assert_eq!(squire.location_ref.as_deref(), Some(b.as_str()));
+        assert_eq!(squire.attrs.get("_x"), Some(&serde_json::json!(5)),
+            "a troupe follower should land on the same cell");
+        assert_eq!(squire.attrs.get("_y"), Some(&serde_json::json!(12)));
+
+        // A plain exit (no dest coords) leaves position untouched.
+        let c = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&c, "roomc", Kind::Room));
+        let plain = engine.world.next_dbref();
+        engine.world.add_object(
+            GameObject::new(&plain, "south", Kind::Exit).with_location(&b).with_target(&c),
+        );
+        engine.do_move(&pc, &plain, &c);
+        let hero = engine.world.get(&pc).unwrap();
+        assert_eq!(hero.attrs.get("_x"), Some(&serde_json::json!(5)),
+            "a plain exit must not disturb grid position");
     }
 
     // -- GMCP Terrain.Legend --

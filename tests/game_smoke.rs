@@ -48,7 +48,10 @@ fn last_stag_world_loads_and_derives_hooks() {
     // runtime error names the real file. `cmd_combat` is the multi-file case
     // (attack + endturn share one `this`), which exercises script concatenation.
     assert!(hooks::object_defines_hook(by_key("cmd_hero"), "cmd_hero"));
-    assert!(hooks::object_defines_hook(by_key("cmd_wilderness"), "cmd_wilderness"));
+    // The wilderness is wired at boot (rooms + coordinate entry exits) by an
+    // `on_startup` hook — the explore/leave mode (cmd_explore/cmd_wilderness) is
+    // gone; entry is a coordinate exit, departure is `enter`/`leave` on a POI.
+    assert!(hooks::object_defines_hook(by_key("wilderness_setup"), "on_startup"));
     assert!(hooks::object_defines_hook(by_key("cmd_combat"), "cmd_attack"));
     assert!(hooks::object_defines_hook(by_key("cmd_combat"), "cmd_endturn"));
     // `cmd_name` calls the `names` WASM plugin — the compute-only plugin demo.

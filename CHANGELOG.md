@@ -9,6 +9,16 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Coordinate exits.** An ordinary exit carrying `_dest_x`/`_dest_y` attributes
+  now stamps that arrival cell onto the traversing actor's `_x`/`_y`, so a
+  normal room's exit can drop a player onto a specific `(x, y)` of a one-room
+  grid/wilderness map — the room→map-cell entry that previously required a
+  bespoke softcode command. It's applied in `do_move` after the relocate and
+  before `on_enter`, so the destination room's hooks render the cell the player
+  actually lands on, and troupe followers land there too. Fully generic (the
+  engine only copies the exit's declared coordinates) and authorable wherever an
+  exit is — `@open` + `@set <exit>/_dest_x`, area TOML, or the builder — with no
+  Luau. A plain exit without those attrs never touches position.
 - **Compute-only WASM plugins.** Softcode can now call out to sandboxed
   WebAssembly modules via `wasm_call(module, func, arg?)` — a second extension
   language alongside Luau, for pure data-in → data-out work an author would
