@@ -69,6 +69,20 @@ direction = "east"
 to = "forest/edge"
 aliases = ["e"]
 
+# An exit is an ordinary object: it can carry attrs and its own script.
+# `can_traverse` is the EXIT's hook (`this` is the exit), pairing with the
+# exit's `traverse` lock; `can_enter` is the destination room's.
+[[exits]]
+from = "tavern"
+direction = "north"
+to = "cellar"
+script = "door.luau"     # defines can_traverse
+
+[exits.attrs]
+closed = true
+_dest_x = 5              # coordinate exits: stamps the arrival cell on traverse
+_dest_y = 12
+
 [[scripts]]
 name = "weather"
 interval = 60

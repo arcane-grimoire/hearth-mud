@@ -345,6 +345,18 @@ pub(crate) struct ExitDef {
     pub(crate) aliases: Vec<String>,
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub(crate) locks: std::collections::HashMap<String, String>,
+    /// Attributes on the exit itself. An exit is an ordinary object and the
+    /// engine already reads attrs off it (`_dest_x`/`_dest_y` for coordinate
+    /// exits, `muffle`/`blocked_sound` for sound propagation, door state for a
+    /// `can_traverse` gate), so a file must be able to declare them — otherwise
+    /// the only authoring paths are `@set` and softcode.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub(crate) attrs: std::collections::HashMap<String, serde_json::Value>,
+    /// The exit's behavior script. `can_traverse` is the exit's own hook, so
+    /// gating a passage from a file needs this. (No `libs`: those are authored
+    /// on `Kind::Code` objects.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) script: Option<ScriptSource>,
 }
 
 /// A global tick script defined in an area file. Always runs at the
@@ -769,6 +781,10 @@ pub fn load_game_dir(
 
     // -- Pass 3: exits. These reference rooms/objects by key, never the
     //    other way around, so they can wait until everything else exists.
+    // Exits carry no lib modules (those are authored on Kind::Code objects),
+    // but install_script takes a map, so hand it an empty one.
+    let empty_libs: std::collections::HashMap<String, ProgramSource> =
+        std::collections::HashMap::new();
     for area in &parsed {
         let area_name = &area.area_name;
 
@@ -784,6 +800,18 @@ pub fn load_game_dir(
                         existing.target_ref = Some(to.clone());
                         existing.aliases = exit.aliases.iter().cloned().collect();
                         existing.locks = exit.locks.clone();
+                        // Merge, don't replace: an exit accumulates runtime
+                        // state the file knows nothing about (a door's
+                        // `closed`, whatever softcode has stamped on it), and
+                        // a reload must not wipe it. Same rule as objects.
+                        existing.attrs.extend(exit.attrs.clone());
+                        install_script(
+                            existing,
+                            &exit.script,
+                            &empty_libs,
+                            &area.base_dir,
+                            &mut diverged,
+                        )?;
                         updated += 1;
                     }
                     continue;
@@ -799,7 +827,9 @@ pub fn load_game_dir(
             obj.aliases = exit.aliases.iter().cloned().collect();
             obj.locks = exit.locks.clone();
             obj.tags.insert(managed.clone());
+            obj.attrs = exit.attrs.clone();
             obj.attrs.insert(FILE_KEY_ATTR.into(), serde_json::json!(file_key));
+            install_script(&mut obj, &exit.script, &empty_libs, &area.base_dir, &mut diverged)?;
             world.add_object(obj);
             created += 1;
         }
@@ -1326,6 +1356,109 @@ archetype = "loop/a"
         assert!(areas.contains(&"town"));
         assert!(!areas.contains(&"iron_hills"), "maps/*.toml is not an area");
         assert!(!areas.contains(&"terrain"), "terrain.toml is not an area");
+    }
+
+    /// An exit is an ordinary object and the engine reads attrs and hooks off
+    /// it — `_dest_x`/`_dest_y` for coordinate exits, `can_traverse` for a
+    /// gate — but `ExitDef` used to accept only from/direction/to/aliases/
+    /// locks. With no `deny_unknown_fields`, an `[exits.attrs]` block parsed,
+    /// loaded without error, and was silently dropped, so the coordinate-exit
+    /// feature's documented TOML authoring path did not exist.
+    #[test]
+    fn exits_carry_declared_attrs_and_scripts() {
+        let dir = TempGameDir::new();
+        dir.write_area("town", "gate.luau", "function can_traverse(this, actor, room)\n  return false\nend\n");
+        dir.write_area(
+            "town",
+            "town.toml",
+            r#"
+                area = "town"
+
+                [[rooms]]
+                key = "crossroads"
+                title = "The Crossroads"
+
+                [[rooms]]
+                key = "wilds"
+                title = "The Moor"
+
+                [[exits]]
+                from = "crossroads"
+                direction = "north"
+                to = "wilds"
+                script = "gate.luau"
+
+                [exits.attrs]
+                _dest_x = 5
+                _dest_y = 12
+                is_door = true
+            "#,
+        );
+
+        let mut world = World::new();
+        let key_map = load_game_dir(&dir.path, &mut world, &HashMap::new())
+            .expect("load should succeed")
+            .key_map;
+        let crossroads = key_map.get("town/crossroads").unwrap();
+
+        let exits = world.exits_from(crossroads);
+        assert_eq!(exits.len(), 1);
+        let exit = exits[0];
+
+        assert_eq!(exit.attrs.get("_dest_x"), Some(&serde_json::json!(5)),
+            "an exit must carry its declared coordinate attrs");
+        assert_eq!(exit.attrs.get("_dest_y"), Some(&serde_json::json!(12)));
+        assert_eq!(exit.attrs.get("is_door"), Some(&serde_json::json!(true)));
+        assert!(exit.script.is_some(), "an exit must carry its declared script");
+        assert!(
+            crate::softcode::hooks::object_responds(&world, exit, "can_traverse"),
+            "the declared script's hooks must be derived on the exit"
+        );
+    }
+
+    /// A reload must not wipe state an exit accumulated at runtime — a door's
+    /// `closed`, or anything softcode stamped on it. Same merge rule managed
+    /// objects already follow.
+    #[test]
+    fn reloading_an_exit_merges_attrs_rather_than_replacing() {
+        let dir = TempGameDir::new();
+        let area = r#"
+            area = "town"
+
+            [[rooms]]
+            key = "a"
+            title = "A"
+
+            [[rooms]]
+            key = "b"
+            title = "B"
+
+            [[exits]]
+            from = "a"
+            direction = "north"
+            to = "b"
+
+            [exits.attrs]
+            is_door = true
+        "#;
+        dir.write_area("town", "town.toml", area);
+
+        let mut world = World::new();
+        let key_map = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap().key_map;
+        let a = key_map.get("town/a").unwrap().clone();
+
+        // Runtime state: someone shut the door.
+        let exit_ref = world.exits_from(&a)[0].ref_id.clone();
+        world.get_mut(&exit_ref).unwrap().attrs.insert("closed".into(), serde_json::json!(true));
+
+        // Reload the same files.
+        load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+
+        let exit = world.get(&exit_ref).unwrap();
+        assert_eq!(exit.attrs.get("closed"), Some(&serde_json::json!(true)),
+            "a reload must not drop runtime state the file doesn't declare");
+        assert_eq!(exit.attrs.get("is_door"), Some(&serde_json::json!(true)),
+            "the file's declared attrs must still be applied");
     }
 
     #[test]
