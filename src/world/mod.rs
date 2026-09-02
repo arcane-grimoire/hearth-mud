@@ -232,6 +232,11 @@ impl World {
             .find(|o| o.kind == Kind::Exit && o.matches_direction(direction))
     }
 
+    /// Every object in the world, in no particular order.
+    pub fn objects(&self) -> impl Iterator<Item = &GameObject> {
+        self.objects.values()
+    }
+
     /// Objects located at `location_ref` — a room, an actor's inventory, or
     /// a container. Excludes `Exit` (navigation, not contents) and `Code`
     /// (never a physical thing — see [`Kind::Code`]) so every caller that
@@ -855,4 +860,16 @@ mod tests {
         // Each key appears exactly once.
         assert_eq!(resolved.len(), 3);
     }
+}
+
+/// Partial-name matching, shared by the `match_name` softcode function and by
+/// every lookup that resolves a name a player typed (`find_in_room`,
+/// `find_in_inventory`, `find_player`). One definition so a player's "buy ste"
+/// can't mean different things to different commands.
+pub fn name_matches(name: &str, input: &str) -> bool {
+    let name = name.to_lowercase();
+    let input = input.to_lowercase();
+    name == input
+        || name.starts_with(&input)
+        || name.split_whitespace().any(|w| w.starts_with(&input))
 }

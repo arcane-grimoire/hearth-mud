@@ -400,14 +400,12 @@ local function expand(template, actor_name, target_name)
   return out
 end
 
--- `present(str, environment(this_player()))`, essentially.
+-- `present(str, environment(this_player()))`, essentially. find_in_room does
+-- the name matching; this only adds "must be someone you can emote at".
 local function find_target(room, name)
   if not room or name == "" then return nil end
-  for _, obj in ipairs(get_room_contents(room)) do
-    if (is_player(obj) or is_npc(obj)) and match_name(obj.display_name, name) then
-      return obj
-    end
-  end
+  local obj = find_in_room(room, name)
+  if obj and (is_player(obj) or is_npc(obj)) then return obj end
   return nil
 end
 

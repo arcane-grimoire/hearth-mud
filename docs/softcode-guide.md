@@ -308,6 +308,11 @@ changes immediately within the same script.
 | `find_by_tag(spec)` | table | Find all objects with a tag |
 | `find_by_attr(key, value)` | table | Find all objects where `attrs[key] == value` |
 | `find_in_room(room, name)` | table or nil | Fuzzy-match an object by name in a room |
+| `find_in_inventory(ref, name)` | table or nil | Same, among what `ref` carries (or a container holds) |
+| `find_player(name)` | table or nil | Resolve a player by name, online or off; prefers a connected one |
+| `find_exit(room, name)` | table or nil | Match a direction **or alias**, the way movement does. `find_in_room` can never return an exit — `objects_in` excludes them. |
+| `responds_to(ref, hook)` | bool | Does this object handle that hook (including via its archetype)? For a dispatcher that delegates only when the target implements the behavior. |
+| `get_time()` | table or nil | The in-world clock: `{ total_minutes, minute, hour, day, month, year, is_day, weekday?, month_name? }`. `nil` when no `[clock]` is configured. |
 | `get_inventory(ref)` | table | List items carried by an object |
 | `get_players_in_room(room)` | table | Online players in a room |
 | `get_all_by_kind(kind)` | table | All objects of a kind (`"room"`, `"npc"`, etc.) |
@@ -515,6 +520,38 @@ happen. Timers are persisted to the database and survive server restarts. Use
 | `emit_data(ref, channel, data)` | Send structured JSON to a player's web client (see Widgets below). |
 | `prompt(actor, obj, hook)` | Arm a one-shot input prompt: the actor's next line fires `hook` on `obj` instead of running as a command. (Stores `_prompt_object`/`_prompt_hook` on the actor.) |
 | `log(message)` | Write to the server log. |
+
+### Multi-line text
+
+`emit` and `emit_room` accept embedded newlines and deliver each line properly
+— interior `\n` is normalized to CRLF on the way out. So a wrapped paragraph
+goes in one call:
+
+```lua
+local str = require("str")
+emit(actor, str.wrap(long_description, 72))   -- one call, many lines
+```
+
+### `movement_blocked` — holding an actor in place
+
+Setting the `movement_blocked` attr on an actor stops them moving and gives the
+refusal message:
+
+```lua
+set_attr(actor, "movement_blocked", "You can't move while in combat!")
+-- ...later
+set_attr(actor, "movement_blocked", nil)
+```
+
+It's honored by ordinary exit movement (`do_move`) and by `grid_move`, so a hold
+covers both walking through a door and crossing a wilderness map. It is *not*
+consulted by `grid_can_move`, which takes coordinates rather than an actor and
+answers "is that cell passable", not "may this actor move" — check the attr
+yourself when building an exit list for a held actor. Admin teleport bypasses it
+deliberately.
+
+Use it for a blanket hold. For gating one particular passage, use the exit's
+`can_traverse` hook or a `traverse` lock instead.
 
 ### emit_radius — multi-room propagation
 

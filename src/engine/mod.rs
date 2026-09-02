@@ -5037,7 +5037,7 @@ impl Engine {
             if let SessionState::Playing { actor_ref: ar, .. } = &session.state
                 && ar == actor_ref
             {
-                let _ = session.tx.send(ClientMessage::Text { text: format!("{}\r\n", message) });
+                let _ = session.tx.send(ClientMessage::Text { text: wire_text(message) });
             }
         }
     }
@@ -5149,7 +5149,7 @@ impl Engine {
                 if let Some(actor) = self.world.get(actor_ref)
                     && actor.location_ref.as_deref() == Some(room_ref)
                 {
-                    let _ = session.tx.send(ClientMessage::Text { text: format!("{}\r\n", message) });
+                    let _ = session.tx.send(ClientMessage::Text { text: wire_text(message) });
                 }
             }
         }
@@ -12311,4 +12311,19 @@ end
         drop(tx);
         let _ = handle.await;
     }
+}
+
+/// Normalize emitted text for the wire: interior newlines become CRLF, and the
+/// message gets a trailing CRLF.
+///
+/// Softcode composes multi-line text all the time — `str.wrap` returns one
+/// newline-joined string, and any table or box helper builds one. Without this
+/// a bare LF went out mid-message and staircased on telnet, so every recipe had
+/// to split the string and loop over `emit`. Splitting on `\n` after stripping
+/// `\r` handles CRLF, bare LF, and mixed input identically.
+fn wire_text(message: &str) -> String {
+    let normalized = message.replace('\r', "");
+    let mut out = normalized.replace('\n', "\r\n");
+    out.push_str("\r\n");
+    out
 }

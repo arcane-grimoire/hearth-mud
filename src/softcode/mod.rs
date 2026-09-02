@@ -3218,6 +3218,54 @@ mod tests {
             Intent::Trigger { target, hook, .. } if target == &arch && hook == "on_leave")));
     }
 
+    /// `movement_blocked` holds an actor in place with a custom reason, and
+    /// `do_move` honors it. Grid movement must too: to a player, walking a
+    /// wilderness map is the same act as walking through a door, so a hold that
+    /// stops one and not the other is a bug they will find.
+    #[test]
+    fn grid_move_honors_movement_blocked() {
+        let (mut world, arch, templates) = grid_move_world_and_templates();
+        world
+            .get_mut("#3")
+            .unwrap()
+            .attrs
+            .insert("movement_blocked".into(), serde_json::json!("You are grappled!"));
+
+        let runtime = SoftcodeRuntime::new();
+        let result = runtime
+            .run_eval(
+                &world,
+                r##"local r = grid_move("#3", "m", "east")
+                    return r.reason .. "|" .. tostring(r.moved) .. "|" .. r.message"##,
+                "#3",
+                Some("#1"),
+                Budget::default(),
+                counter(&world),
+                &test_themes(),
+                &templates,
+                &[],
+                0,
+            )
+            .expect("eval");
+
+        assert_eq!(
+            result.returned.as_deref(),
+            Some("blocked|false|You are grappled!"),
+            "a held actor must be refused, with the hold's own message"
+        );
+        // And nothing may have happened: no position write, no terrain hooks.
+        let intents = &result.batch.intents;
+        assert!(
+            !intents.iter().any(|i| matches!(i, Intent::SetAttr { target, key, .. }
+                if target == "#3" && (key == "_x" || key == "_y"))),
+            "a blocked step must not move the actor"
+        );
+        assert!(
+            !intents.iter().any(|i| matches!(i, Intent::Trigger { target, .. } if target == &arch)),
+            "a blocked step must not fire terrain hooks"
+        );
+    }
+
     #[test]
     fn grid_move_blocks_impassable_and_off_grid_and_unknown_map() {
         let (world, _arch, templates) = grid_move_world_and_templates();
