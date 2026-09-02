@@ -1,0 +1,28 @@
+# A hook that triggers itself must not take the server down.
+#
+# `deliver_effects` fires deferred triggers via `fire_hook_data`, which applies
+# that hook's batch and re-enters `deliver_effects` — plain recursion on the
+# engine's stack. Before MAX_TRIGGER_DEPTH this aborted the process with
+# "fatal runtime error: stack overflow" (exit 134): a server kill reachable
+# from two lines of softcode. The guide also claimed triggers could not recurse.
+#
+# Runs against the bare framework world; the looping object is built in-game.
+
+> create
+> tester
+> secretpass
+> secretpass
+expect: Account created
+
+> @eval local r = spawn({key="looper", kind="item", title="Looper"}) set_script(r, "function cmd_ping(this, actor, room, args)\n emit(actor, \"PING-START\")\n trigger(this, \"on_ping\")\nend\nfunction on_ping(this, actor, room, data)\n trigger(this, \"on_ping\")\nend") set_tag(r, "system:global") return "built"
+expect: built
+
+# The chain is cut at the depth limit instead of overflowing the stack.
+> ping
+expect: PING-START
+
+# Still alive and dispatching afterwards — the real assertion.
+> look
+expect-not: Huh?
+> say still here
+expect: still here

@@ -428,6 +428,18 @@ enum EditorMode {
 /// guard). Small on purpose — legitimate cascades are shallow.
 const MAX_FORCE_DEPTH: u32 = 5;
 
+/// Maximum nesting of `trigger()` — a hook firing a hook firing a hook.
+///
+/// `deliver_effects` fires deferred triggers by calling `fire_hook_data`, which
+/// applies that hook's own batch and re-enters `deliver_effects`. That is plain
+/// recursion on the engine's stack, so a hook that triggers itself does not
+/// loop forever, it *overflows the stack and aborts the process* — a server
+/// kill reachable from two lines of softcode, which every other guard here
+/// (the instruction budget, the timer quota, `MAX_FORCE_DEPTH`) exists to
+/// prevent. Legitimate chains are shallow (a lever fires a gate fires an
+/// alarm), so a small cap costs authors nothing.
+const MAX_TRIGGER_DEPTH: u32 = 8;
+
 struct Session {
     tx: mpsc::UnboundedSender<ClientMessage>,
     state: SessionState,
@@ -601,6 +613,8 @@ pub struct Engine {
     /// chain so a charm/puppet loop can't recurse without limit. See
     /// `MAX_FORCE_DEPTH`.
     force_depth: u32,
+    /// Re-entrancy depth of `trigger()` — see [`MAX_TRIGGER_DEPTH`].
+    trigger_depth: u32,
     /// Recent failed-login tracking per lowercased username:
     /// `(consecutive_failures, first_failure_at)`. Used to throttle repeated
     /// bad passwords so Argon2 verification can't be used as a CPU-DoS
@@ -907,6 +921,7 @@ impl Engine {
             scheduled_hooks,
             api_tokens,
             force_depth: 0,
+            trigger_depth: 0,
             login_failures: HashMap::new(),
             file_hashes,
             max_characters: config.max_characters,
@@ -4951,6 +4966,19 @@ impl Engine {
                 }
             }
         }
+        if !triggers.is_empty() && self.trigger_depth >= MAX_TRIGGER_DEPTH {
+            // Refuse rather than recurse. Dropping the tail of the chain keeps
+            // the world consistent (every batch so far has committed) and keeps
+            // the server alive; the alternative is aborting the process.
+            for (target, hook, _, _) in &triggers {
+                tracing::warn!(
+                    hook = %hook, target = %target, depth = self.trigger_depth,
+                    "trigger depth limit reached; refusing to fire"
+                );
+            }
+            return;
+        }
+        self.trigger_depth += 1;
         for (target, hook, data, actor) in triggers {
             let room_ref = self
                 .world
@@ -4964,6 +4992,7 @@ impl Engine {
                 tracing::warn!(hook = %hook, target = %target, error = %e, "Triggered hook error");
             }
         }
+        self.trigger_depth -= 1;
         // Event-aware move choreography, with the moved object as actor — the
         // same on_leave/on_move/on_enter sequence (plus global hooks) that
         // `cmd_go` runs, minus the pre-move lock/deny checks (scripted moves

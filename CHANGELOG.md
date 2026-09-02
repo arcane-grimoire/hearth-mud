@@ -145,6 +145,20 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A self-triggering hook no longer kills the server.** `trigger()` chains
+  recursed on the engine's stack with no cap: `deliver_effects` fires a deferred
+  trigger through `fire_hook_data`, which applies that hook's batch and re-enters
+  `deliver_effects`. Two lines of softcode — a hook that triggers itself —
+  aborted the process with `fatal runtime error: stack overflow`, a server kill
+  reachable by any script author, in an engine where every sibling mechanism
+  already has a guard (the instruction budget, the timer quota per owner, and
+  `MAX_FORCE_DEPTH` for forced commands). Now capped at `MAX_TRIGGER_DEPTH` (8);
+  beyond it the remaining triggers are refused and logged, leaving the world
+  consistent since every batch up to that point has committed. The guide claimed
+  the opposite outright — "Triggers don't recurse … This prevents infinite
+  loops" — and now describes the real behavior. Covered by
+  `tests/fixtures/trigger-recursion.session`, verified to abort the test binary
+  with SIGABRT when the cap is lifted.
 - **`@import` no longer drops a room's attrs or an exit's attrs and script,
   and an edited exit script is detected on reload.** Three gaps left by adding
   those fields to the boot loader and to export without following them through

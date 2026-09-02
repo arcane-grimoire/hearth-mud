@@ -442,8 +442,16 @@ end
 The triggered hook still runs *after* the current script's batch commits
 (deferred, like all effects) — it can't return a value to the caller.
 
-Triggers don't recurse — if the triggered hook also calls `trigger`, the
-second trigger fires after the first finishes. This prevents infinite loops.
+Triggers **do** nest: a triggered hook's own `trigger` fires from inside the
+first one's delivery, so a chain runs lever → gate → alarm depth-first. That
+recursion is bounded by `MAX_TRIGGER_DEPTH` (8). Past it the remaining triggers
+are refused and logged rather than fired — the world stays consistent, because
+every batch up to that point has committed.
+
+Do not write a hook that triggers itself unconditionally. It is not an infinite
+loop that eventually stops; without the cap it recurses on the engine's stack
+until the process aborts. The cap exists precisely because two lines of softcode
+could otherwise kill the server.
 
 ### set_script / set_lib
 
