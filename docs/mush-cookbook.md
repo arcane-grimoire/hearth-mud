@@ -864,6 +864,8 @@ target = "town/gate"
 hook = "on_close"
 ```
 
+`world/system/cron.luau`:
+
 ```lua
 local function matches(job, t)
   if job.month and job.month ~= t.month then return false end
@@ -919,6 +921,8 @@ the description with the clock.
 
 Put this on a `system:global` object; it drives every room that declares
 time-of-day variants.
+
+`world/system/daylight.luau`:
 
 ```lua
 local PHASES = { "dawn", "day", "dusk", "night" }
@@ -1027,6 +1031,8 @@ title = "Weather"
 tags = ["system:global", "system:hidden"]
 script = "weather.luau"
 ```
+
+`world/system/weather.luau`:
 
 ```lua
 local random = require("random")
@@ -1174,12 +1180,18 @@ square     = { crossroads = "town/crossroads" }
 edge       = { crossroads = "town/crossroads" }
 ```
 
+`world/town/car.luau`:
+
 ```lua
 local str = require("str")
 
+-- NOTE: `get_contents` returns ITEMS only, so it can't see a passenger.
+-- `get_room_contents` is the one that returns everything located here (it
+-- only excludes exits and code objects) — a vehicle's interior is a room in
+-- all but name.
 local function occupants(this)
   local list = {}
-  for _, o in ipairs(get_contents(this)) do
+  for _, o in ipairs(get_room_contents(this)) do
     if is_player(o) or is_npc(o) then table.insert(list, o) end
   end
   return list
@@ -1297,6 +1309,8 @@ engine does the work. No `@force`, no per-passenger teleport loop.
 An elevator is a car on rails: fixed stops, a call button in each lobby, and
 doors. The interesting difference is that it moves *itself* on a timer.
 
+`world/tower/elevator.luau`:
+
 ```lua
 local str = require("str")
 
@@ -1310,9 +1324,11 @@ local function floor_index(key)
   return nil
 end
 
+-- `get_room_contents`, not `get_contents`: the latter is items-only and would
+-- never see a passenger. See the car recipe above.
 local function riders(this)
   local list = {}
-  for _, o in ipairs(get_contents(this)) do
+  for _, o in ipairs(get_room_contents(this)) do
     if is_player(o) then table.insert(list, o) end
   end
   return list

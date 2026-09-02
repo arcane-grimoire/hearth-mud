@@ -1,0 +1,30 @@
+# Scaffolding for the elevator recipe, whose FLOORS list names these file keys.
+area = "tower"
+
+[[rooms]]
+key = "lobby"
+title = "The Tower Lobby"
+description = "Polished stone."
+
+[[rooms]]
+key = "mezzanine"
+title = "The Mezzanine"
+description = "A balcony overlooking the lobby."
+
+[[rooms]]
+key = "offices"
+title = "The Offices"
+description = "Rows of desks."
+
+[[rooms]]
+key = "roof"
+title = "The Roof"
+description = "Wind, and a view."
+
+[[objects]]
+key = "elevator"
+kind = "item"
+title = "the elevator car"
+description = "Brass gates and a row of buttons."
+location = "lobby"
+script = "elevator.luau"

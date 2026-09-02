@@ -1,0 +1,45 @@
+# Cookbook: the clock-driven recipes — the day-describer and MushCron. Both
+# hang off on_hour, so none of this was reachable before `tick:`.
+# Clock: 10 game-minutes per tick, starting 04:00.
+
+> create
+> tester
+> secretpass
+> secretpass
+expect: Account created
+
+> out
+expect: Market Square
+
+# --- Day Describer --------------------------------------------------------
+# on_startup ran at boot, so the square already carries its NIGHT description
+# (04:00 is before dawn_hour 5 in the recipe's phase table).
+> look
+expect: NIGHTDESC
+expect-not: DAYDESC
+
+# 05:00 is the dawn phase — 6 ticks of 10 minutes.
+tick: 6
+> look
+expect: DAWNDESC
+expect-not: NIGHTDESC
+
+# 08:00 is full day: 18 more ticks.
+tick: 18
+> look
+expect: DAYDESC
+
+# --- MushCron -------------------------------------------------------------
+# The scheduler's market-day job is set for hour 8, which the ticks above just
+# crossed — so the crier has already been triggered.
+expect: CRIER: market day!
+expect: job=market-day
+
+# The curfew job is hour 10: 12 more ticks, and it fires once.
+tick: 12
+expect: CRIER: curfew!
+
+# 18:00 is the dusk phase.
+tick: 48
+> look
+expect: DUSKDESC
