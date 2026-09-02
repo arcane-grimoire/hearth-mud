@@ -16,14 +16,21 @@
 //! negotiation and the final BBCode→ANSI step, neither of which is where those
 //! bugs live.
 //!
+//! **Time is frozen.** The engine's heartbeat and autosave are wall-clock
+//! `tokio::time::interval`s, so a run lasting longer than `tick_secs` would
+//! tick on its own at a moment depending on machine speed. The harness pushes
+//! both intervals a century out, so nothing happens on its own: a `.session`
+//! run advances time only where the script says `tick:`. Those ticks travel the
+//! same FIFO channel as player input, so the fence below orders them exactly
+//! like an input — no sleeps, and the same output guarantee.
+//!
 //! **Determinism without sleeps.** The engine loop consumes one FIFO channel and
 //! `handle_input` is synchronous, so after sending a `PlayerInput` we send an
 //! `ApiRequest` (`ListRooms`) as a *fence*: when its reply comes back, the input
 //! has been fully processed and every `ClientMessage` it produced is already
 //! queued, ready to drain with `try_recv`. No socket, no sleep, no idle-timeout
-//! guessing. (Deterministic for input-driven flows; tick/timer/clock-driven
-//! output — `on_tick`, `after()` — is a follow-up that would need a manual
-//! tick-advance.)
+//! guessing. This covers input-driven flows *and* tick-driven ones, since
+//! `tick:` is just another message on the same channel.
 //!
 //! ## `.session` format
 //!
@@ -37,7 +44,16 @@
 //! > look
 //! expect: /Crossroads|Spawn/ # /.../ is a regex instead of a substring
 //! expect-not: error          # must NOT appear
+//! tick: 5                    # advance the heartbeat 5 times (bare `tick:` = 1)
+//! expect: The torch gutters. # ...and assert on what the ticks printed
 //! ```
+//!
+//! `tick:` is how you test anything time-driven — `on_tick`, `after()` timers,
+//! and the game clock's `on_hour`/`on_dawn`/`on_dusk` rollovers. It runs real
+//! heartbeats rather than jumping a counter, so every hook in between fires:
+//! to reach dawn you tick to dawn. That is cheap enough not to matter — a full
+//! in-world day at 10 minutes/tick is 144 ticks, and even 1440 costs a fraction
+//! of a second.
 //!
 //! An `expect:`/`expect-not:` checks the output produced by every `>` line since
 //! the previous assertion (so a batch of inputs followed by one assertion reads
@@ -56,6 +72,10 @@ use crate::engine::{ApiRequest, ClientMessage, Engine, EngineMessage};
 use crate::markup;
 
 const SESSION_ID: &str = "session-test";
+
+/// Interval (seconds) the runner forces on the engine's heartbeat and autosave
+/// so neither fires on its own during a test — a century, i.e. never.
+const FROZEN_INTERVAL_SECS: u64 = 100 * 365 * 24 * 60 * 60;
 
 /// One `expect:`/`expect-not:` assertion that didn't hold.
 #[derive(Debug, Clone)]
@@ -121,6 +141,8 @@ impl Matcher {
 #[derive(Debug)]
 enum Step {
     Input(String),
+    /// `tick: N` — advance the heartbeat N times.
+    Tick(u64),
     Expect {
         line: usize,
         matcher: Matcher,
@@ -145,6 +167,16 @@ fn parse(source: &str) -> Result<Vec<Step>, String> {
             // input verbatim (never trimmed — a password may be space-sensitive).
             let input = rest.strip_prefix(' ').unwrap_or(rest);
             steps.push(Step::Input(input.to_string()));
+        } else if let Some(rest) = trimmed.strip_prefix("tick:") {
+            let arg = rest.trim();
+            // Bare `tick:` is one tick — the common case in a script.
+            let count = if arg.is_empty() {
+                1
+            } else {
+                arg.parse::<u64>()
+                    .map_err(|_| format!("line {}: tick: expects a count, got {:?}", lineno, arg))?
+            };
+            steps.push(Step::Tick(count));
         } else if let Some(rest) = trimmed.strip_prefix("expect-not:") {
             steps.push(Step::Expect {
                 line: lineno,
@@ -159,7 +191,7 @@ fn parse(source: &str) -> Result<Vec<Step>, String> {
             });
         } else {
             return Err(format!(
-                "line {}: expected `> <input>`, `expect:`, `expect-not:`, `# comment`, or a blank line; got: {}",
+                "line {}: expected `> <input>`, `tick: <n>`, `expect:`, `expect-not:`, `# comment`, or a blank line; got: {}",
                 lineno, line
             ));
         }
@@ -176,8 +208,19 @@ struct Harness {
 
 impl Harness {
     fn start(config: &Config, db: Database) -> Self {
+        // FREEZE THE CLOCK. The engine's heartbeat and autosave are wall-clock
+        // `tokio::time::interval`s in a `select!`, so a run lasting longer than
+        // `tick_secs` would tick on its own, at a moment depending on how fast
+        // the machine is. Pushing both intervals far into the future means
+        // nothing happens on its own: time in a `.session` run moves only when
+        // the script says `tick:`. Deterministic by construction rather than by
+        // being quick enough.
+        let mut frozen = config.clone();
+        frozen.tick_secs = FROZEN_INTERVAL_SECS;
+        frozen.autosave_secs = FROZEN_INTERVAL_SECS;
+
         let (tx, rx) = mpsc::unbounded_channel();
-        let engine = Engine::new(rx, db, config);
+        let engine = Engine::new(rx, db, &frozen);
         let handle = tokio::spawn(engine.run());
 
         let (out_tx, out_rx) = mpsc::unbounded_channel();
@@ -223,6 +266,17 @@ impl Harness {
         self.drain_plain()
     }
 
+    /// Advance the heartbeat `count` times and return what it printed.
+    ///
+    /// The ticks travel the same FIFO channel as player input, so the fence
+    /// afterwards cannot reply until every one has run and its output is
+    /// queued — the same ordering guarantee `input` relies on, no sleeps.
+    async fn tick(&mut self, count: u64) -> String {
+        let _ = self.tx.send(EngineMessage::Tick { count });
+        self.fence().await;
+        self.drain_plain()
+    }
+
     async fn shutdown(self) {
         let _ = self.tx.send(EngineMessage::Shutdown);
         let _ = self.handle.await;
@@ -260,6 +314,16 @@ pub async fn run_source(
                     assertion_since_input = false;
                 }
                 let out = harness.input(line).await;
+                window.push_str(&out);
+            }
+            Step::Tick(count) => {
+                // A tick produces output an assertion should see, so it opens a
+                // window the same way an input does.
+                if assertion_since_input {
+                    window.clear();
+                    assertion_since_input = false;
+                }
+                let out = harness.tick(*count).await;
                 window.push_str(&out);
             }
             Step::Expect {

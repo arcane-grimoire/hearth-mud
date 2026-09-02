@@ -29,3 +29,30 @@ expect: 0 object(s) loaded
 > zstat
 expect: 2/2
 expect-not: 4/2
+
+# --- the timed repop -------------------------------------------------------
+# The recipe's on_tick runs the reset list every `interval` ticks (300 here).
+# This half of the recipe was untestable until .session could advance the
+# heartbeat: nothing about a repop responds to input.
+
+# Kill the zone's guards, the way players would.
+> @eval local n = 0 for _, o in ipairs(find_by_tag("spawn:zone_1")) do destroy(o) n = n + 1 end return "culled " .. n
+expect: culled 2
+> zstat
+expect: 0/2
+
+# Short of the interval, nothing comes back.
+tick: 299
+> zstat
+expect: 0/2
+
+# On the interval tick, the zone restocks to max.
+tick: 1
+> zstat
+expect: 2/2
+
+# And a second full interval does not stack them.
+tick: 300
+> zstat
+expect: 2/2
+expect-not: 4/2

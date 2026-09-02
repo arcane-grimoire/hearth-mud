@@ -31,6 +31,23 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (a greedy `%S+` swallowing the `=` in `fset themesong=...`), now fixed. Covers
   `+finger`, `+where`, the dice roller, the BBS (including the `prompt()` →
   `on_body` handoff), the vendor, and `+jobs`.
+- **`.session` tests can advance time (`tick: <n>`), and time is frozen
+  otherwise.** The runner drove input-driven flows deterministically but had no
+  way to reach anything time-driven, so `on_tick`, `after()` timers and the game
+  clock's `on_hour`/`on_dawn`/`on_dusk` had no end-to-end coverage at all — the
+  module's own docs called it out as a follow-up. Two halves: a new
+  `EngineMessage::Tick { count }` runs heartbeats on the message loop, so ticks
+  are ordered by the same FIFO fence as player input (no sleeps); and the
+  harness now pushes the engine's wall-clock heartbeat and autosave a century
+  out, so a run can't tick on its own. That closes a latent flake — a `.session`
+  taking longer than `tick_secs` was already getting spontaneous ticks at a
+  machine-speed-dependent moment. Ticks are run for real rather than jumped, so
+  every rollover hook in between fires; a full in-world day is cheap (1440 ticks
+  measured at a fraction of a second), which is why there's no separate
+  "jump to time" helper. Two cookbook recipes that were parse-only *because*
+  they're time-driven are now covered end to end: the jukebox's `after()` verse
+  chain, and the Diku zone's timed repop (cull the guards, tick to the interval,
+  watch it restock to max and not stack).
 - **Five lookups the engine already had, now callable from softcode.**
   `find_exit(room, name)` (matches a direction *or* alias exactly as movement
   does — `find_in_room` can never return an exit, since `objects_in` excludes
