@@ -579,6 +579,7 @@ fn apply(
                 }
                 obj.locks = room.locks.clone();
                 obj.attr_schema = room.attr_schema.clone();
+                obj.attrs = room.attrs.clone();
                 obj.attrs.insert(loader::FILE_KEY_ATTR.into(), serde_json::json!(fk));
                 world.add_object(obj);
             } else {
@@ -590,6 +591,15 @@ fn apply(
                 if obj.attr_schema != room.attr_schema {
                     obj.attr_schema = room.attr_schema.clone();
                     changed = true;
+                }
+                // Merge, not replace: a room accumulates runtime state the
+                // bundle knows nothing about. Same rule as objects below and
+                // as the boot loader.
+                for (k, v) in &room.attrs {
+                    if obj.attrs.get(k) != Some(v) {
+                        obj.attrs.insert(k.clone(), v.clone());
+                        changed = true;
+                    }
                 }
                 if let Some(title) = &room.title
                     && obj.title.as_deref() != Some(title.as_str())
@@ -758,6 +768,7 @@ fn apply(
                     .with_target(&to);
                 obj.aliases = exit.aliases.iter().cloned().collect();
                 obj.locks = exit.locks.clone();
+                obj.attrs = exit.attrs.clone();
                 obj.attrs.insert(loader::FILE_KEY_ATTR.into(), serde_json::json!(fk));
                 world.add_object(obj);
             } else {
@@ -779,7 +790,27 @@ fn apply(
                     obj.locks = exit.locks.clone();
                     changed = true;
                 }
+                for (k, v) in &exit.attrs {
+                    if obj.attrs.get(k) != Some(v) {
+                        obj.attrs.insert(k.clone(), v.clone());
+                        changed = true;
+                    }
+                }
             }
+
+            // An exit carries its own script (a door's can_traverse gate), so
+            // a bundle must install it like a room's or an object's. Exits
+            // take no libs — those live on Kind::Code objects.
+            let prog_changed = resolve_script(
+                &ref_id,
+                &exit.script,
+                &Default::default(),
+                &area.base_dir,
+                world,
+                is_new,
+                &mut report,
+            )?;
+            changed |= prog_changed;
 
             let label = format!("{} (exit)", fk);
             if is_new {
@@ -2216,6 +2247,96 @@ mod tests {
         assert_eq!(m2.attr_schema[0].default, Some(serde_json::json!(1)));
         assert_eq!(m2.attr_schema[1].ty, AttrType::Enum);
         assert_eq!(m2.attr_schema[1].values, vec!["arid".to_string(), "alpine".to_string()]);
+    }
+
+    /// A room's attrs and an exit's attrs *and script* must survive
+    /// export → import into a FRESH world.
+    ///
+    /// The existing `export_then_import_round_trips_to_a_no_op` re-imports into
+    /// the same world, so a field the install path silently drops still looks
+    /// unchanged — it was already there. Rebuilding an empty world from the
+    /// bundle is the only shape that catches it, and it caught three: the
+    /// import path applied neither `room.attrs`, `exit.attrs`, nor
+    /// `exit.script`, so a database rebuilt from a bundle lost every door's
+    /// gate and state while the report said "unchanged".
+    #[test]
+    fn room_and_exit_attrs_and_exit_script_survive_export_into_a_fresh_world() {
+        let src = {
+            let mut world = World::new();
+
+            let a = world.next_dbref();
+            let mut room_a =
+                GameObject::new(&a, "shop", Kind::Room).with_title("The Shop").with_owner("#1");
+            room_a.attrs.insert("climate".into(), serde_json::json!("coastal"));
+            room_a.attrs.insert("light".into(), serde_json::json!(1));
+            world.add_object(room_a);
+
+            let b = world.next_dbref();
+            world.add_object(
+                GameObject::new(&b, "store", Kind::Room)
+                    .with_title("The Storeroom")
+                    .with_owner("#1"),
+            );
+
+            let e = world.next_dbref();
+            let mut exit = GameObject::new(&e, "north", Kind::Exit)
+                .with_location(&a)
+                .with_target(&b)
+                .with_owner("#1");
+            exit.attrs.insert("closed".into(), serde_json::json!(true));
+            exit.attrs.insert("key_tag".into(), serde_json::json!("key:store"));
+            crate::softcode::hooks::set_script(
+                &mut exit,
+                "function can_traverse(this, actor, room) return false end".to_string(),
+            );
+            world.add_object(exit);
+            world
+        };
+
+        let export_dir = TempDir::new();
+        {
+            let mut world = src;
+            export_bundle(&export_dir.path, &mut world).unwrap();
+        }
+
+        let db = temp_db();
+        let mut fresh = World::new();
+        import_bundle(&export_dir.path, &mut fresh, &db, false, Some("#1")).unwrap();
+
+        // Export re-derives the key from the title, so match on that.
+        let shop = fresh
+            .objects
+            .values()
+            .find(|o| o.title.as_deref() == Some("The Shop"))
+            .expect("room re-imported");
+        assert_eq!(
+            shop.attrs.get("climate"),
+            Some(&serde_json::json!("coastal")),
+            "a room's attrs must survive a bundle"
+        );
+        assert_eq!(shop.attrs.get("light"), Some(&serde_json::json!(1)));
+
+        let exit = fresh
+            .objects
+            .values()
+            .find(|o| o.kind == Kind::Exit)
+            .expect("exit re-imported");
+        assert_eq!(
+            exit.attrs.get("closed"),
+            Some(&serde_json::json!(true)),
+            "an exit's attrs must survive a bundle — otherwise a rebuilt \
+             database loses every door's state"
+        );
+        assert_eq!(exit.attrs.get("key_tag"), Some(&serde_json::json!("key:store")));
+        assert!(
+            exit.script.is_some(),
+            "an exit's script must survive a bundle — otherwise a rebuilt \
+             database loses every door's gate"
+        );
+        assert!(
+            crate::softcode::hooks::object_responds(&fresh, exit, "can_traverse"),
+            "and its hooks must be derived on the re-imported exit"
+        );
     }
 
     /// Objects created entirely in-game (no `@import` involved, no
