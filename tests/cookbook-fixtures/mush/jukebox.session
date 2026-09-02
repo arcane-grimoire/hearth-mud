@@ -1,0 +1,36 @@
+# Cookbook: the jukebox — an `after()` chain. This recipe was parse-only until
+# .session could advance the heartbeat, because nothing it does happens in
+# response to input.
+
+> create
+> tester
+> secretpass
+> secretpass
+expect: Account created
+
+> jukebox
+expect: Jukebox
+expect: Ride of the Valkyries
+
+> play 1
+expect: clicks, whirs, and starts up
+expect: Ride of the Valkyries
+
+# The first verse is scheduled 5 ticks out — not before.
+tick: 4
+expect-not: horns come in
+tick: 1
+expect: The horns come in like weather.
+
+# Each verse schedules the next.
+tick: 5
+expect: Somebody at the bar starts conducting.
+
+# Then the record ends and the deck frees up.
+tick: 5
+expect: The record ends
+
+# Which means a second play is accepted rather than refused as busy.
+> play 2
+expect: Slow Rain
+expect-not: already playing

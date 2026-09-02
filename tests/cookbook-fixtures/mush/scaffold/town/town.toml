@@ -21,3 +21,29 @@ currency = "coins"
 [objects.attrs.stock]
 soda    = { cost = 10, title = "a bottle of fizzy soda", desc = "Cold and faintly medicinal." }
 popcorn = { cost = 20, title = "a bag of popcorn", desc = "Warm, salty, over-buttered." }
+
+# The jukebox — a tick/after-driven recipe, testable now that .session can
+# advance the heartbeat.
+[[objects]]
+key = "jukebox"
+kind = "item"
+title = "a chrome jukebox"
+description = "Lit from within, humming faintly."
+location = "tavern"
+script = "jukebox.luau"
+
+[[objects.attrs.songs]]
+title = "Ride of the Valkyries"
+artist = "the house band"
+lines = [
+  "The horns come in like weather.",
+  "Somebody at the bar starts conducting.",
+]
+
+[[objects.attrs.songs]]
+title = "Slow Rain"
+artist = "Merridy Vane"
+lines = [
+  "A brushed snare, and Vane's voice under it.",
+  "Conversation drops a half-step.",
+]

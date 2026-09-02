@@ -93,6 +93,17 @@ pub enum EngineMessage {
         token: Option<String>,
         reply: tokio::sync::oneshot::Sender<ApiResponse>,
     },
+    /// Advance the heartbeat `count` times, right now, on the message loop.
+    ///
+    /// The engine's own tick is a wall-clock `tokio::time::interval`, which is
+    /// what production wants and what a test cannot use: it can't be waited on
+    /// without sleeping, and it fires on its own schedule regardless of where
+    /// the test is. Driving ticks through the *same FIFO channel* as player
+    /// input makes them orderable — a fence sent afterwards can't reply until
+    /// the ticks are done and their output is queued. See `session_test`.
+    Tick {
+        count: u64,
+    },
     Shutdown,
 }
 
@@ -953,6 +964,11 @@ impl Engine {
                         Some(EngineMessage::ApiRequest { request, token, reply }) => {
                             let response = self.handle_api_request(request, token);
                             let _ = reply.send(response);
+                        }
+                        Some(EngineMessage::Tick { count }) => {
+                            for _ in 0..count {
+                                self.do_tick();
+                            }
                         }
                         Some(EngineMessage::Shutdown) | None => {
                             break;
