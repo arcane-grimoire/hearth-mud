@@ -202,7 +202,9 @@ pub(crate) const FILE_KEY_ATTR: &str = "_file_key";
 ///
 /// Scripts matter here: the old change-detection walked rooms and objects
 /// only, so a `[[scripts]]` program file was invisible in the same way a
-/// room's was.
+/// room's was. Exits matter for the same reason — an exit carries its own
+/// script (a door's `can_traverse` gate), and leaving it unhashed meant
+/// editing that file and restarting silently kept running the old gate.
 fn referenced_program_files(area: &AreaFile) -> impl Iterator<Item = &str> {
     area.rooms
         .iter()
@@ -221,6 +223,11 @@ fn referenced_program_files(area: &AreaFile) -> impl Iterator<Item = &str> {
             area.objects
                 .iter()
                 .flat_map(|o| o.libs.values().filter_map(|p| p.file_path())),
+        )
+        .chain(
+            area.exits
+                .iter()
+                .flat_map(|e| e.script.iter().flat_map(|s| s.paths())),
         )
         .chain(area.scripts.iter().filter_map(|s| s.source.file_path()))
 }
@@ -2129,6 +2136,70 @@ archetype = "loop/a"
     /// to areas it happened to reinstall — otherwise the persisted set shrinks
     /// on each boot and the dropped files look changed next time.
     #[test]
+    /// Editing an exit's script file and reloading must actually reinstall it.
+    ///
+    /// `referenced_program_files` drives change detection, and it walked rooms,
+    /// objects, their libs, and `[[scripts]]` — but not exits. So a door's
+    /// `.luau` was unhashed: nothing the loader tracked had changed, the area
+    /// was skipped, and the DB's old gate kept running. Exactly the bug the
+    /// function's own comment says was fixed for rooms and `[[scripts]]`.
+    #[test]
+    fn editing_an_exit_script_is_detected_on_reload() {
+        let dir = TempGameDir::new();
+        dir.write_area(
+            "town",
+            "town.toml",
+            r#"
+            area = "town"
+            [[rooms]]
+            key = "a"
+            title = "A"
+            [[rooms]]
+            key = "b"
+            title = "B"
+            [[exits]]
+            from = "a"
+            direction = "north"
+            to = "b"
+            script = "gate.luau"
+            "#,
+        );
+        let gate = dir.path.join("town").join("gate.luau");
+        std::fs::write(&gate, "function can_traverse(this, actor, room) return false end").unwrap();
+
+        let mut world = World::new();
+        let first = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+        let exit_ref = world
+            .objects
+            .values()
+            .find(|o| o.kind == Kind::Room && o.key == "a")
+            .map(|r| world.exits_from(&r.ref_id)[0].ref_id.clone())
+            .expect("exit loaded");
+        assert!(world.get(&exit_ref).unwrap().script.is_some());
+
+        // Edit the gate — the area TOML is untouched, so only the .luau's own
+        // hash can reveal the change.
+        std::fs::write(
+            &gate,
+            "function can_traverse(this, actor, room) return true end
+             function on_enter(this, actor, room) end",
+        )
+        .unwrap();
+
+        load_game_dir(&dir.path, &mut world, &first.file_hashes).unwrap();
+
+        let script = world.get(&exit_ref).unwrap().script.as_ref().expect("still scripted");
+        assert!(
+            script.source.contains("return true"),
+            "an edited exit script must be reinstalled, got: {}",
+            script.source
+        );
+        assert!(
+            crate::softcode::hooks::object_responds(&world, world.get(&exit_ref).unwrap(), "on_enter"),
+            "and its newly-added hooks must be derived"
+        );
+    }
+
     fn skipped_areas_still_carry_their_program_hashes_forward() {
         let dir = TempGameDir::new();
         dir.write_area(

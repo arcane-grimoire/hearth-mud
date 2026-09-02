@@ -145,6 +145,21 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`@import` no longer drops a room's attrs or an exit's attrs and script,
+  and an edited exit script is detected on reload.** Three gaps left by adding
+  those fields to the boot loader and to export without following them through
+  the rest of the pipeline. The install path in `import_export.rs` applied a
+  room's title/tags/locks/schema but never its `attrs`, and an exit's
+  direction/target/aliases/locks but never its `attrs` or `script` — so a
+  database rebuilt from an exported bundle lost every door's gate and state
+  while the report cheerfully said "unchanged". Separately,
+  `referenced_program_files` (which drives hash-based change detection) walked
+  rooms, objects, libs and `[[scripts]]` but not exits, so editing a door's
+  `.luau` and restarting silently kept running the old gate — the same bug that
+  function's own comment says was fixed for rooms. The round-trip test that
+  should have caught the first two re-imported into the *same* world, where a
+  dropped field still looks unchanged because it was already there; the new one
+  rebuilds an empty world from the bundle, which is the only shape that shows it.
 - **A room can carry `attrs` in area TOML.** `RoomDef` had no `attrs` field at
   all, so — with no `deny_unknown_fields` — a `[rooms.attrs]` block parsed,
   loaded without error, and was silently dropped. Rooms hold state like any
