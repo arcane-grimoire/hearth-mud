@@ -9,6 +9,28 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **MUSH softcode cookbook (`docs/mush-cookbook.md`).** A recipe-shaped companion to the
+  softcode guide, aimed at builders arriving from MUSH/MUX softcode. It opens
+  with a concept map (`&ATTR`/`v()` → `set_attr`/`get_attr`, `$command` →
+  `cmd_*` hooks, Master Room → `system:global`, `@wait` → `after`, `@parent` →
+  archetypes, `iter()`/`switch()` → ordinary Lua) and the four rules that
+  actually change how you write, then works through complete implementations of
+  the canonical MUSHcode gadgets in Hearth: `+finger`, `+who`/`+where`, a
+  Myrddin-style BBS, `+mail`, the Multi-Vendor, MushCron, a Day-Describer, a
+  Keran-style weather engine, a vehicle and an elevator, a dice roller, a
+  jukebox, `+jobs`, and `@parent`/`@clone`/`@dig` as archetypes and intents.
+  Every recipe is a whole, pasteable object script.
+- **The cookbook's recipes are executable, and CI runs them** (`tests/cookbook.rs`).
+  The doc is the source of truth for the code: every ```lua block labelled with a
+  `world/<area>/<name>.luau` path is extracted at test time into a temporary game
+  directory, wired up by checked-in scaffolding TOML, and driven through the real
+  session handler by `.session` fixtures — so a recipe and its test cannot drift.
+  This exists because parsing isn't enough: `luau-analyze` treats `emit`,
+  `get_attr` and friends as unknown globals, so a wrong argument order or a hook
+  that never fires parses perfectly. Running them found a real bug in `+finger`
+  (a greedy `%S+` swallowing the `=` in `fset themesong=...`), now fixed. Covers
+  `+finger`, `+where`, the dice roller, the BBS (including the `prompt()` →
+  `on_body` handoff), the vendor, and `+jobs`.
 - **Coordinate exits.** An ordinary exit carrying `_dest_x`/`_dest_y` attributes
   now stamps that arrival cell onto the traversing actor's `_x`/`_y`, so a
   normal room's exit can drop a player onto a specific `(x, y)` of a one-room

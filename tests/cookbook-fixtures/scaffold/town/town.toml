@@ -1,0 +1,23 @@
+# Scaffolding — see system/system.toml. The vendor's stock table is the one
+# from the cookbook's Vendors section.
+area = "town"
+
+[[rooms]]
+key = "tavern"
+title = "The Stag and Crown"
+description = "A low-beamed tavern."
+
+[[objects]]
+key = "vendor"
+kind = "item"
+title = "a brass vending machine"
+description = "A brass contraption with a slot and a hand-lettered menu."
+location = "tavern"
+script = "vendor.luau"
+
+[objects.attrs]
+currency = "coins"
+
+[objects.attrs.stock]
+soda    = { cost = 10, title = "a bottle of fizzy soda", desc = "Cold and faintly medicinal." }
+popcorn = { cost = 20, title = "a bag of popcorn", desc = "Warm, salty, over-buttered." }

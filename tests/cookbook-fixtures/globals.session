@@ -1,0 +1,40 @@
+# Cookbook: the Globals recipes (+finger, +where) and the dice roller.
+# Scripts come from docs/mush-cookbook.md — see tests/cookbook.rs.
+
+> create
+> tester
+> secretpass
+> secretpass
+expect: Account created
+
+# --- +finger -------------------------------------------------------------
+# fset must split key from value at the `=`. A greedy `%S+` for the key
+# swallows the separator and yields a key of "themesong=Ride".
+> fset themesong=Ride of the Valkyries
+expect: Set
+expect-not: Unknown field
+> finger
+expect: Theme Song
+expect: Ride of the Valkyries
+> fset themesong
+expect: Cleared
+> finger
+expect-not: Ride of the Valkyries
+> fset bogusfield=x
+expect: Unknown field
+
+# --- +where --------------------------------------------------------------
+> where
+expect: Who's Where
+expect: tester
+expect: 1 connected.
+
+# --- dice roller ---------------------------------------------------------
+> roll 3d6
+expect: rolls 3d6
+> roll 2d6+3
+expect: rolls 2d6+3
+> roll banana
+expect: Usage
+> roll 500d6
+expect: not a die

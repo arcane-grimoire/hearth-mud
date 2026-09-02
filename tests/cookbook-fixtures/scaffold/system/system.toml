@@ -1,0 +1,50 @@
+# Scaffolding for the cookbook doc tests. This file wires the recipes together
+# into a loadable area; the recipe SCRIPTS themselves are extracted from
+# docs/mush-cookbook.md at test time (see tests/cookbook.rs), so the doc stays
+# the single source of truth for the code and cannot drift from the tests.
+area = "system"
+
+[[objects]]
+key = "finger"
+kind = "code"
+title = "Finger System"
+tags = ["system:global", "system:hidden"]
+script = "finger.luau"
+
+[[objects]]
+key = "where"
+kind = "code"
+title = "Where System"
+tags = ["system:global", "system:hidden"]
+script = "where.luau"
+
+[[objects]]
+key = "mail"
+kind = "code"
+title = "Mail System"
+tags = ["system:global", "system:hidden"]
+script = "mail.luau"
+
+[[objects]]
+key = "jobs"
+kind = "code"
+title = "Job Tracker"
+tags = ["system:global", "system:hidden"]
+script = "jobs.luau"
+
+[[objects]]
+key = "roll"
+kind = "code"
+title = "Dice"
+tags = ["system:global", "system:hidden"]
+script = "roll.luau"
+
+[[objects]]
+key = "bbs"
+kind = "code"
+title = "Bulletin Board"
+tags = ["system:global", "system:hidden"]
+script = "bbs.luau"
+
+[objects.attrs]
+groups = ["general", "announcements"]

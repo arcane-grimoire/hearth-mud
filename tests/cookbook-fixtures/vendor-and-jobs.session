@@ -1,0 +1,29 @@
+# Cookbook: the Multi-Vendor and the +jobs tracker.
+
+> create
+> tester
+> secretpass
+> secretpass
+expect: Account created
+
+# --- vendor: the menu renders from the stock table via on_look -------------
+> look vendor
+expect: Vending Machine
+expect: soda
+expect: popcorn
+
+# Refused when the buyer can't pay (transfer_attr would roll the batch back).
+> order soda
+expect: 10
+> order kumquat
+expect: doesn't stock
+
+# --- +jobs ---------------------------------------------------------------
+> job file Broken door=The tavern door will not open.
+expect: Filed as job
+> job list
+expect: Broken door
+> job read 1
+expect: The tavern door will not open.
+> job read 99
+expect: Usage
