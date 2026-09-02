@@ -1,0 +1,36 @@
+# Diku cookbook: doors. The exit owns can_traverse; the doors global owns the
+# verbs; the zone's `D` reset creates the door (attrs + gate script), because
+# an exit can carry neither in area TOML.
+
+> create
+> tester
+> secretpass
+> secretpass
+expect: Account created
+
+> north
+> east
+expect: Butchery
+
+# The zone's reset left this door closed, and the exit's can_traverse refuses.
+> north
+expect: door is closed
+expect-not: Storeroom
+
+# The verbs live on a global and reach the exit by name.
+> open north
+expect: You open the north door
+> north
+expect: Storeroom
+
+> south
+> close north
+expect: You close the north door
+> north
+expect: door is closed
+
+# A non-door exit is not openable.
+> open west
+expect: cannot open
+> open sideways
+expect: no sideways exit

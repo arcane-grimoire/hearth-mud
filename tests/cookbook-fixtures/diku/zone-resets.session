@@ -1,0 +1,31 @@
+# Diku cookbook: the zone reset engine. The property that matters is that a
+# repop is IDEMPOTENT — Diku's "max in world" check — so running it repeatedly
+# does not stack the population.
+
+> create
+> tester
+> secretpass
+> secretpass
+expect: Account created
+
+# on_startup populated the zone: two guards and three loaves in the square.
+> north
+expect: Market Square
+> look
+expect: city guard
+expect: loaf of bread
+
+> zstat
+expect: Zone zone
+expect: mob
+expect: 2/2
+expect: 3/3
+
+# Forcing a repop must load nothing — everything is already at max.
+> repop
+expect: 0 object(s) loaded
+> repop
+expect: 0 object(s) loaded
+> zstat
+expect: 2/2
+expect-not: 4/2
