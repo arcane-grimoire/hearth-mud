@@ -31,6 +31,21 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (a greedy `%S+` swallowing the `=` in `fset themesong=...`), now fixed. Covers
   `+finger`, `+where`, the dice roller, the BBS (including the `prompt()` →
   `on_body` handoff), the vendor, and `+jobs`.
+- **DikuMUD cookbook (`docs/diku-cookbook.md`).** The same treatment for the
+  other tradition — Diku/Merc/ROM/Circle/Smaug. It separates the two layers a
+  Diku codebase conflates (C hardcode, which becomes ordinary softcode here, vs
+  the area-file data layer, which maps almost directly), then gives concept maps
+  for DG Scripts/MobProg triggers → hooks and `%actor%`-style variables → values,
+  and complete recipes for **zone resets** (Diku's `.zon` `M`/`O`/`G`/`E`/`P`/`D`
+  list as a declarative table plus an idempotent repop driver — Hearth has no
+  reset system, so this is built from scratch), spec_procs (cityguard, janitor,
+  wanderer), shops (the `.shp` file as a keeper script), and doors. It's explicit
+  about what doesn't translate: combat, classes, equipment slots, rent, vnums.
+  Two engine constraints are documented because the recipes have to work around
+  them — `cmd_` dispatch never reaches an exit (`World::objects_in` excludes
+  them), and `[[exits]]` accepts no `script` or `attrs`, so a door is assembled
+  at runtime by the zone's `D` reset. Recipes are executable and covered by
+  `tests/cookbook.rs` alongside the MUSH ones.
 - **Coordinate exits.** An ordinary exit carrying `_dest_x`/`_dest_y` attributes
   now stamps that arrival cell onto the traversing actor's `_x`/`_y`, so a
   normal room's exit can drop a player onto a specific `(x, y)` of a one-room

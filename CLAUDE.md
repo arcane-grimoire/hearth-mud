@@ -152,6 +152,8 @@ docs/
   plans/               Pending/in-progress design docs (archetype traits + live debugger, terrain attr schemas, Mudlet/GMCP terrain-legend + tiles)
   archetypes.md        Archetypes guide (is-a delegation, file-based types, hot-reload)
   commands.md          Command reference
+  diku-cookbook.md     Recipe book — Diku/ROM/Smaug/Circle: zone resets,
+                       spec_procs, mobprogs/DG Scripts, shops, doors
   mush-cookbook.md     Recipe book — classic MUSH gadgets (BBS, vendor, cron,
                        weather, vehicles, +jobs) built in Hearth softcode
   getting-started.md   Getting started guide

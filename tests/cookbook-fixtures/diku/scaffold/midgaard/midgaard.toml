@@ -54,6 +54,12 @@ direction = "north"
 to = "storeroom"
 aliases = ["n"]
 
+[[exits]]
+from = "storeroom"
+direction = "south"
+to = "shop"
+aliases = ["s"]
+
 # --- prototypes (Diku vnum prototypes; no location = not in the world) -------
 
 [[objects]]
