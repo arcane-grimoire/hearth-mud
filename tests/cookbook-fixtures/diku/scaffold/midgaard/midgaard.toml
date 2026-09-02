@@ -47,12 +47,18 @@ direction = "west"
 to = "square"
 aliases = ["w"]
 
-# Becomes a door via the zone's `D` reset — exits can't carry attrs in TOML.
+# A door, declared in full on the exit: its gate script and its state.
 [[exits]]
 from = "shop"
 direction = "north"
 to = "storeroom"
 aliases = ["n"]
+script = "door.luau"
+
+[exits.attrs]
+is_door = true
+closed = true
+key_tag = "key:storeroom"
 
 [[exits]]
 from = "storeroom"
@@ -117,7 +123,6 @@ op = "door"
 room = "midgaard/shop"
 exit = "north"
 state = "closed"
-key_tag = "key:storeroom"
 
 # --- the doors global -------------------------------------------------------
 

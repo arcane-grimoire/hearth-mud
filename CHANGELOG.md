@@ -41,11 +41,12 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reset system, so this is built from scratch), spec_procs (cityguard, janitor,
   wanderer), shops (the `.shp` file as a keeper script), and doors. It's explicit
   about what doesn't translate: combat, classes, equipment slots, rent, vnums.
-  Two engine constraints are documented because the recipes have to work around
-  them — `cmd_` dispatch never reaches an exit (`World::objects_in` excludes
-  them), and `[[exits]]` accepts no `script` or `attrs`, so a door is assembled
-  at runtime by the zone's `D` reset. Recipes are executable and covered by
-  `tests/cookbook.rs` alongside the MUSH ones.
+  Writing it surfaced the `ExitDef` gap fixed below, and it documents one
+  constraint that is deliberate rather than a bug: `cmd_` dispatch never reaches
+  an exit, and shouldn't — a door verb needs a direction argument, so it belongs
+  on a global that can see every exit, which then `trigger`s the specific door.
+  Recipes are executable and covered by `tests/cookbook.rs` alongside the MUSH
+  ones.
 - **Coordinate exits.** An ordinary exit carrying `_dest_x`/`_dest_y` attributes
   now stamps that arrival cell onto the traversing actor's `_x`/`_y`, so a
   normal room's exit can drop a player onto a specific `(x, y)` of a one-room
@@ -85,6 +86,20 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `plugins/names` demo ships a reference bump allocator + `reset`.
 
 ### Fixed
+
+- **An exit can carry `attrs` and a `script` in area TOML.** `ExitDef` accepted
+  only `from`/`direction`/`to`/`aliases`/`locks`, but the engine reads both attrs
+  and hooks off exits — `_dest_x`/`_dest_y` for coordinate exits,
+  `muffle`/`blocked_sound` for sound propagation, `can_traverse` for a gate — so
+  the only ways to author any of it were `@set` and softcode. Because the loader
+  has no `deny_unknown_fields`, an `[exits.attrs]` block parsed, loaded without
+  error, and was **silently dropped**: the file looked right and simply did
+  nothing. That made the coordinate-exit feature's own documentation false, since
+  `CLAUDE.md` and its changelog entry both offered area TOML as an authoring
+  path. Declared attrs are merged on reload rather than replacing, so runtime
+  state an exit has accumulated (a door's `closed`) survives, matching how
+  managed objects already reconcile; export round-trips both, naming an exit's
+  script file after its source room so two `north` doors can't collide.
 
 - **`can_traverse` now fires on the exit, as documented.** It was wired to the
   destination room instead — with the same arguments, ten lines before

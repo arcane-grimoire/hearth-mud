@@ -1300,12 +1300,27 @@ pub fn export_bundle(path: &Path, world: &mut World) -> Result<ExportReport, Str
                     };
                     let mut aliases: Vec<String> = obj.aliases.iter().cloned().collect();
                     aliases.sort();
+                    // Exits are keyed by direction and every room has a
+                    // "north", so the script filename is derived from the
+                    // source room too — otherwise two doors would write over
+                    // each other's .luau on export.
+                    let (exit_script, _) = write_script(
+                        obj,
+                        &format!("exit_{}_{}", sanitize_filename(&from_key), obj.key),
+                        &area_dir,
+                    )?;
                     area_file.exits.push(loader::ExitDef {
                         from: from_key,
                         direction: obj.key.clone(),
                         to: to_key,
                         aliases,
                         locks: obj.locks.clone(),
+                        attrs: {
+                            let mut a = obj.attrs.clone();
+                            a.remove(loader::FILE_KEY_ATTR);
+                            a
+                        },
+                        script: exit_script,
                     });
                     report.objects_written += 1;
                 }

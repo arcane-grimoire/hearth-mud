@@ -288,22 +288,9 @@ local function reset_give(this, r, id, into)
   return obj
 end
 
--- The `can_traverse` gate installed onto a door exit. It has to be a string
--- because an exit cannot carry a script in area TOML — `[[exits]]` takes only
--- from/direction/to/aliases/locks. See the Doors recipe.
-local DOOR_GATE = [[
-function can_traverse(this, actor, room)
-  if get_attr(this, "closed") then
-    emit(actor, "The " .. this.key .. " door is closed.")
-    return false
-  end
-  return true
-end
-]]
-
--- `D`: make an exit a door and force its state. This is also what *creates*
--- the door — stamping the attrs and installing the gate — since neither can
--- be declared in TOML.
+-- `D`: force a door back to a known state, exactly as Diku's D command did.
+-- The door itself — its gate script and `is_door`/`key_tag` — is declared on
+-- the exit in area TOML; this only resets what players change.
 local function reset_door(this, r)
   local room = resolve_key(r.room)
   if not room then
@@ -312,11 +299,8 @@ local function reset_door(this, r)
   end
   for _, exit in ipairs(get_exits(room)) do
     if exit.key == r.exit then
-      set_attr(exit, "is_door", true)
       set_attr(exit, "closed", r.state ~= "open")
       set_attr(exit, "locked", r.state == "locked")
-      if r.key_tag then set_attr(exit, "key_tag", r.key_tag) end
-      set_script(exit, DOOR_GATE)
     end
   end
 end
@@ -415,7 +399,7 @@ proto = "midgaard/bread_proto"
 room = "midgaard/square"
 max = 3
 
-# D 3005 1 1 — the storeroom door starts closed
+# D 3005 1 1 — the storeroom door goes back to closed at repop
 [[objects.attrs.resets]]
 op = "door"
 room = "midgaard/shop"
@@ -762,23 +746,23 @@ and a key vnum. Hearth does the same — attrs on the exit — but getting them
 room itself, objects in the room, the actor's inventory, and globals — and
 `World::objects_in` excludes exits. So `cmd_open` cannot live on the exit.
 
-**2. An exit can't carry a script or attrs in area TOML.** `[[exits]]` accepts
-only `from`, `direction`, `to`, `aliases` and `locks`. There is no
-`script = ...` and no `[exits.attrs]`. (The `locks` map does work, so a DSL
-`traverse` lock *is* declarable — but the lock DSL's predicates all test the
-**actor**, so it can't express "this door is shut".)
+**2. A door verb needs a target, so it can't hang off one exit anyway.** Even
+setting dispatch aside, `open` is meaningless without a direction — a room has a
+`north` and a `northeast`, and `cmd_open` on one of them would fire for both,
+because dispatch picks the first candidate defining the hook and never looks at
+the argument. A verb that takes a target belongs on something that can see every
+exit.
 
-So a door is assembled at runtime, which turns out to be exactly Diku's model:
-the `.zon` file's `D` command is what puts a door into a state, and here it is
-what brings the door into existence at all.
+So the split is:
 
-- The **exit** owns the gate — a `can_traverse` script, installed by the zone.
-- A **global** owns the verbs — `open`, `close`, `lock`, `unlock`, finding the
-  named exit through `get_exits(room)`.
-- The **zone reset** stamps the attrs and installs the gate script.
+- The **exit** owns the gate — `can_traverse`, reading its own attrs.
+- A **global** owns the verbs — `open`, `close`, `lock`, `unlock`, resolving the
+  direction through `get_exits(room)`.
 
 One global implementation then serves every door in the game, which is closer to
-Diku's engine-level doors than a script per door would be.
+Diku's engine-level doors than a script per door would be. For per-door flavor,
+the global can `trigger(exit, "on_open")` once it has resolved which door you
+meant — targeting without the ambiguity.
 
 `world/midgaard/doors.luau`:
 
@@ -882,14 +866,15 @@ function cmd_lock(this, actor, room, args)
 end
 ```
 
-The gate itself is one hook, and the zone installs it (see `reset_door` in the
-[Zone resets](#zone-resets) recipe — it calls `set_script` on the exit with
-exactly this source):
+The gate itself is one hook on the exit:
+
+`world/midgaard/door.luau`:
 
 ```lua
--- Installed onto the EXIT by the zone's `door` reset. A closed door refuses
--- passage; the verbs that change that live on the doors global, because cmd_
--- dispatch never reaches an exit object.
+-- On the EXIT. `can_traverse` is the exit's own hook (`this` is the exit),
+-- pairing with the exit's `traverse` lock. A closed door refuses passage; the
+-- verbs that change that live on the doors global, because a door verb needs a
+-- direction argument.
 function can_traverse(this, actor, room)
   if get_attr(this, "closed") then
     emit(actor, "The " .. this.key .. " door is closed.")
@@ -899,17 +884,25 @@ function can_traverse(this, actor, room)
 end
 ```
 
-The exit is declared in TOML the ordinary way — no script, no attrs, because it
-can't have them:
+An exit carries its own script and attrs in area TOML, so the whole door is
+declared in one place — `EX_CLOSED`, `EX_LOCKED` and the key vnum, in the file:
 
 ```toml
 [[exits]]
 from = "shop"
 direction = "north"
 to = "storeroom"
+script = "door.luau"
+
+[exits.attrs]
+is_door = true
+closed = true
+locked = true
+key_tag = "key:storeroom"
 ```
 
-and the zone's reset list turns it into a door:
+The zone's `D` reset then only has to do what Diku's did — put an existing door
+back into a known state at repop:
 
 ```toml
 [[objects.attrs.resets]]
@@ -917,7 +910,6 @@ op = "door"
 room = "midgaard/shop"
 exit = "north"
 state = "locked"
-key_tag = "key:storeroom"
 ```
 
 > Diku's `EX_PICKPROOF` and the `pick` skill are a game rule — add a
