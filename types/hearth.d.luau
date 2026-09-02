@@ -121,6 +121,15 @@ declare function find_by_attr(key: string, value: any): { Object }
 --- Find an object in a room by fuzzy name match.
 --- Returns the first match or nil.
 declare function find_in_room(room: ObjectRef, name: string): Object?
+--- Match an object by name among what `ref` carries, or a container holds.
+declare function find_in_inventory(ref: ObjectRef, name: string): Object?
+--- Resolve a player by name, online or off; prefers a connected one.
+declare function find_player(name: string): Object?
+--- Match an exit by direction or alias, the way movement does. `find_in_room`
+--- never returns an exit — exits are excluded from room contents.
+declare function find_exit(room: ObjectRef, name: string): Object?
+--- True if the object handles that hook, including via its archetype chain.
+declare function responds_to(ref: ObjectRef, hook: string): boolean
 
 --- List items (kind="item") carried by an object.
 declare function get_inventory(ref: ObjectRef): { Object }

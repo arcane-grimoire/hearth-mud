@@ -992,6 +992,87 @@ pub fn install<'scope, 'env>(
         })?,
     )?;
 
+    // find_in_inventory(ref, name) — the inventory counterpart of
+    // find_in_room. Without it every script that resolves an item a player
+    // named ("buy steak", "unlock door with key") open-codes the same loop.
+    let find_mt = obj_mt.clone();
+    env.set(
+        "find_in_inventory",
+        scope.create_function(move |lua, (r, name): (Value, String)| {
+            let holder = ref_of(&r)?;
+            for obj in world.objects_in(&holder) {
+                if crate::world::name_matches(&world.display_name(obj), &name)
+                    || crate::world::name_matches(&obj.key, &name)
+                {
+                    return object_to_value(lua, world, &obj.ref_id, Some(&find_mt));
+                }
+            }
+            Ok(Value::Nil)
+        })?,
+    )?;
+
+    // find_player(name) — resolve a player by name, online or not. Every
+    // player-facing system (mail, finger, jobs, souls) needs this, and each
+    // was hand-rolling `get_all_by_kind("player")` + `match_name`.
+    let find_mt = obj_mt.clone();
+    env.set(
+        "find_player",
+        scope.create_function(move |lua, name: String| {
+            let mut offline: Option<String> = None;
+            for obj in world.objects.values() {
+                if obj.kind != Kind::Player {
+                    continue;
+                }
+                if !crate::world::name_matches(&world.display_name(obj), &name) {
+                    continue;
+                }
+                // Prefer someone connected — two characters can share a
+                // prefix and the online one is almost always who was meant.
+                if obj.tags.iter().any(|t| t.category == "system" && t.key == "offline") {
+                    offline.get_or_insert_with(|| obj.ref_id.clone());
+                } else {
+                    return object_to_value(lua, world, &obj.ref_id, Some(&find_mt));
+                }
+            }
+            match offline {
+                Some(r) => object_to_value(lua, world, &r, Some(&find_mt)),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
+    // find_exit(room, name) — matches a direction or alias, the same way the
+    // engine's own movement dispatch does. Exits are excluded from
+    // `objects_in`, so `find_in_room` can never return one.
+    let find_mt = obj_mt.clone();
+    env.set(
+        "find_exit",
+        scope.create_function(move |lua, (r, name): (Value, String)| {
+            let room = ref_of(&r)?;
+            match world.find_exit(&room, &name) {
+                Some(exit) => {
+                    let ref_id = exit.ref_id.clone();
+                    object_to_value(lua, world, &ref_id, Some(&find_mt))
+                }
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
+    // responds_to(ref, hook) — does this object handle that hook, including
+    // through its archetype chain? Lets a dispatcher delegate only when the
+    // target actually implements the behavior.
+    env.set(
+        "responds_to",
+        scope.create_function(move |_, (r, hook): (Value, String)| {
+            let r = ref_of(&r)?;
+            Ok(match world.get(&r) {
+                Some(obj) => crate::softcode::hooks::object_responds(world, obj, &hook),
+                None => false,
+            })
+        })?,
+    )?;
+
     env.set(
         "get_inventory",
         scope.create_function(move |lua, r: Value| {
@@ -1434,11 +1515,7 @@ pub fn install<'scope, 'env>(
     env.set(
         "match_name",
         scope.create_function(move |_, (name, input): (String, String)| {
-            let name_lower = name.to_lowercase();
-            let input_lower = input.to_lowercase();
-            Ok(name_lower == input_lower
-                || name_lower.starts_with(&input_lower)
-                || name_lower.split_whitespace().any(|w| w.starts_with(&input_lower)))
+            Ok(crate::world::name_matches(&name, &input))
         })?,
     )?;
 
@@ -2102,6 +2179,34 @@ pub fn install<'scope, 'env>(
             if dir_delta(&dir).is_none() {
                 result.set("ok", false)?;
                 result.set("reason", "bad_dir")?;
+                return Ok(result);
+            }
+            // `movement_blocked` holds an actor in place with a custom reason
+            // (combat, paralysis). `do_move` honors it, so grid movement must
+            // too — otherwise a held player can't walk through a door but can
+            // still cross a wilderness map, which is the same movement to a
+            // player and a bug they will find.
+            if let Some(reason) = world
+                .get(&actor)
+                .and_then(|o| o.attrs.get("movement_blocked"))
+            {
+                result.set("ok", true)?;
+                result.set("moved", false)?;
+                result.set("reason", "blocked")?;
+                result.set(
+                    "message",
+                    reason.as_str().unwrap_or("You can't move right now."),
+                )?;
+                result.set("x", 0)?;
+                result.set("y", 0)?;
+                if let Some(o) = world.get(&actor) {
+                    if let Some(x) = o.attrs.get("_x").and_then(|v| v.as_i64()) {
+                        result.set("x", x)?;
+                    }
+                    if let Some(y) = o.attrs.get("_y").and_then(|v| v.as_i64()) {
+                        result.set("y", y)?;
+                    }
+                }
                 return Ok(result);
             }
             // Current cell from the actor's COMMITTED `_x`/`_y`; a missing one

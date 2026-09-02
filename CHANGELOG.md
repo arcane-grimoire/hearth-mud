@@ -31,6 +31,24 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (a greedy `%S+` swallowing the `=` in `fset themesong=...`), now fixed. Covers
   `+finger`, `+where`, the dice roller, the BBS (including the `prompt()` →
   `on_body` handoff), the vendor, and `+jobs`.
+- **Five lookups the engine already had, now callable from softcode.**
+  `find_exit(room, name)` (matches a direction *or* alias exactly as movement
+  does — `find_in_room` can never return an exit, since `objects_in` excludes
+  them), `find_in_inventory(ref, name)`, `find_player(name)` (online or off,
+  preferring a connected match), and `responds_to(ref, hook)` (does this object
+  handle that hook, archetype chain included — for a dispatcher that delegates
+  only when the target implements the behavior). Writing the three cookbooks
+  hand-rolled the same name-matching loop **ten times**; all three now call
+  these instead. `match_name` and every lookup share one `world::name_matches`
+  definition, so a player's "buy ste" can't mean different things to different
+  commands. All are pure reads with the same snapshot semantics as
+  `get_exits`/`get_inventory`: they do not see pending creates or moves from the
+  current script.
+- **`emit` and `emit_room` accept multi-line text.** Interior newlines are
+  normalized to CRLF on the way to the wire. Previously a bare LF went out
+  mid-message and staircased on telnet, so every script that wrapped prose had
+  to `str.split(str.wrap(s, 72), "\n")` and loop — eight times in the MUSH
+  cookbook alone, and the source of one of the bugs its tests caught.
 - **LPMUD cookbook (`docs/lpmud-cookbook.md`).** The third tradition, and the
   closest fit — Hearth's "one script per object, hooks as its methods" model is
   the LPMUD one, so this spends less space on renaming and more on the three
@@ -101,6 +119,16 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`movement_blocked` is honored by grid movement, and documented.** The attr
+  holds an actor in place with a custom refusal message, and `do_move` checked
+  it — but `grid_move` did not, so a player held by combat couldn't walk through
+  a door yet could still cross a wilderness map. To a player those are the same
+  act. `grid_move` now returns `{ok=true, moved=false, reason="blocked",
+  message, x, y}` and fires no terrain hooks. `grid_can_move` is deliberately
+  unchanged: it takes coordinates rather than an actor and answers "is that cell
+  passable", not "may this actor move". The attr was undocumented anywhere in
+  `docs/` despite being real engine behavior; the guide now covers it, including
+  that admin teleport bypasses it.
 - **Hook derivation is documented precisely, and pinned by a test.** The guide
   said a hook must be "a named top-level function", which understated one form
   and overstated the rule. `derive_hooks` accepts exactly two static top-level

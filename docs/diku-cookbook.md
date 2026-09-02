@@ -771,16 +771,10 @@ meant — targeting without the ambiguity.
 -- become `closed` / `locked` / `key_tag` attrs on the exit.
 local str = require("str")
 
-local function find_exit(room, name)
-  if not room then return nil end
-  for _, exit in ipairs(get_exits(room)) do
-    if exit.key == name or match_name(exit.key, name) then return exit end
-  end
-  return nil
-end
-
 -- Every verb needs the same preamble: name a direction, find it, and require
--- that it actually be a door rather than an open archway.
+-- that it actually be a door rather than an open archway. `find_exit` matches
+-- a direction OR an alias, exactly as movement does, so `open n` and
+-- `open north` resolve identically without the command re-deriving it.
 local function door_for(actor, room, args, verb)
   local name = string.lower(str.trim(args or ""))
   if name == "" then

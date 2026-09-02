@@ -155,15 +155,6 @@ local function fmt_for(actor)
   return text.for_mode(get_attr(actor, "_display_mode") or "visual")
 end
 
-local function find_player(name)
-  for _, p in ipairs(get_all_by_kind("player")) do
-    if match_name(p.display_name, name) then
-      return p
-    end
-  end
-  return nil
-end
-
 local function show(actor, target)
   local fmt = fmt_for(actor)
   emit(actor, fmt.header(target.display_name))
@@ -589,13 +580,6 @@ end
 -- str.wrap returns one newline-joined string; emit takes a line at a time.
 local function wrapped(s)
   return str.split(str.wrap(s, 72), "\n")
-end
-
-local function find_player(name)
-  for _, p in ipairs(get_all_by_kind("player")) do
-    if match_name(p.display_name, name) then return p end
-  end
-  return nil
 end
 
 function cmd_mail(this, actor, room, args)
