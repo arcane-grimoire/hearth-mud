@@ -354,7 +354,7 @@ discards it.
 
 ## 11. BROKEN — "transient attributes (nattrs)"
 
-> **CONTEXT.md:20** — "Persisted attributes survive restarts. Transient
+> **CONTEXT.md:18-20** — "Persisted attributes survive restarts. Transient
 > attributes (nattrs) die on restart."
 
 **What the code does.** Nothing. `grep -rn nattr src/ types/ web/src docs/`
@@ -912,9 +912,10 @@ commands.md prose (:73, :168) but in no table.
   objects** (`src/engine/mod.rs:5411-5429`). Both ends are missing: a `cmd_` hook
   on the *room* works, and globals are the documented mechanism elsewhere in the
   same file. SKILL.md:176 states this correctly.
-- **CONTEXT.md:108-110** — "builtin commands, then `cmd_` hooks on objects in the
-  room and player inventory. First match wins." Same two omissions, plus it
-  doesn't say exits resolve *after* `cmd_` hooks (`:5423` vs `:5448`).
+- **CONTEXT.md:108-110** and **docs/adr/0004-cmd-hooks-for-command-extensibility.md:3**
+  — "builtin commands, then `cmd_` hooks on objects in the room and player
+  inventory. First match wins." Same two omissions, plus neither says exits
+  resolve *after* `cmd_` hooks (`:5423` vs `:5448`).
 
 ---
 
@@ -937,6 +938,235 @@ meant to fix the vocabulary. **[READ]**
 **Suggested correction.** "**Script:** the single Luau chunk attached to an
 Object; its top-level functions are the Object's hooks." / "**Hook:** a
 top-level function in an Object's Script whose name the engine recognises …"
+
+---
+
+## 40-42. BROKEN — three wrong API signatures in `README.md`
+
+**40. `set_program` does not exist.**
+
+> **README.md:163** — "| `set_program(ref, hook, source)` | Installs a Luau
+> program on the object |"
+
+The installed API set is the 108 names in §32; `set_program` is not one of them.
+The one-script-per-object refactor replaced it with `set_script(ref, source)`
+(`src/softcode/api.rs`, `types/hearth.d.luau:370`).
+**[EXEC]:** `@eval emit(actor, tostring(set_program))` → `nil`, while
+`set_script`, `apply_template`, `clone`, `get_time` all printed `function: 0x…`.
+*Fix:* `set_script(ref, source)` — "sets the object's whole behavior script;
+hooks are top-level functions in it."
+
+**41. `prompt`'s signature and semantics.**
+
+> **README.md:179** — "| `prompt(ref, message)` | Prompts a player for input
+> (fires `on_reply` with their response) |"
+
+`src/softcode/api.rs:1975-1992` registers `prompt(actor, obj, hook)` — three
+required arguments — storing `_prompt_object` and `_prompt_hook` on the actor.
+The hook name is caller-supplied; there is no fixed `on_reply` and no `message`
+parameter. `types/hearth.d.luau:584` and softcode-guide.md:521 both have it right.
+**[EXEC]:** `pcall(function() prompt(actor, "What is your name?") end)` →
+`false  bad argument #3: error converting Lua nil to String`.
+*Fix:* `prompt(actor, obj, hook)` — "the actor's next line fires `<hook>` on
+`obj` instead of running as a command; emit the question yourself."
+
+**42. `is_carrying`'s second argument.**
+
+> **README.md:146** — "| `is_carrying(actor, item)` | Returns `true` if actor has
+> item in inventory |"
+
+`src/softcode/api.rs:1189-1198` takes `(actor, item_tag: String)`, runs
+`parse_tag`, and looks for any inventory object whose *resolved tags* contain it.
+Passing a dbref never matches. softcode-guide.md:344 has it right.
+**[EXEC]:** created `#6`, `get torch` succeeded, then
+`is_carrying(actor, "#6")` → `false`.
+*Fix:* `is_carrying(actor, "category:key")`.
+
+---
+
+## 43-45. BROKEN — `docs/getting-started.md` teaches the pre-refactor per-hook forms
+
+**43. `@program <ref>/<hook> = …`** (getting-started.md:82,
+`@program #13/cmd_light = function cmd_light(...)`). `cmd_program`
+(`src/engine/mod.rs:4516-4561`) splits on `=` and passes the whole left side to
+`resolve_object_ref`, which only special-cases `here`. Its own usage string is
+`Usage: @program <ref> [= <luau source>]  (defines the object's whole script;
+hooks are functions in it)`.
+**[EXEC]:** `@program #6/cmd_light = …` → `No object with ref '#6/cmd_light'.`
+The corrected `@program #6 = function cmd_light(this, actor, room, args)
+emit(actor, "LIT-OK") end` installs, and `light torch` then prints `LIT-OK`.
+The surrounding prose ("`@rmprogram` to remove them", plural) needs the same
+treatment: `@rmprogram <ref>` clears the whole script
+(`src/engine/mod.rs:4672-4692`).
+
+**44. `hearth program get #5/on_look`** (getting-started.md:131, :133).
+`cmd_program_get` (`src/cli.rs:382-415`) takes the first positional verbatim as
+`ref_id` and sends `{"action":"get_script","ref_id":…}` — no `/hook` split.
+`PROGRAM_USAGE` (`src/cli.rs:62-65`) is `hearth program get <ref>`, documented
+at `:29` as "Print an object's whole script source to stdout." **[READ]**
+*Fix:* `program get #5 > look.luau` / `program set #5 look.luau`.
+
+**45. `hearth program history`/`restore`, `@program/history`/`@program/restore`**
+(getting-started.md:138). `cmd_program` in the CLI dispatches only `get` and
+`set` (`src/cli.rs:367-379`); the engine's `cmd_program` has no history branch.
+Version history exists **only** as REST actions — `ListScriptVersions`,
+`GetScriptVersion`, `RevertScript` (`src/engine/mod.rs:211-215`) — consumed by
+the web builder. **[READ]** (and the in-game help's `@program/history` is dead
+too — see the unverified-suspicions list, item 6).
+*Fix:* delete the sentence or point at the builder / the REST actions.
+
+---
+
+## 46. BROKEN — the binary is `hearth-mud`, not `hearth`
+
+`Cargo.toml:2` — `name = "hearth-mud"`, with no `[[bin]]` rename. The build
+produces `target/debug/hearth-mud`; `justfile:35` installs
+`target/release/hearth-mud`; `Dockerfile:20,23` copies and entry-points
+`hearth-mud`. Every documented invocation — `hearth eval`, `hearth program
+get|set`, `hearth import`, `hearth export`, `hearth session-test`,
+`hearth migrate` — names a command that is not installed.
+
+Affected: CLAUDE.md:44, :45, :90, :162, :183, :188, :263, :346;
+commands.md:280, :285, :289-293, :296; getting-started.md:131, :133, :138;
+migrations.md:34, :94, :116, :117; mush-cookbook.md:1839; diku-cookbook.md:76.
+The CLI's own usage string (`src/cli.rs:25`) also says `hearth <subcommand>`.
+
+**How verified — [EXEC]** (`ls target/debug/hearth*`, `grep` of Cargo.toml /
+justfile / Dockerfile).
+
+**Suggested correction.** Either add `[[bin]] name = "hearth"` to `Cargo.toml`
+(making every doc true at once, and matching `src/cli.rs:25`), or rewrite the
+examples as `hearth-mud <subcommand>`. The former is almost certainly the intent.
+
+---
+
+## 47. BROKEN — ADR 0005's determinism claim
+
+> **docs/adr/0005-hybrid-tick-system.md:7** — "Tick order is deterministic
+> (sorted by `stable_ref`) but otherwise unspecified — no priority system yet."
+
+`src/engine/mod.rs:1059-1077` iterates `self.indexes().tickables` in order;
+`tickables` is built at `:655-663` by `for obj in world.objects.values()` with
+**no sort**, and `World::objects` is a `HashMap<String, GameObject>`
+(`src/world/mod.rs:19`) using the default `RandomState` hasher — so iteration
+order varies per process. `grep -rn stable_ref src/` returns zero hits: the
+identifier does not exist. **[READ]**
+
+**Suggested correction.** Either sort `tickables` by `ref_id` in
+`DerivedIndexes::build` (making the ADR true), or amend the ADR to "tick order
+is unspecified (hash-map iteration order)."
+
+---
+
+## 48-51. MISLEADING — four more `README.md` API-table errors
+
+**48. `apply_template`'s table keys are discarded** (README.md:164 — "Installs
+multiple programs from a `{ hook = source }` table"). `src/softcode/api.rs:2453-2482`
+iterates `t.pairs::<Value, String>()`, **drops the key**, joins the values with
+`\n\n`, and pushes one `Intent::SetScript`. So `{ on_get = "emit(actor,'hi')" }`
+installs `emit(actor,'hi')` as top-level statements, not as a hook.
+softcode-guide.md:474-492 describes it correctly (fragments, each defining its
+own hook functions). **[READ]**
+
+**49. `_trigger_data`** (README.md:204). Same defect as §13, in a second file;
+README additionally omits `trigger`'s 4th fire-as-actor parameter
+(`src/softcode/api.rs:1919`, `types/hearth.d.luau:323`). **[READ]**
+
+**50. `random.weighted_choice`** (README.md:214). `lib/random.luau:27` defines
+`Random.weighted(choices)`; the module exports `chance, dice, pick, range, roll,
+sample, shuffle, weighted`. The other four names in that row are correct. **[READ]**
+
+**51. `generate_dungeon(opts)`** (README.md:195). Same defect as §12, third file.
+**[READ]**
+
+---
+
+## 52. MISLEADING — "areas are the unit of save/load"
+
+> **CONTEXT.md:30** — "**Area:** The unit of persistence and organization. A
+> group of rooms, objects, and exits that save and load together."
+> **docs/adr/0003-in-memory-world-with-checkpointed-persistence.md:3** — "Areas
+> are the unit of save/load." … "Demand-loading can be added later behind the
+> area boundary without changing the object model — areas are already the
+> save/load unit."
+
+`src/db.rs:613 save_world(&World)` and `:748 load_world()` operate on the whole
+world; the `objects` table (`:70-85`) has no `area` column, and the string
+"area" does not occur anywhere in `src/db.rs`. "Area" exists only as the
+loader's file-key namespace (`_file_key = "<area>/<key>"`). **[READ]**
+
+This matters because ADR-0003 names it as the basis for a future demand-loading
+path that the schema does not currently support.
+
+**Suggested correction.** CONTEXT.md: define Area as the file/organizational
+unit and the file-key namespace. ADR-0003: keep the decision (in-memory +
+checkpoint), annotate the save/load-unit clause as superseded — checkpoints are
+whole-world.
+
+---
+
+## 53-57. STALE — ADR and guide statements overtaken by the code
+
+**53. ADR 0006's two lists.**
+- `:6-11` — the built-in lock functions omit `is_owner` (`src/locks.rs:238`) and
+  `game_time_between` (`:259`).
+- `:13` — "Lock points the engine checks: traverse (exits), get, drop, enter
+  (rooms), use, look, teleport." Real set (every `check_lock` site,
+  `src/engine/mod.rs:5200, 5260, 5361, 7021, 7078, 7106, 7206, 7268`):
+  `get, put, look, traverse, enter, drop, use`. Same `teleport` phantom as §4,
+  same missing `put`. **[READ]**
+
+**54. `docs/archetypes.md:185-187`** — "**A room instance can't inherit its title
+through `@export`.** `RoomDef.title` is required…". `src/loader.rs:271-275` now
+has `title: Option<String>` with `skip_serializing_if = "Option::is_none"`, and
+its doc comment states verbatim that this exists so an archetyped room inherits
+rather than exporting `title = ""`. Delete the bullet. **[READ]**
+
+**55. `docs/adr/0006-lock-system.md:15`** — "A `can_` hook escape hatch (calling
+a Luau program for complex lock logic) is a planned future extension but not part
+of the initial implementation." Nine `can_*` hooks are in `KNOWN_HOOKS`
+(`src/softcode/hooks.rs:24-63`) and fire alongside the lock check
+(`src/engine/mod.rs:5205`, `:7086`, `:7111`, …). Historical ADR, but read today
+it tells a builder a shipped feature doesn't exist. **[READ]**
+
+**56. `docs/adr/0001:9` and `docs/adr/0002:3`** — "MCP endpoints" / "MCP tooling".
+`grep -rni mcp src/` matches only **G**MCP, the telnet 201 option
+(`src/net/telnet.rs:21`). There is no MCP server or endpoint. The real message
+sources are telnet, the web WebSocket, `POST /api`, the tick scheduler, and the
+in-process session-test/migrate paths. **[READ]** Low severity, but a reader
+will go looking for a surface that isn't there.
+
+**57. `docs/getting-started.md:66`** — `@create a flickering torch  # prints e.g.
+"Item created: ... (#13)"`. Actual output: `Created a flickering torch (#6).`
+**[EXEC]** (the neighbouring `@dig` comment, `Room created: The Dark Dungeon
+(#12)`, *is* exact.) Everything else in that Building section works verbatim —
+`@open down = #6`, `down`, `@describe`, `@describe #8 = …`, `@set #8/lit = true`,
+`@set here/mood = "eerie"`, `@programs`, `@rmprogram` — all **[EXEC]** confirmed.
+
+---
+
+## 58. MISSING — `README.md`'s three reference tables are substantially incomplete
+
+- **Config block (:25-36)** omits five real keys: `max_characters`,
+  `load_world_files`, `locked`, `cors_allowed_origins`, and the whole `[clock]`
+  table (`src/config.rs:16-51`). `load_world_files` and `locked` change boot
+  semantics materially, and `cors_allowed_origins` is *the* production security
+  knob. README never mentions the game clock, `get_time()`, or
+  `game_time_between()` anywhere.
+- **Hook table (:53-92)** lists 32 of the 36 `KNOWN_HOOKS` plus `cmd_<name>`.
+  Missing: `on_hour`, `on_day`, `on_dawn`, `on_dusk`
+  (`src/softcode/hooks.rs:52-57`, fired at `src/engine/mod.rs:1030-1039`).
+- **API tables (:98-205)** cover roughly 55 of the 108 installed functions.
+  Absent whole categories: ink (7), grid (`grid_new`, `grid_from_value`,
+  `grid_move`, `grid_can_move`), noise (5), seeded RNG (4), coordinate math (6),
+  plus `get_time`, `wasm_call`, `pass`, `responds_to`, `all_objects`,
+  `clear_attr`, `find_player`, `find_exit`, `find_in_inventory`, `set_script`,
+  `set_lib`, `set_aliases`, `set_archetype`, `set_lock`, `clear_lock`,
+  `update_exit`, `clone`, `clone_object`, `run_command_as`. `move_object`'s
+  `opts` table is also unmentioned.
+
+**How verified — [READ]** against `types/hearth.d.luau` (which the guard test at
+`src/softcode/api.rs:2784` pins to the engine name-for-name).
 
 ---
 
@@ -980,6 +1210,46 @@ Checked and found accurate, listed so a future pass doesn't re-litigate them:
 - The lock predicates `perm`, `has_tag`, `has_attr`, `in_inventory`, `is_kind`,
   `is_owner`, `time_between`, `game_time_between` all exist (`src/locks.rs`).
   (softcode-guide.md:769-779 omits `is_owner`, which CLAUDE.md documents.)
+- **Every TOML key shown in every in-scope doc exists on its serde struct.** This
+  was the highest-priority hunt (the `ExitDef::attrs` precedent) and it came up
+  clean. Checked field by field against `src/loader.rs:254-424`
+  (`AreaFile`/`RoomDef`/`ObjectDef`/`ExitDef`/`ScriptDef`/`ScriptSource`/
+  `ProgramSource`), `src/migrate.rs:65-90`, `src/attr_schema.rs`, and
+  `src/config.rs`. `archetypes.md`'s bestiary example was additionally run:
+  **[EXEC]** `look grunt` / `look scout` printed
+  `SNARL Goblin HP=5 ATK=2` / `SNARL Goblin Scout HP=3 ATK=2`, confirming
+  delegation, per-field override, and hook-inheritance-bound-to-the-instance.
+- **docs/migrations.md is accurate end to end:** removes-before-renames
+  (`src/migrate.rs:227-243`), rename-onto-occupied-key a hard error with nothing
+  written (`:265-271`, plan-before-mutate at `:288`), revision-string ordering
+  and duplicate-revision rejection (`:151-167`), `_file_key`-only safety
+  (`:121-123`, `:231`), the `migrations` table (`src/db.rs:170`, `:247`, `:267`),
+  `<game_root>/migrations` = parent of `game_dir` (`src/migrate.rs:317-320`),
+  and the `[--config PATH] [--db PATH] [--dry-run]` flags (`src/cli.rs:40-44`,
+  `:597-618`). One nit: `<revision>_<slug>.toml` is convention only —
+  `load_migrations` globs `*.toml` and orders by the `revision` **field**.
+- **docs/archetypes.md's model section:** `MAX_ARCHETYPE_DEPTH = 32` cycle/depth
+  guard (`src/world/mod.rs:15`, `:264-278`), single-parent `archetype_ref`
+  (`src/world/object.rs:74`), copy-on-write `resolved_title`/`resolved_description`/
+  `resolved_attr(s)` (`src/world/mod.rs:313-371`), tag **union** (`:404-410`),
+  per-object `state` never delegated (`hooks::ensure_own_state_slot`),
+  `--cascade` flattening before delete (`src/engine/mod.rs:4263-4305`),
+  `spawn({archetype=…})` and `clone(ref)`.
+- **ADR 0007 and ADR 0008 match the code precisely** (`src/engine/authoring.rs:55-98`
+  `write_batch`; `src/softcode/mod.rs:489` `may_modify`; `src/engine/mod.rs:411`,
+  `:437`, `:445`, `:456` — `Playing{actor_ref, puppet_ref}`, `Session.editor`,
+  `character()`, `effective_actor()`).
+- **getting-started.md's** empty-room default (`src/engine/mod.rs:807`, reachable
+  because the repo's `hearth.toml` leaves `game_dir` commented out), the
+  sibling-repo config it quotes (`game_dir = "../the-last-stag-mud/game"`,
+  `spawn_room = "world/town/crossroads"` — matching the game's own
+  `hearth.toml:8-9` exactly, unlike CLAUDE.md's copy, §26), `@token create`,
+  `@grant`, `@scopes`, `@wall`, `@import`/`@export`, `@save`, and the
+  `load_world_files` narrative.
+- **README's** stdlib module list (all 8 match `src/loader.rs:1107-1116`, with
+  game-`lib/`-overrides-stdlib at `:1120-1147`), the BBCode color set
+  (`src/markup.rs:13-26`), `on_say`'s `_say_message`, `on_tick(this, state, room)`,
+  the `system:global` lifecycle list, and the Docker example.
 - `transfer_attr` whole-batch rollback; `derive_hooks` recognising exactly the
   declaration and assignment forms at top level; `state` surviving restarts and
   staying out of `examine`; `trigger`'s 4th fire-as-actor argument;
@@ -1010,7 +1280,21 @@ Listed as suspicions precisely because they were *not* confirmed.
 5. **mush-cookbook.md:1743** declares `key = "blade"` and references it as
    `archetype = "std/blade"` with no `area = "std"` header shown. Cosmetic at
    worst.
-6. **The in-game `help` text is stale where `docs/commands.md` is right.**
+6. **docs/adr/0005:5** — "the engine runs as many scripts as fit within the
+   budget and defers the rest to the next tick." Literally true for `after()`
+   timers (`src/engine/mod.rs:1082` pushes the undone one back), but the
+   `on_tick` loop `break`s (`:1063`) and the skipped objects are simply not run —
+   an object with `tick_interval = 60` that gets skipped waits another 60 ticks,
+   not one. No load scenario was built to observe it.
+7. **docs/adr/0003:3** — "SQLite is not queried during gameplay." True for world
+   objects; `file_sources`, script version history, and script edit locks *are*
+   read from the DB at runtime via REST. Whether that counts as "gameplay" is a
+   judgement call, not a defect.
+8. **README.md:55** — "Hook functions receive `(this, actor, room)`." `cmd_*`
+   hooks take a 4th `args`, and a triggered hook takes a 4th `data` (and see §3
+   for the lifecycle hooks). Not every hook's arity was enumerated against the
+   README's table.
+9. **The in-game `help` text is stale where `docs/commands.md` is right.**
    `src/engine/commands.rs:409-417` still advertises
    `@program <ref>/<hook> = <luau>`, `@rmprogram <ref>/<hook>`,
    `@reload <ref>/<hook>` and `@program/history|restore|diff`, none of which are
