@@ -1,0 +1,31 @@
+# Cookbook: the Myrddin-style BBS. Exercises system:global cmd_ dispatch, the
+# prompt() -> on_body handoff (the next line of input is the post body, NOT a
+# command), and round-tripping a post back out of the attr store.
+
+> create
+> tester
+> secretpass
+> secretpass
+expect: Account created
+
+> bb list
+expect: Bulletin Boards
+expect: general
+expect-not: Huh?
+
+> bb read general
+expect: No posts
+
+> bb post general=Test Title
+expect: Type your post
+> This is the body of my post.
+expect: Posted to
+expect-not: Huh?
+
+> bb read general
+expect: Test Title
+> bb read general/1
+expect: This is the body of my post.
+
+> bb read nosuchboard
+expect: No such board

@@ -5,6 +5,11 @@ script runs in a sandbox — it can read the world freely but can only change it
 through a controlled set of functions that queue up changes for the engine
 to apply.
 
+This is the reference. For complete, pasteable implementations — a bulletin
+board, a vendor, a scheduler, a weather system, vehicles, a job tracker — see
+the [MUSH cookbook](mush-cookbook.md), which also carries a MUSHcode-to-Hearth concept
+map if you're arriving from PennMUSH/TinyMUX.
+
 ## One script per object
 
 An object has **one script** — a single Luau chunk that defines its hooks as
