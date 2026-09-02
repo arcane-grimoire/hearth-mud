@@ -1,0 +1,33 @@
+# LPMUD cookbook: a daemon. State in attrs (readable by anyone) rather than
+# behind query_ lfuns, and trigger() used to NOTIFY, not to query.
+
+> create
+> tester
+> secretpass
+> secretpass
+expect: Account created
+
+> quests
+expect: Quests
+expect: Slay the dragon
+expect: open
+expect: Score: 0
+
+> finish dragon
+expect: Reporting dragon
+
+# The triggered hook runs after the batch commits, so the completion notice
+# arrives from on_complete — proving trigger fired.
+expect: Quest complete: Slay the dragon
+
+> quests
+expect: done
+expect: Score: 50
+
+# Completing twice must not double the score.
+> finish dragon
+> quests
+expect: Score: 50
+
+> finish nonsense
+expect: No such quest

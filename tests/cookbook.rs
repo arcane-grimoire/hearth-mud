@@ -195,3 +195,13 @@ fn diku_cookbook_recipes_run() {
         4,
     );
 }
+
+#[test]
+fn lpmud_cookbook_recipes_run() {
+    run_cookbook(
+        "docs/lpmud-cookbook.md",
+        "tests/cookbook-fixtures/lpmud",
+        "village/square",
+        3,
+    );
+}

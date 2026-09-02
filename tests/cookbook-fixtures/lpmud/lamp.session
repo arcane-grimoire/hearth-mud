@@ -1,0 +1,28 @@
+# LPMUD cookbook: add_action -> cmd_ hooks. No init(), no registration, and
+# the LPC `return 0` fall-through becomes an explicit refusal.
+
+> create
+> tester
+> secretpass
+> secretpass
+expect: Account created
+
+> polish
+expect: You polish the lamp. (1/3)
+> polish lamp
+expect: (2/3)
+> polish lamp
+expect: something stirs inside
+
+# Counter reset after firing.
+> polish
+expect: (1/3)
+
+# Naming something else refuses, rather than silently falling through.
+> polish bob
+expect: can't polish that
+
+# on_look adds to the default rendering rather than replacing it (item, not room).
+> look lamp
+expect: Tarnished
+expect: brass is showing through

@@ -1,0 +1,34 @@
+# LPMUD cookbook: the soul. One data table plus a dispatcher, replacing the
+# LPC soul object's add_action-per-verb.
+
+> create
+> tester
+> secretpass
+> secretpass
+expect: Account created
+
+> emotes
+expect: bow
+expect: cackle
+expect: grin
+expect: smile
+
+# Untargeted.
+> smile
+expect: You smile.
+> bow
+expect: You bow deeply.
+
+# Targeted — `present()` by partial name.
+> grin bob
+expect: You grin evilly at Bob
+
+# An emote with no targeted form refuses rather than silently dropping the arg.
+> cackle bob
+expect: can't cackle at someone
+
+> smile nobody
+expect: no 'nobody' here
+
+> smile tester
+expect: at yourself

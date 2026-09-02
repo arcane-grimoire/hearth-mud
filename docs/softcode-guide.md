@@ -7,9 +7,9 @@ to apply.
 
 This is the reference. For complete, pasteable implementations — a bulletin
 board, a vendor, a scheduler, a weather system, vehicles, a job tracker — see
-the [MUSH cookbook](mush-cookbook.md) and the [Diku cookbook](diku-cookbook.md).
-Each opens with a concept map for builders arriving from PennMUSH/TinyMUX or
-from Diku/ROM/Circle/Smaug.
+the [MUSH](mush-cookbook.md), [Diku](diku-cookbook.md) and
+[LPMUD](lpmud-cookbook.md) cookbooks. Each opens with a concept map for builders
+arriving from that tradition — PennMUSH/TinyMUX, Diku/ROM/Circle/Smaug, or LPC.
 
 ## One script per object
 
@@ -34,10 +34,19 @@ sees the same top-level `local` helpers and constants, so behavior that spans
 several hooks can share code without globals or `require()`. The engine parses
 the script to learn which hooks it defines.
 
-A hook must be a **named top-level function** for the engine to detect it —
-`function on_get(this, actor, room) ... end` at the outer level of the chunk.
-Functions hidden inside string literals or built by metaprogramming are not
-detected.
+A hook must be **statically present at the top level** of the chunk for the
+engine to detect it. Two forms count:
+
+```lua
+function on_get(this, actor, room) ... end     -- declaration
+on_get = function(this, actor, room) ... end   -- assignment
+```
+
+Anything else is invisible to the parser: functions inside string literals,
+inside a loop or `if`, under a dotted or `:method` name, or built by
+metaprogramming (`_G["cmd_" .. verb] = ...`). Those fail silently — no hook is
+registered and nothing reports an error — so build hooks by writing them out,
+even when a table drives their bodies.
 
 Persistent `state` (see `on_tick` below) is per-object — shared across all of
 that object's hooks, like a Godot node's member variables.

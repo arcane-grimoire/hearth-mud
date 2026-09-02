@@ -1,0 +1,21 @@
+area = "village"
+
+[[rooms]]
+key = "square"
+title = "The village square"
+description = "A cobbled square, worn smooth."
+
+[[objects]]
+key = "lamp"
+kind = "item"
+title = "a brass lamp"
+description = "Tarnished, but promising."
+location = "square"
+script = "lamp.luau"
+
+[[objects]]
+key = "bob"
+kind = "npc"
+title = "Bob the Villager"
+description = "A man of few opinions."
+location = "square"
