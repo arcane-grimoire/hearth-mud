@@ -558,6 +558,38 @@ pub fn find_cmd_hook<'a>(
 mod tests {
     use super::*;
 
+    /// Hooks built by metaprogramming are invisible to the parser — the
+    /// failure the LPMUD cookbook warns about, since generating a soul's
+    /// `cmd_*` verbs from a table is the obvious LPC instinct.
+    #[test]
+    fn derive_hooks_ignores_generated_and_nested_definitions() {
+        let src = r#"
+local EMOTES = { smile = 1, bow = 2 }
+for verb, _ in pairs(EMOTES) do
+  _G["cmd_" .. verb] = function(this, actor, room, args) end
+end
+if true then
+  function on_enter(this, actor, room) end
+end
+function tbl.on_get(this, actor, room) end
+function tbl:on_drop(this, actor, room) end
+cmd_bow = function(this, actor, room, args) end
+function cmd_smile(this, actor, room, args) end
+"#;
+        let hooks = derive_hooks(src);
+        // Only the two static top-level forms survive.
+        assert!(hooks.contains(&"cmd_smile".to_string()), "declaration form");
+        assert!(hooks.contains(&"cmd_bow".to_string()), "assignment form");
+        assert!(!hooks.contains(&"cmd_grin".to_string()));
+        assert!(
+            !hooks.contains(&"on_enter".to_string()),
+            "a definition nested in an if-block is not top level"
+        );
+        assert!(!hooks.contains(&"on_get".to_string()), "dotted name");
+        assert!(!hooks.contains(&"on_drop".to_string()), "method name");
+        assert_eq!(hooks.len(), 2, "got {:?}", hooks);
+    }
+
     #[test]
     fn derive_hooks_finds_top_level_functions() {
         let src = "local x = 1\nfunction on_get(this, actor, room) end\nfunction cmd_talk(this, actor, room, args) end\non_look = function(this, actor, room) end";

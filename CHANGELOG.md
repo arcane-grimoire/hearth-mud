@@ -31,6 +31,20 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (a greedy `%S+` swallowing the `=` in `fset themesong=...`), now fixed. Covers
   `+finger`, `+where`, the dice roller, the BBS (including the `prompt()` →
   `on_body` handoff), the vendor, and `+jobs`.
+- **LPMUD cookbook (`docs/lpmud-cookbook.md`).** The third tradition, and the
+  closest fit — Hearth's "one script per object, hooks as its methods" model is
+  the LPMUD one, so this spends less space on renaming and more on the three
+  places the shape genuinely differs and LPC instincts mislead: `call_other` has
+  no synchronous equivalent (but object state is public attrs, so the `query_`
+  lfun disappears, and computed answers belong in a `require()`d module — reaching
+  for `trigger` as a substitute for `->` silently does nothing); `inherit` is a
+  single archetype chain rather than multiple inheritance, though a live one; and
+  there are no shadows, with a table of what they were used for and what replaces
+  each. Plus applies→hooks and efuns→API maps, and recipes for `/std/room`
+  inheritance, `add_action`→`cmd_` hooks, a soul, a quest daemon, and
+  `heart_beat`. It's explicit that `reset()` has no engine equivalent and points
+  at the Diku cookbook's repop recipe. Recipes are executable under
+  `tests/cookbook.rs`.
 - **DikuMUD cookbook (`docs/diku-cookbook.md`).** The same treatment for the
   other tradition — Diku/Merc/ROM/Circle/Smaug. It separates the two layers a
   Diku codebase conflates (C hardcode, which becomes ordinary softcode here, vs
@@ -87,6 +101,16 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Hook derivation is documented precisely, and pinned by a test.** The guide
+  said a hook must be "a named top-level function", which understated one form
+  and overstated the rule. `derive_hooks` accepts exactly two static top-level
+  shapes — `function name(...) end` and `name = function(...) end` — and ignores
+  everything else: definitions nested in a loop or `if`, dotted or `:method`
+  names, and anything built by metaprogramming. That last case fails silently (no
+  hook registered, no error reported), and generating a soul's `cmd_*` verbs from
+  a table is the obvious LPC instinct, so it's now spelled out in the guide with
+  a worked counter-example and covered by
+  `derive_hooks_ignores_generated_and_nested_definitions`.
 - **An exit can carry `attrs` and a `script` in area TOML.** `ExitDef` accepted
   only `from`/`direction`/`to`/`aliases`/`locks`, but the engine reads both attrs
   and hooks off exits — `_dest_x`/`_dest_y` for coordinate exits,

@@ -154,6 +154,8 @@ docs/
   commands.md          Command reference
   diku-cookbook.md     Recipe book — Diku/ROM/Smaug/Circle: zone resets,
                        spec_procs, mobprogs/DG Scripts, shops, doors
+  lpmud-cookbook.md    Recipe book — LPC/mudlib: applies→hooks, efuns→API,
+                       souls, daemons, and where call_other/inherit/shadows land
   mush-cookbook.md     Recipe book — classic MUSH gadgets (BBS, vendor, cron,
                        weather, vehicles, +jobs) built in Hearth softcode
   getting-started.md   Getting started guide

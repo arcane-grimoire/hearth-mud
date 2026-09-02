@@ -1,0 +1,17 @@
+# Scaffolding for the LPMUD cookbook doc tests. Recipe SCRIPTS are extracted
+# from docs/lpmud-cookbook.md at test time (see tests/cookbook.rs).
+area = "std"
+
+[[objects]]
+key = "soul"
+kind = "code"
+title = "Soul"
+tags = ["system:global", "system:hidden"]
+script = "soul.luau"
+
+[[objects]]
+key = "quest"
+kind = "code"
+title = "Quest Daemon"
+tags = ["system:global", "system:hidden"]
+script = "quest.luau"
