@@ -47,6 +47,24 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   trap evicts a pooled instance so a poisoned one is never reused. The
   `plugins/names` demo ships a reference bump allocator + `reset`.
 
+### Fixed
+
+- **`can_traverse` now fires on the exit, as documented.** It was wired to the
+  destination room instead — with the same arguments, ten lines before
+  `can_enter` fires on that same room. Two consequences, both silent: a
+  `can_traverse` hook authored on an exit (the contract stated in
+  `docs/softcode-guide.md` and in the hook's own description, "gates whether an
+  actor may use this exit") never ran at all, and the hook was otherwise
+  indistinguishable from `can_enter`. It also broke the pairing the guide
+  promises between a DSL lock and its hook: the `traverse` lock is checked on
+  the exit, so its hook belongs there too. `can_enter` remains the destination
+  room's gate and is unchanged. If you had a `can_traverse` on a *room* and
+  relied on it gating entry, rename it to `can_enter` — that is the behavior you
+  were getting. Nothing in The Last Stag defined the hook, and it had no test
+  coverage; there is now one asserting both that an exit's hook fires with
+  `this` bound to the exit and that a room's `can_traverse` does not gate
+  movement.
+
 ## 0.1.0-rc.20 — 2026-08-31
 
 ### Added

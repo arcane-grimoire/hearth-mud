@@ -7063,8 +7063,11 @@ impl Engine {
             return "You can't go that way.\r\n".to_string();
         }
 
-        // Check can_traverse hook on the exit's target room (Luau)
-        match self.fire_hook(target_ref, "can_traverse", actor_ref, Some(&old_room), None) {
+        // Check can_traverse hook on the exit itself (Luau), pairing with the
+        // `traverse` lock above — both gate the exit. `can_enter` below is the
+        // room's gate; firing this one on the destination room too would make
+        // the two hooks identical and leave an exit's own hook never firing.
+        match self.fire_hook(exit_ref, "can_traverse", actor_ref, Some(&old_room), None) {
             Ok(run) if run.denied => {
                 return if run.emitted_to_actor {
                     String::new()
@@ -11446,6 +11449,127 @@ end
         let hero = engine.world.get(&pc).unwrap();
         assert_eq!(hero.attrs.get("_x"), Some(&serde_json::json!(5)),
             "a plain exit must not disturb grid position");
+    }
+
+    /// `can_traverse` belongs to the **exit**, pairing with the exit's
+    /// `traverse` lock; `can_enter` belongs to the destination room. Both were
+    /// once fired on the destination room with identical arguments, which made
+    /// the two hooks indistinguishable and meant an exit's own `can_traverse`
+    /// — the documented contract — silently never ran.
+    #[test]
+    fn can_traverse_fires_on_the_exit_not_the_destination_room() {
+        let (mut engine, _admin, _) = engine_with_api_token(&[Scope::Admin]);
+
+        let new_room = |engine: &mut Engine, key: &str| {
+            let r = engine.world.next_dbref();
+            engine.world.add_object(GameObject::new(&r, key, Kind::Room));
+            r
+        };
+        let a = new_room(&mut engine, "rooma");
+        let b = new_room(&mut engine, "roomb");
+        let c = new_room(&mut engine, "roomc");
+        let d = new_room(&mut engine, "roomd");
+        let e = new_room(&mut engine, "roome");
+
+        let pc = engine.world.next_dbref();
+        engine.world.add_object(GameObject::new(&pc, "hero", Kind::Player).with_location(&a));
+
+        // 1. A can_traverse hook on the EXIT runs, and `this` is that exit.
+        let exit_ab = engine.world.next_dbref();
+        let mut ab = GameObject::new(&exit_ab, "north", Kind::Exit)
+            .with_location(&a)
+            .with_target(&b);
+        hooks::set_script(
+            &mut ab,
+            r#"function can_traverse(this, actor, room)
+                 set_attr(actor, "saw_this", this.ref_id)
+                 return true
+               end"#
+                .to_string(),
+        );
+        engine.world.add_object(ab);
+
+        engine.do_move(&pc, &exit_ab, &b);
+        let hero = engine.world.get(&pc).unwrap();
+        assert_eq!(
+            hero.location_ref.as_deref(),
+            Some(b.as_str()),
+            "an allowing can_traverse must not block the move"
+        );
+        assert_eq!(
+            hero.attrs.get("saw_this"),
+            Some(&serde_json::json!(exit_ab)),
+            "can_traverse must fire on the exit, with `this` bound to the exit"
+        );
+
+        // 2. A can_traverse hook on the exit can veto.
+        let exit_bc = engine.world.next_dbref();
+        let mut bc = GameObject::new(&exit_bc, "north", Kind::Exit)
+            .with_location(&b)
+            .with_target(&c);
+        hooks::set_script(
+            &mut bc,
+            "function can_traverse(this, actor, room) return false end".to_string(),
+        );
+        engine.world.add_object(bc);
+
+        engine.do_move(&pc, &exit_bc, &c);
+        assert_eq!(
+            engine.world.get(&pc).unwrap().location_ref.as_deref(),
+            Some(b.as_str()),
+            "can_traverse returning false must block the move"
+        );
+
+        // 3. can_traverse on the destination ROOM is NOT a movement gate — that
+        //    is can_enter's job. Under the old wiring this denied the move.
+        let mut c_obj = engine.world.get(&c).unwrap().clone();
+        hooks::set_script(
+            &mut c_obj,
+            "function can_traverse(this, actor, room) return false end".to_string(),
+        );
+        engine.world.add_object(c_obj);
+
+        let exit_bc2 = engine.world.next_dbref();
+        engine.world.add_object(
+            GameObject::new(&exit_bc2, "east", Kind::Exit).with_location(&b).with_target(&c),
+        );
+        engine.do_move(&pc, &exit_bc2, &c);
+        assert_eq!(
+            engine.world.get(&pc).unwrap().location_ref.as_deref(),
+            Some(c.as_str()),
+            "a room's can_traverse must not gate movement into it"
+        );
+
+        // 4. can_enter on the destination room still gates it.
+        let mut d_obj = engine.world.get(&d).unwrap().clone();
+        hooks::set_script(
+            &mut d_obj,
+            "function can_enter(this, actor, room) return false end".to_string(),
+        );
+        engine.world.add_object(d_obj);
+
+        let exit_cd = engine.world.next_dbref();
+        engine.world.add_object(
+            GameObject::new(&exit_cd, "north", Kind::Exit).with_location(&c).with_target(&d),
+        );
+        engine.do_move(&pc, &exit_cd, &d);
+        assert_eq!(
+            engine.world.get(&pc).unwrap().location_ref.as_deref(),
+            Some(c.as_str()),
+            "can_enter on the destination room must still block the move"
+        );
+
+        // ...and an unguarded room still admits.
+        let exit_ce = engine.world.next_dbref();
+        engine.world.add_object(
+            GameObject::new(&exit_ce, "south", Kind::Exit).with_location(&c).with_target(&e),
+        );
+        engine.do_move(&pc, &exit_ce, &e);
+        assert_eq!(
+            engine.world.get(&pc).unwrap().location_ref.as_deref(),
+            Some(e.as_str()),
+            "an unguarded exit and room must allow the move"
+        );
     }
 
     // -- GMCP Terrain.Legend --

@@ -147,6 +147,15 @@ internal working memory that shouldn't be visible as object attributes.
 | `on_dusk` | Game clock: the hour reached `dusk_hour` | `(this)` — read `get_time()` |
 | `cmd_*` | Any name — becomes a player command | `(this, actor, room, args)` |
 
+**`can_traverse` vs `can_enter`.** These gate the same movement but belong to
+different objects, and the pairing matches the DSL locks: `can_traverse` is the
+**exit's** hook (`this` is the exit), alongside the exit's `traverse` lock;
+`can_enter` is the **destination room's** hook (`this` is the room), alongside
+the room's `enter` lock. Use the exit's when the passage is what's gated (a
+locked door, a toll bridge); use the room's when the place is (a ward, a private
+chamber) and you want it to hold no matter which exit leads in. Both receive the
+room the actor is leaving as `room`.
+
 ### Global hooks
 
 Objects tagged `system:global` receive lifecycle hooks from all rooms, not just
