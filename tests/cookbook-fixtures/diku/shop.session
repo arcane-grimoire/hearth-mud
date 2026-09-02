@@ -1,0 +1,30 @@
+# Diku cookbook: the .shp file as a keeper script. buy/sell/list/value with
+# the keeper's markup, and transfer_attr keeping goods and payment together.
+
+> create
+> tester
+> secretpass
+> secretpass
+expect: Account created
+
+> north
+> east
+expect: Butchery
+
+# list renders the keeper's inventory at profit_buy (10 * 1.5 = 15).
+> list
+expect: Cleaver
+expect: slab of steak
+expect: 15 coins
+
+# Refused when broke — and nothing changes hands.
+> buy steak
+expect: cannot afford
+> inventory
+expect-not: slab of steak
+
+> buy unicorn
+expect: do not stock
+
+> value steak
+expect: aren't carrying that

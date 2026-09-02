@@ -1,6 +1,6 @@
-//! The MUSH cookbook's recipes are executable, and this runs them.
+//! The cookbooks' recipes are executable, and this runs them.
 //!
-//! `docs/mush-cookbook.md` promises its recipes are pasteable. A parser check
+//! The cookbooks promise their recipes are pasteable. A parser check
 //! can't keep that promise: `luau-analyze` treats `emit`, `get_attr` and the
 //! rest as unknown globals, so a misspelled API name, a wrong argument order,
 //! or a hook that never fires all parse perfectly and fail at runtime. (The
@@ -87,18 +87,20 @@ fn copy_tree(src: &Path, dest: &Path) {
     }
 }
 
-#[test]
-fn cookbook_recipes_run() {
+/// Extract `doc`'s recipes into a temp game dir built from `fixtures_rel`'s
+/// scaffolding, then run every `.session` file beside that scaffolding.
+fn run_cookbook(doc_rel: &str, fixtures_rel: &str, spawn_room: &str, min_recipes: usize) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let doc_path = root.join("docs/mush-cookbook.md");
+    let doc_path = root.join(doc_rel);
     let doc = std::fs::read_to_string(&doc_path)
         .unwrap_or_else(|e| panic!("reading {}: {}", doc_path.display(), e));
 
     let recipes = extract_recipes(&doc);
     assert!(
-        recipes.len() >= 7,
-        "expected the cookbook's path-labelled recipes; found {} ({:?}). \
+        recipes.len() >= min_recipes,
+        "{}: expected path-labelled recipes; found {} ({:?}). \
          Did a `world/<area>/<name>.luau`: label get dropped?",
+        doc_path.display(),
         recipes.len(),
         recipes.iter().map(|(p, _)| p.display().to_string()).collect::<Vec<_>>()
     );
@@ -108,10 +110,12 @@ fn cookbook_recipes_run() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let tmp = std::env::temp_dir().join(format!("hearth-cookbook-{}-{}", std::process::id(), stamp));
+    let slug = fixtures_rel.rsplit('/').next().unwrap_or("cookbook");
+    let tmp = std::env::temp_dir()
+        .join(format!("hearth-cookbook-{}-{}-{}", slug, std::process::id(), stamp));
     let game_dir = tmp.join("world");
 
-    let fixtures = root.join("tests/cookbook-fixtures");
+    let fixtures = root.join(fixtures_rel);
     copy_tree(&fixtures.join("scaffold"), &game_dir);
 
     for (rel, source) in &recipes {
@@ -121,7 +125,7 @@ fn cookbook_recipes_run() {
     }
 
     let config = Config {
-        spawn_room: "town/tavern".into(),
+        spawn_room: spawn_room.into(),
         game_dir: Some(game_dir.to_string_lossy().into_owned()),
         db_path: tmp.join("cookbook.db").to_string_lossy().into_owned(),
         ..Config::default()
@@ -166,7 +170,28 @@ fn cookbook_recipes_run() {
 
     assert!(
         failures.is_empty(),
-        "cookbook recipes failed — the code in docs/mush-cookbook.md is broken:\n\n{}",
+        "cookbook recipes failed — the code in {} is broken:\n\n{}",
+        doc_rel,
         failures.join("\n\n")
+    );
+}
+
+#[test]
+fn mush_cookbook_recipes_run() {
+    run_cookbook(
+        "docs/mush-cookbook.md",
+        "tests/cookbook-fixtures/mush",
+        "town/tavern",
+        7,
+    );
+}
+
+#[test]
+fn diku_cookbook_recipes_run() {
+    run_cookbook(
+        "docs/diku-cookbook.md",
+        "tests/cookbook-fixtures/diku",
+        "midgaard/temple",
+        4,
     );
 }

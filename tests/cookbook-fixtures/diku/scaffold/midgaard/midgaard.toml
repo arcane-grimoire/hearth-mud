@@ -1,0 +1,156 @@
+# Scaffolding for the Diku cookbook doc tests. The recipe SCRIPTS are extracted
+# from docs/diku-cookbook.md at test time (see tests/cookbook.rs), so the doc is
+# the single source of truth for the code.
+area = "midgaard"
+
+[[rooms]]
+key = "temple"
+title = "The Temple of Midgaard"
+description = "The temple square. Adventurers gather here."
+
+[[rooms]]
+key = "square"
+title = "The Market Square"
+description = "Stalls and shouting."
+
+[[rooms]]
+key = "shop"
+title = "Cleaver's Butchery"
+description = "A shop, smelling of sawdust."
+
+[[rooms]]
+key = "storeroom"
+title = "The Storeroom"
+description = "Crates, stacked high."
+
+[[exits]]
+from = "temple"
+direction = "north"
+to = "square"
+aliases = ["n"]
+
+[[exits]]
+from = "square"
+direction = "south"
+to = "temple"
+aliases = ["s"]
+
+[[exits]]
+from = "square"
+direction = "east"
+to = "shop"
+aliases = ["e"]
+
+[[exits]]
+from = "shop"
+direction = "west"
+to = "square"
+aliases = ["w"]
+
+# Becomes a door via the zone's `D` reset — exits can't carry attrs in TOML.
+[[exits]]
+from = "shop"
+direction = "north"
+to = "storeroom"
+aliases = ["n"]
+
+[[exits]]
+from = "storeroom"
+direction = "south"
+to = "shop"
+aliases = ["s"]
+
+# --- prototypes (Diku vnum prototypes; no location = not in the world) -------
+
+[[objects]]
+key = "guard_proto"
+kind = "npc"
+title = "a city guard"
+description = "A bored-looking man in the city livery."
+tags = ["mob:guard"]
+script = "guard.luau"
+
+[[objects]]
+key = "sword_proto"
+kind = "item"
+title = "a short sword"
+description = "Standard issue."
+
+[objects.attrs]
+value = 20
+
+[[objects]]
+key = "bread_proto"
+kind = "item"
+title = "a loaf of bread"
+description = "Yesterday's."
+
+[objects.attrs]
+value = 2
+
+# --- the zone (its resets attr is the .zon file) -----------------------------
+
+[[objects]]
+key = "zone"
+kind = "code"
+title = "Midgaard Zone"
+tags = ["system:global", "system:hidden"]
+script = "zone.luau"
+
+[objects.attrs]
+interval = 300
+
+[[objects.attrs.resets]]
+op = "mob"
+proto = "midgaard/guard_proto"
+room = "midgaard/square"
+max = 2
+
+[[objects.attrs.resets]]
+op = "obj"
+proto = "midgaard/bread_proto"
+room = "midgaard/square"
+max = 3
+
+[[objects.attrs.resets]]
+op = "door"
+room = "midgaard/shop"
+exit = "north"
+state = "closed"
+key_tag = "key:storeroom"
+
+# --- the doors global -------------------------------------------------------
+
+[[objects]]
+key = "doors"
+kind = "code"
+title = "Doors"
+tags = ["system:global", "system:hidden"]
+script = "doors.luau"
+
+# --- the shopkeeper ---------------------------------------------------------
+
+[[objects]]
+key = "cleaver"
+kind = "npc"
+title = "Cleaver the butcher"
+description = "A wide man with wider forearms."
+location = "shop"
+script = "shop.luau"
+
+[objects.attrs]
+currency = "coins"
+profit_buy = 1.5
+profit_sell = 0.5
+coins = 500
+
+# Stock lives in the keeper's inventory.
+[[objects]]
+key = "steak"
+kind = "item"
+title = "a slab of steak"
+description = "Marbled and heavy."
+location = "cleaver"
+
+[objects.attrs]
+value = 10

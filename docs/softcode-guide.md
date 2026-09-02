@@ -7,8 +7,9 @@ to apply.
 
 This is the reference. For complete, pasteable implementations — a bulletin
 board, a vendor, a scheduler, a weather system, vehicles, a job tracker — see
-the [MUSH cookbook](mush-cookbook.md), which also carries a MUSHcode-to-Hearth concept
-map if you're arriving from PennMUSH/TinyMUX.
+the [MUSH cookbook](mush-cookbook.md) and the [Diku cookbook](diku-cookbook.md).
+Each opens with a concept map for builders arriving from PennMUSH/TinyMUX or
+from Diku/ROM/Circle/Smaug.
 
 ## One script per object
 
