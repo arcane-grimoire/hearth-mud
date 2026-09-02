@@ -2200,6 +2200,7 @@ archetype = "loop/a"
         );
     }
 
+    #[test]
     fn skipped_areas_still_carry_their_program_hashes_forward() {
         let dir = TempGameDir::new();
         dir.write_area(

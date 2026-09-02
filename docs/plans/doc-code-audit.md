@@ -1294,7 +1294,13 @@ Listed as suspicions precisely because they were *not* confirmed.
    hooks take a 4th `args`, and a triggered hook takes a 4th `data` (and see §3
    for the lifecycle hooks). Not every hook's arity was enumerated against the
    README's table.
-9. **The in-game `help` text is stale where `docs/commands.md` is right.**
+9. **A dead test in `src/loader.rs`.** Not a doc finding, but found while
+   counting tests for §22: `skipped_areas_still_carry_their_program_hashes_forward`
+   (`src/loader.rs:2203`) has **no `#[test]` attribute** — an earlier insertion
+   orphaned it from the attribute above — so it never runs. Adding the attribute
+   back makes it a 437th test; it was left unchanged here because this audit
+   touches no code.
+10. **The in-game `help` text is stale where `docs/commands.md` is right.**
    `src/engine/commands.rs:409-417` still advertises
    `@program <ref>/<hook> = <luau>`, `@rmprogram <ref>/<hook>`,
    `@reload <ref>/<hook>` and `@program/history|restore|diff`, none of which are
