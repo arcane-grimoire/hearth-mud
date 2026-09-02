@@ -48,3 +48,58 @@ script = "bbs.luau"
 
 [objects.attrs]
 groups = ["general", "announcements"]
+
+# --- time-driven recipes ----------------------------------------------------
+
+[[objects]]
+key = "weather"
+kind = "code"
+title = "Weather"
+tags = ["system:global", "system:hidden"]
+script = "weather.luau"
+
+[[objects]]
+key = "daylight"
+kind = "code"
+title = "Day Describer"
+tags = ["system:global", "system:hidden"]
+script = "daylight.luau"
+
+[[objects]]
+key = "cron"
+kind = "code"
+title = "Scheduler"
+tags = ["system:global", "system:hidden"]
+script = "cron.luau"
+
+# The scheduler's job list. Points at the crier below so the trigger path is
+# actually exercised rather than logging an unresolved target.
+[[objects.attrs.jobs]]
+name = "market-day"
+hour = 8
+target = "system/crier"
+hook = "on_market_day"
+
+[[objects.attrs.jobs]]
+name = "curfew"
+hour = 10
+target = "system/crier"
+hook = "on_curfew"
+
+# A test-only receiver: the recipe fires hooks AT something, and this is the
+# something. Its script is scaffolding, not a recipe, so it lives inline here.
+[[objects]]
+key = "crier"
+kind = "code"
+title = "Town Crier"
+tags = ["system:global", "system:hidden"]
+
+[objects.script]
+source = """
+function on_market_day(this, actor, room, data)
+  emit_room(resolve_key("town/square"), "CRIER: market day! (job=" .. tostring(data and data.job) .. ")")
+end
+function on_curfew(this, actor, room, data)
+  emit_room(resolve_key("town/square"), "CRIER: curfew!")
+end
+"""

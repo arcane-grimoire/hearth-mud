@@ -31,6 +31,15 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (a greedy `%S+` swallowing the `=` in `fset themesong=...`), now fixed. Covers
   `+finger`, `+where`, the dice roller, the BBS (including the `prompt()` →
   `on_body` handoff), the vendor, and `+jobs`.
+- **Every cookbook recipe is now covered end to end.** With `tick:` available,
+  the five recipes that were parse-only *because* they are time-driven got
+  fixtures: the weather engine (tick-driven turnover and ambient lines,
+  deterministic because the recipe rolls with `seed_random`), MushCron (jobs
+  firing on in-world hour boundaries, at a real receiver object rather than a
+  log line), the Day Describer (a room's description changing through night →
+  dawn → day → dusk), the car, and the elevator. The MUSH harness now runs with
+  an in-world clock configured so hour-driven recipes are reachable. Writing
+  them found two genuine bugs in the recipes themselves — see below.
 - **`.session` tests can advance time (`tick: <n>`), and time is frozen
   otherwise.** The runner drove input-driven flows deterministically but had no
   way to reach anything time-driven, so `on_tick`, `after()` timers and the game
@@ -136,6 +145,22 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A room can carry `attrs` in area TOML.** `RoomDef` had no `attrs` field at
+  all, so — with no `deny_unknown_fields` — a `[rooms.attrs]` block parsed,
+  loaded without error, and was silently dropped. Rooms hold state like any
+  other object (`climate` for a weather system, `sector` for terrain, the
+  per-phase descriptions a day/night cycle swaps between), and the MUSH
+  cookbook's own weather and day-describer recipes documented exactly that,
+  so both were non-functional as written. This is the same gap `ExitDef` had,
+  found the same way. Declared attrs merge on reload rather than replacing, so
+  runtime state survives; export round-trips them.
+- **Two cookbook recipes used `get_contents` where they needed
+  `get_room_contents`.** `get_contents` filters to `kind == "item"`, so the
+  car's `occupants()` and the elevator's `riders()` could never see a
+  passenger — both vehicles moved with their contents silently ignored. The
+  guide called `get_contents` "objects inside a container", which is what led
+  there; it now says items-only and points at `get_room_contents` for anything
+  that might hold a player.
 - **`movement_blocked` is honored by grid movement, and documented.** The attr
   holds an actor in place with a custom refusal message, and `do_move` checked
   it — but `grid_move` did not, so a player held by combat couldn't walk through

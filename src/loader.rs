@@ -277,6 +277,12 @@ pub(crate) struct RoomDef {
     pub(crate) description: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) tags: Vec<String>,
+    /// Attributes on the room. Rooms carry state like any other object —
+    /// `climate` for a weather system, `sector` for terrain, the per-phase
+    /// descriptions a day/night cycle swaps between — so a file must be able
+    /// to declare them.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub(crate) attrs: std::collections::HashMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub(crate) locks: std::collections::HashMap<String, String>,
     /// The archetype this room delegates to, as a file key ("area/key"), if
@@ -679,6 +685,9 @@ pub fn load_game_dir(
                         existing.title = Some(title.clone());
                     }
                     existing.description = room.description.clone();
+                    // Merge, not replace: a room accumulates runtime state the
+                    // file knows nothing about. Same rule as objects and exits.
+                    existing.attrs.extend(room.attrs.clone());
                     existing.locks = room.locks.clone();
                     existing.archetype_ref = archetype_ref;
                     sync_managed_tags(existing, &room.tags);
@@ -701,6 +710,7 @@ pub fn load_game_dir(
             }
             obj.locks = room.locks.clone();
             obj.archetype_ref = archetype_ref;
+            obj.attrs = room.attrs.clone();
             obj.attrs.insert(FILE_KEY_ATTR.into(), serde_json::json!(file_key));
             install_script(&mut obj, &room.script, &room.libs, base_dir, &mut diverged)?;
             install_attr_schema(&mut obj, &room.attr_schema, &file_key);
@@ -1356,6 +1366,84 @@ archetype = "loop/a"
         assert!(areas.contains(&"town"));
         assert!(!areas.contains(&"iron_hills"), "maps/*.toml is not an area");
         assert!(!areas.contains(&"terrain"), "terrain.toml is not an area");
+    }
+
+    /// Rooms carry state like any other object — `climate` for a weather
+    /// system, `sector` for terrain, the per-phase descriptions a day/night
+    /// cycle swaps between — but `RoomDef` had no `attrs` field at all. With no
+    /// `deny_unknown_fields`, a `[rooms.attrs]` block parsed, loaded without
+    /// error, and was silently dropped.
+    #[test]
+    fn rooms_carry_declared_attrs() {
+        let dir = TempGameDir::new();
+        dir.write_area(
+            "town",
+            "town.toml",
+            r#"
+                area = "town"
+
+                [[rooms]]
+                key = "square"
+                title = "The Square"
+
+                [rooms.attrs]
+                climate = "coastal"
+                desc_night = "The square is empty and dark."
+                light = 1
+            "#,
+        );
+
+        let mut world = World::new();
+        let key_map = load_game_dir(&dir.path, &mut world, &HashMap::new())
+            .expect("load should succeed")
+            .key_map;
+        let square = world.get(key_map.get("town/square").unwrap()).unwrap();
+
+        assert_eq!(square.attrs.get("climate"), Some(&serde_json::json!("coastal")));
+        assert_eq!(square.attrs.get("light"), Some(&serde_json::json!(1)));
+        assert_eq!(
+            square.attrs.get("desc_night"),
+            Some(&serde_json::json!("The square is empty and dark."))
+        );
+    }
+
+    /// As for objects and exits, a reload merges a room's declared attrs over
+    /// whatever it accumulated at runtime rather than replacing the lot.
+    #[test]
+    fn reloading_a_room_merges_attrs_rather_than_replacing() {
+        let dir = TempGameDir::new();
+        let area = r#"
+            area = "town"
+
+            [[rooms]]
+            key = "square"
+            title = "The Square"
+
+            [rooms.attrs]
+            climate = "coastal"
+        "#;
+        dir.write_area("town", "town.toml", area);
+
+        let mut world = World::new();
+        let key_map = load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap().key_map;
+        let square_ref = key_map.get("town/square").unwrap().clone();
+
+        // Runtime state the file knows nothing about.
+        world
+            .get_mut(&square_ref)
+            .unwrap()
+            .attrs
+            .insert("current_weather".into(), serde_json::json!("storm"));
+
+        load_game_dir(&dir.path, &mut world, &HashMap::new()).unwrap();
+
+        let square = world.get(&square_ref).unwrap();
+        assert_eq!(
+            square.attrs.get("current_weather"),
+            Some(&serde_json::json!("storm")),
+            "a reload must not drop runtime state"
+        );
+        assert_eq!(square.attrs.get("climate"), Some(&serde_json::json!("coastal")));
     }
 
     /// An exit is an ordinary object and the engine reads attrs and hooks off

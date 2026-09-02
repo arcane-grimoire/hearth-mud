@@ -1,0 +1,32 @@
+# Cookbook: the Keran-style weather engine. Entirely tick-driven — it turns the
+# weather over every 300 ticks and emits ambient lines every 90 — so none of it
+# was reachable before `tick:`. Deterministic because the recipe rolls with
+# seed_random rather than math.random.
+
+> create
+> tester
+> secretpass
+> secretpass
+expect: Account created
+
+# Indoors you can't see the sky.
+> weather
+expect: can't see the sky
+
+> out
+expect: Market Square
+
+# The square declares `climate = "temperate"` as a room attr.
+> weather
+expect: The weather is
+
+# The turnover lands on tick 300 and announces the new state, because the
+# stored state (nil) always differs from the first roll.
+tick: 299
+expect-not: /clouds break|sky greys|Rain begins|Thunder cracks/
+tick: 1
+expect: /The clouds break|The sky greys over|Rain begins to fall|Thunder cracks overhead/
+
+# Whatever it rolled, `weather` now reports it rather than the default.
+> weather
+expect: /clear|overcast|rain|storm/

@@ -291,12 +291,12 @@ changes immediately within the same script.
 | `pick(ref, attr, ...)` | value or nil | Walk into nested attrs: `pick(ref, "combat", 1, "hp")`. Sees pending writes. |
 | `has_tag(ref, spec)` | boolean | Check if a tag exists (e.g., `"quest:worthy"`) |
 | `get_tags(ref)` | table | List all tags as spec strings |
-| `get_room_contents(ref)` | table | List objects in a room (excludes exits) |
+| `get_room_contents(ref)` | table | Everything located in ref of any kind except exits and code objects — the one to use for a vehicle's occupants as well as a room's |
 | `get_exits(ref)` | table | List exits from a room |
 | `get_location(ref)` | table or nil | Get the object's container |
 | `kind_of(ref)` | string or nil | Get the object's kind |
 | `get_owner(ref)` | string or nil | Get the owner's ref_id |
-| `get_contents(ref)` | table | Objects inside a container |
+| `get_contents(ref)` | table | **Items** located in ref — a container's contents. Filtered to `kind == "item"`, so it does **not** see a player or NPC inside (a vehicle's passengers); use `get_room_contents` for those. |
 | `get_timers(ref)` | table | Active timers on this object |
 | `get_tick` | number | Current engine tick count (a value, not a function). Use for cooldowns, time-based logic. |
 | `resolve_key(file_key)` | string or nil | Returns the ref_id for a TOML-defined object by file key (e.g., `"town/crossroads"`) |

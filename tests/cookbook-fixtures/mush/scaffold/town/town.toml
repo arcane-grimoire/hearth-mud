@@ -47,3 +47,46 @@ lines = [
   "A brushed snare, and Vane's voice under it.",
   "Conversation drops a half-step.",
 ]
+
+# --- outdoor rooms for the weather engine and the day-describer -------------
+
+[[rooms]]
+key = "square"
+title = "The Market Square"
+description = "Stalls crowd the square."
+tags = ["env:outdoor", "desc:timed"]
+
+[rooms.attrs]
+climate = "temperate"
+desc_dawn  = "DAWNDESC stallholders unfold their awnings in the grey light."
+desc_day   = "DAYDESC stalls crowd the square, loud with haggling."
+desc_dusk  = "DUSKDESC the last vendors are packing up."
+desc_night = "NIGHTDESC the square is empty and dark."
+
+[[exits]]
+from = "tavern"
+direction = "out"
+to = "square"
+aliases = ["o"]
+
+[[exits]]
+from = "square"
+direction = "in"
+to = "tavern"
+
+# --- the car ----------------------------------------------------------------
+
+[[objects]]
+key = "car"
+kind = "item"
+title = "a battered green sedan"
+description = "It has seen better decades."
+location = "square"
+script = "car.luau"
+
+[objects.attrs]
+capacity = 4
+
+[objects.attrs.routes]
+square = { tavernyard = "town/tavern" }
+tavern = { square = "town/square" }

@@ -1,0 +1,47 @@
+# Cookbook: the car and the elevator. The car is input-driven; the elevator
+# moves itself on a timer, so it needs `tick:`.
+
+> create
+> tester
+> secretpass
+> secretpass
+expect: Account created
+
+# --- the car --------------------------------------------------------------
+> out
+expect: Market Square
+
+> board car
+expect: You climb into
+
+# Occupants ride along because they are LOCATED IN the car — the engine moves
+# them, there is no per-passenger teleport loop.
+> drive
+expect: tavernyard
+
+> drive tavernyard
+expect: engine turns over
+expect: You arrive at
+
+> disembark
+expect: You climb out.
+> look
+expect: Stag and Crown
+
+# --- the elevator ---------------------------------------------------------
+# Put the player inside the car; the recipe has buttons, not a boarding verb.
+> @eval move_object(actor, resolve_key("tower/elevator")) return "aboard"
+expect: aboard
+
+> press 3
+expect: doors slide shut
+
+# Two ticks per floor travelled: lobby (1) to offices (3) is 4 ticks.
+tick: 3
+expect-not: Floor 3
+tick: 1
+expect: Floor 3
+expect: doors open
+
+> press 9
+expect: Floors 1 to 4

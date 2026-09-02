@@ -90,6 +90,19 @@ fn copy_tree(src: &Path, dest: &Path) {
 /// Extract `doc`'s recipes into a temp game dir built from `fixtures_rel`'s
 /// scaffolding, then run every `.session` file beside that scaffolding.
 fn run_cookbook(doc_rel: &str, fixtures_rel: &str, spawn_room: &str, min_recipes: usize) {
+    run_cookbook_with(doc_rel, fixtures_rel, spawn_room, min_recipes, None)
+}
+
+/// As `run_cookbook`, with an optional in-world clock. Recipes driven by
+/// `on_hour`/`on_dawn` (a scheduler, a day-describer) need one configured, and
+/// a fast `minutes_per_tick` keeps the `tick:` counts in their fixtures small.
+fn run_cookbook_with(
+    doc_rel: &str,
+    fixtures_rel: &str,
+    spawn_room: &str,
+    min_recipes: usize,
+    clock: Option<hearth_mud::clock::ClockConfig>,
+) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let doc_path = root.join(doc_rel);
     let doc = std::fs::read_to_string(&doc_path)
@@ -128,6 +141,7 @@ fn run_cookbook(doc_rel: &str, fixtures_rel: &str, spawn_room: &str, min_recipes
         spawn_room: spawn_room.into(),
         game_dir: Some(game_dir.to_string_lossy().into_owned()),
         db_path: tmp.join("cookbook.db").to_string_lossy().into_owned(),
+        clock: clock.clone(),
         ..Config::default()
     };
 
@@ -178,11 +192,19 @@ fn run_cookbook(doc_rel: &str, fixtures_rel: &str, spawn_room: &str, min_recipes
 
 #[test]
 fn mush_cookbook_recipes_run() {
-    run_cookbook(
+    // 10 game-minutes per tick starting at 04:00, so a fixture reaches the
+    // scheduler's and day-describer's hour boundaries in a handful of ticks.
+    let clock = hearth_mud::clock::ClockConfig {
+        minutes_per_tick: 10.0,
+        start: hearth_mud::clock::ClockStart { hour: 4, ..Default::default() },
+        ..Default::default()
+    };
+    run_cookbook_with(
         "docs/mush-cookbook.md",
         "tests/cookbook-fixtures/mush",
         "town/tavern",
-        7,
+        12,
+        Some(clock),
     );
 }
 

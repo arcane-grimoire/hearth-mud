@@ -1381,6 +1381,11 @@ pub fn export_bundle(path: &Path, world: &mut World) -> Result<ExportReport, Str
                         title: obj.title.clone(),
                         description: obj.description.clone(),
                         tags,
+                        attrs: {
+                            let mut a = obj.attrs.clone();
+                            a.remove(loader::FILE_KEY_ATTR);
+                            a
+                        },
                         locks: obj.locks.clone(),
                         archetype: obj
                             .archetype_ref
