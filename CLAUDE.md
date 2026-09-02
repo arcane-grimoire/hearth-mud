@@ -18,7 +18,7 @@ are built on. The game (The Last Stag) lives in `../the-last-stag-mud/`.
 ```sh
 cargo run                                    # default config (hearth.toml)
 cargo run -- ../the-last-stag-mud/hearth.toml  # game-specific config
-cargo test                                   # 433 tests
+cargo test                                   # 439 tests
 
 # Web client (Svelte)
 cd web && npm install                        # first time
@@ -148,7 +148,7 @@ web/                   Svelte 5 + Vite web client
       room-builder/    Svelte Flow room graph (RoomGraph/RoomNode) + ObjectFinder
                        (⌘K), consumed by the unified workspace
 docs/
-  adr/                 6 architectural decision records (ADR 0001–0006)
+  adr/                 8 architectural decision records (ADR 0001–0008)
   plans/               Pending/in-progress design docs (archetype traits + live debugger, terrain attr schemas, Mudlet/GMCP terrain-legend + tiles)
   archetypes.md        Archetypes guide (is-a delegation, file-based types, hot-reload)
   commands.md          Command reference
@@ -170,7 +170,7 @@ docs/
 - **Game clock** — optional per-game in-world time (`[clock]` config; absent = off). A monotonic `game_minute` counter advances on the tick heartbeat (`minutes_per_tick`, fractional allowed), persisted in the DB `meta` table. `get_time()` softcode reads `{ total_minutes, minute, hour, day, month, year, is_day, weekday?, month_name? }`; the engine fires `on_hour`/`on_day`/`on_dawn`/`on_dusk` on `system:global` objects on rollover (the hook reads `get_time()`); and the `game_time_between(start, end)` lock predicate uses the game hour (`time_between` stays real UTC). Calendar shape (hours/day, days/month, months/year, dawn/dusk, month/day names, epoch) is all config. See `src/clock.rs`.
 - **Object scripts** — one Luau script per object (the Godot/LPMUD model): a single chunk defines the object's hooks as top-level functions sharing one scope (helpers, constants, `require`d modules). The engine derives which hooks a script defines by parsing it with `full_moon` (`derive_hooks`), so a `function on_get(...)` inside a string literal is correctly ignored. `require`able `lib_<name>` modules are a separate concern, stored per-object in `libs` (they `return` a value, so they can't be functions in the shared script scope).
 - **Attribute schemas** — an object/archetype declares an `attr_schema` (typed descriptors: type, label, help, default, min/max/enum-values/ref-source; closed `AttrType` set in `src/attr_schema.rs` with a non-fatal `Unknown` fallback). The schema inherits down the archetype chain (`World::resolved_attr_schema`), persists + round-trips through export/import, and `examine` returns it with per-descriptor source, so the web builder renders declared attrs as typed widgets (`AttrField.svelte`: number/checkbox/enum-dropdown/color/`ref`-dropdown via `list_ref_candidates`/`list<T>` rows) instead of raw key/value boxes. Descriptive metadata only — attr values stay free-form.
-- **~91 Luau API functions** — read (21, incl. all_objects), predicates (9), write (incl. `set_script`, `set_lib`, emit_data, `set_aliases`, `update_exit`, `set_lock`/`clear_lock`, `clone_object`, `run_command_as`, and `move_object` with `announce`/`fire_hooks` flags), spatial (4), utility (5), noise (5), seeded RNG (4), coordinate math (6), grid (1), `grid_move`/`grid_can_move` (2D-grid wilderness movement), ink (7)
+- **~95 Luau API functions** — read (21, incl. all_objects), predicates (9), write (incl. `set_script`, `set_lib`, emit_data, `set_aliases`, `update_exit`, `set_lock`/`clear_lock`, `clone_object`, `run_command_as`, and `move_object` with `announce`/`fire_hooks` flags), spatial (4), utility (5), noise (5), seeded RNG (4), coordinate math (6), grid (1), `grid_move`/`grid_can_move` (2D-grid wilderness movement), ink (7)
 - **2D-grid movement (`grid_move`/`grid_can_move`)** — `grid_move(actor, map, dir)` moves an actor one cell (n/s/e/w) on a map template's grid using the actor's `_x`/`_y` attrs — the wilderness model where the whole grid is ONE room, NO room per cell. Honors terrain/cell passability and fires the terrain's `on_leave`/`on_enter` hooks on that terrain's `archetype` object (a `[terrain.X] archetype = "area/key"`) **as the moving actor**, so terrain behavior ("lava burns") is defined once per terrain, not per square. Returns `{ok,moved,x,y,terrain}`; blocked results carry the attempted `x`/`y` (+`terrain`) with `reason` `"off_grid"`/`"impassable"`; bad requests return `{ok=false, reason="no_map"|"bad_dir"|"no_position"}` (never throws). `grid_can_move(actor, map, dir)` is a pure peek (same passability logic) so an exit list agrees with the step by construction. Pure decision logic (shared `resolve_grid_step`); position + hooks land as `SetAttr`/`Trigger` intents (no new engine surface). The game keeps rendering + encounters. Integration `.test.luau` runs get the game's palette-merged map templates so grid APIs are testable.
 - **Coordinate exits** — an ordinary Exit carrying `_dest_x`/`_dest_y` attrs stamps that arrival cell onto the actor's `_x`/`_y` when traversed (`do_move`, after the relocate and before `on_enter`/`on_look`, so the room's hooks render the landing cell). This is the room→map-cell entry for the one-room grid model: a normal room's exit drops you onto a specific `(x, y)` of a wilderness room. Fully generic — the engine only copies the exit's declared coordinates, knowing nothing about "wilderness" — and authored anywhere an exit is (`@open` + `@set <exit>/_dest_x`, TOML, the builder), no Luau. Troupe followers land on the same cell. A plain exit (no `_dest_x`/`_dest_y`) never touches position. The reverse (map-cell→room) is an ordinary exit anchored to a POI cell in game softcode.
 - **Luau modules** — `require()` loads shared .luau files from `<game_dir>/lib/`
@@ -194,7 +194,7 @@ docs/
 - **GMCP (telnet option 201)** — negotiated in `net/telnet.rs`; on move the engine's `Room` message (now carrying `num`/`area`/`map`/`environment`/`x`/`y` + exit target dbrefs) is framed as `Room.Info` for Mudlet's built-in mapper. On entering a map-instantiated area the engine also sends a `Terrain.Legend` (via the `Game` channel, once per map per session) — each terrain char → stable `env_id` + color — so the mapper paints rooms by terrain. Text-only clients never enable GMCP, so nothing changes for them. A Mudlet package + install notes live in `clients/mudlet/`. Tile images are the remaining follow-up.
 - **Auto room data** — engine sends structured Room messages (exits, contents) on look/movement, powers sidebar panels
 - **emit_data()** — softcode can push structured JSON to web clients: `emit_data(player_ref, "channel", data_table)`
-- **REST API** — POST /api with ~44 actions (list/examine, create room/object/exit, clone object, set title/desc/attr/tags/aliases, set/clear lock, update exit, force command (admin), script get/set/clear + lib get/set/remove, world_check, ink compile/save/load, maps + terrain, eval, import/export)
+- **REST API** — POST /api with 62 actions (list/examine, create room/object/exit, clone object, set title/desc/attr/tags/aliases, set/clear lock, update exit, force command (admin), script get/set/clear + lib get/set/remove, world_check, ink compile/save/load, maps + terrain, eval, import/export)
 - **Web client** — Svelte 5 + Vite, multi-panel layout: scrolling output, structured sidebar, command input with history
 - **Unified builder IDE** — one web workspace (`/builder/workspace`) replacing the scatter of tools: a VS Code-style explorer tree (objects → hooks as files, plus Maps and Libraries folders) and a tabbed editor where objects (Properties/Hooks/Dialogue), hooks (CodeMirror), and Table/Map overviews all open as tabs; shared selection, New-object creator, ⌘K find, ⌘B sidebar toggle
 - **Builder-authored libraries** — `require()`able lib modules created from the web builder (Libraries folder → New library) or telnet `@lib`, with **no file access**: stored in the DB on a `Kind::Code` host, resolved by `require()` after shipped modules, shipped-name collisions refused, locked-host aware. REST `create_library`/`set_lib`/`remove_lib`; the `std/` file libs stay file-authoritative (locked)
@@ -326,11 +326,11 @@ and refuses to cut one without a stamped entry, as does the `Release` workflow's
 
 ## Design decisions
 
-See `docs/adr/` (6 ADRs). See `CONTEXT.md` for domain glossary.
+See `docs/adr/` (8 ADRs). See `CONTEXT.md` for domain glossary.
 
 ## Testing
 
-433 tests across: softcode (127, incl. derive_hooks + grid_move), engine (118),
+439 tests across: softcode (127, incl. derive_hooks + grid_move), engine (118),
 loader (28), import/export (28), grid (16), world (15), db (14), accounts (12),
 map templates (11), locks (10), migrate (8), cli (8), net (7), markup (7),
 clock (6), session_test (4), dungeon (4), attr_schema (4), plus the

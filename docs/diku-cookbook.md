@@ -343,7 +343,7 @@ function on_tick(this, state, room)
 end
 
 -- Populate on boot, so a fresh database comes up with a stocked world.
-function on_startup(this, state, room)
+function on_startup(this, _actor, room)
   run_resets(this)
 end
 

@@ -145,6 +145,38 @@ The format is loosely [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The CLI is actually called `hearth` now.** `Cargo.toml` had no `[[bin]]`, so
+  cargo named the binary after the package and shipped `hearth-mud` — while
+  every documented example across `CLAUDE.md`, `commands.md`,
+  `getting-started.md` and `migrations.md` (and the CLI's own usage text) said
+  `hearth <subcommand>`. About twenty doc lines named a command nobody had. The
+  `[[bin]]` is one line; the Dockerfile, justfile and release workflow were
+  updated alongside it so the build, the container entrypoint and the release
+  artifacts stay consistent. **Deployment note:** the container entrypoint and
+  the binary inside the release tarballs are now `hearth`; the artifact and
+  image names are unchanged.
+- **Docs corrected against the code, after auditing every claim.** The
+  substantive ones, each verified by running it:
+  - **Lib modules *can* use the write API.** The guide and the skill both said
+    modules get "stdlib + require but **not** the write API". The opposite is
+    true and deliberate: `install_require` resolves a module's free names
+    against the calling hook's environment, so a shared module can `emit` and
+    `set_attr` with the caller's authority. A module is shared code, not a
+    sandbox boundary.
+  - **Lifecycle hooks have no `state` table** — only `on_tick` does. Five hooks
+    were documented as `(this, state, room)`; they fire with no actor, so the
+    second parameter is the object itself. That made the documented signature a
+    trap: `state.foo = 1` in `on_startup` is `set_attr(this, "foo", 1)` via
+    property sugar, silently persisting an attribute. Verified, and the guide
+    now shows the wrong and right forms side by side.
+  - **The `teleport` lock type never existed.** No `check_lock("teleport", …)`
+    is written anywhere, so such a lock has always been inert — while `put`,
+    which *is* checked, appeared in none of the lists. Corrected in the guide,
+    `commands.md`, `CONTEXT.md`, and annotated (not rewritten) in ADR 0006.
+  - **WASM plugins are documented at last** — `wasm_call`, the auto-bound module
+    tables, `<game_dir>/wasm/*.wasm` loading, the fuel budget and `reset`-based
+    pooling appeared in no user-facing doc despite being a shipped feature.
+  - **Counts refreshed**: 439 tests, 8 ADRs, 62 REST actions, ~95 API functions.
 - **A self-triggering hook no longer kills the server.** `trigger()` chains
   recursed on the engine's stack with no cap: `deliver_effects` fires a deferred
   trigger through `fire_hook_data`, which applies that hook's batch and re-enters

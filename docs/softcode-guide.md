@@ -150,11 +150,11 @@ internal working memory that shouldn't be visible as object attributes.
 | `on_whisper` | When an actor whispers in this room | `(this, actor, room)` |
 | `on_emote` | When an actor emotes in this room | `(this, actor, room)` |
 | `on_tick` | Every N ticks (set `tick_interval` attr) | `(this, state, room)` |
-| `on_startup` | Engine starts, after world loads | `(this, state, room)` |
-| `on_shutdown` | Engine is shutting down, before final save | `(this, state, room)` |
-| `on_reload` | After `@reload-world` completes | `(this, state, room)` |
-| `on_save` | Before each world save (autosave or `@save`) | `(this, state, room)` |
-| `on_create` | When this object is first created at runtime | `(this, state, room)` |
+| `on_startup` | Engine starts, after world loads | `(this, this, room)` — **no state table**, see below |
+| `on_shutdown` | Engine is shutting down, before final save | `(this, this, room)` — **no state table**, see below |
+| `on_reload` | After `@reload-world` completes | `(this, this, room)` — **no state table**, see below |
+| `on_save` | Before each world save (autosave or `@save`) | `(this, this, room)` — **no state table**, see below |
+| `on_create` | When this object is first created at runtime | `(this, this, room)` — **no state table**, see below |
 | `on_destroy` | Before this object is destroyed | `(this, actor, room)` |
 | `on_hour` | Game clock: the hour rolled over (on `system:global` objects) | `(this)` — read `get_time()` |
 | `on_day` | Game clock: the day rolled over | `(this)` — read `get_time()` |
@@ -170,6 +170,29 @@ the room's `enter` lock. Use the exit's when the passage is what's gated (a
 locked door, a toll bridge); use the room's when the place is (a ward, a private
 chamber) and you want it to hold no matter which exit leads in. Both receive the
 room the actor is leaving as `room`.
+
+
+**Only `on_tick` gets a `state` table.** The lifecycle hooks above are fired
+with no actor, so their second parameter is the object itself — `this` twice.
+Naming it `state` and assigning to it is actively harmful, because object tables
+support property-assignment sugar:
+
+```lua
+-- WRONG. There is no state table here; `state` IS `this`, and this line is
+-- `set_attr(this, "boot_count", 42)` — a persisted attribute, written silently.
+function on_startup(this, state, room)
+  state.boot_count = 42
+end
+```
+
+Write these as `(this, _actor, room)` and keep persistent data in attrs
+deliberately:
+
+```lua
+function on_startup(this, _actor, room)
+  set_attr(this, "boot_count", (get_attr(this, "boot_count") or 0) + 1)
+end
+```
 
 ### Global hooks
 
@@ -770,7 +793,7 @@ They're simpler than `can_` hooks for common permission patterns.
 | `drop` | items | Before dropping |
 | `use` | objects | Before using |
 | `look` | objects | Before examining |
-| `teleport` | rooms | Before teleporting |
+| `put` | containers | Before an item is put into it |
 
 ### Lock functions
 
@@ -925,8 +948,21 @@ Circular requires are rejected rather than looping forever. If `a` requires
 `require cycle detected: a -> b -> a`. Break the cycle by extracting the
 shared piece into a third module.
 
-Modules have stdlib access (string, table, math, require) but **not** the
-game write API (emit, set_attr, etc.). They're for pure utility code.
+A module's free names resolve against the **calling hook's environment**, so a
+module function can use whatever API that hook has — `emit`, `set_attr`,
+`grid_move`, `ink_*`, all of it. That is deliberate (see `install_require` in
+`src/softcode/mod.rs`): it is what lets a shared `combat.luau` do the emitting
+rather than returning strings for every caller to emit themselves.
+
+Two consequences worth knowing:
+
+- **A module is not a sandbox boundary.** It is shared code, running with the
+  caller's authority. Keep a module's side effects obvious from its name, the
+  same way you would in any language.
+- **With no hook running, a module falls back to plain globals.** That is the
+  unit-mode `.test.luau` case, so a pure compute module tests exactly as it
+  behaves in a hook — but one that emits has nothing to emit *through*, which is
+  a good reason to keep computation and output in separate functions.
 
 ### Libraries
 
@@ -1051,6 +1087,48 @@ local entrance = generate_dungeon("my-seed")
 local layout = grid_from_value(get_attr(entrance, "dungeon_layout"))
 local room_ref = layout:get(3, 2)  -- "#42" or nil
 ```
+
+## WASM plugins
+
+A second extension language, for pure data-in → data-out work you would rather
+write in Rust (or AssemblyScript, or anything targeting WebAssembly) than in
+Luau — a name generator, a pathfinder, a parser.
+
+Plugins are **compute only**. They never touch world state: Luau stays the only
+thing that emits intents, so a plugin can compute an answer but not act on it.
+Every call runs under a fuel budget, so a runaway plugin traps instead of
+hanging the engine.
+
+Modules load from `<game_dir>/wasm/*.wasm` on every boot and `@reload-world`.
+They are **code, not content**: never persisted to the database, exactly like
+`lib/*.luau` and `.ink` files.
+
+Two ways to call one:
+
+```lua
+-- Bound automatically: the engine introspects a module's exports and binds
+-- each one matching the plugin ABI under a table named after the module, so
+-- names.wasm exporting `generate` is simply:
+local name = names.generate({ seed = 42, syllables = 3 })
+
+-- The low-level escape hatch, for anything the binding doesn't cover:
+local result = wasm_call("names", "generate", { seed = 42 })
+```
+
+The wasm file is the source of truth for what exists. An optional sidecar
+`<stem>.toml` manifest only *annotates* — a description, a different Luau name
+or namespace — and cannot invent a binding for an export that isn't there, so
+the two can't drift.
+
+A plugin that exports `reset()` opts into instance pooling: the host keeps one
+instance resident and rewinds its per-call arena instead of re-instantiating.
+Without `reset` each call gets a fresh instance, so it can never leak across
+calls. A trap evicts a pooled instance rather than reusing a poisoned one.
+
+The reference plugin — a deterministic, seedable Markov name generator with a
+bump allocator and `reset` — is in `plugins/names/`. Implementation:
+`src/softcode/wasm.rs`, hosted on `wasmi` (a pure-Rust interpreter, so behavior
+is deterministic by construction).
 
 ## Sandboxing
 

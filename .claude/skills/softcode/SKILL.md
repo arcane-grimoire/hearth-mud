@@ -136,7 +136,7 @@ function on_startup(this, state, room)
 end
 ```
 
-Same signature as `on_tick` (`this`, `state`, `room`). State is persistent.
+**Not** `on_tick`'s signature: these fire with no actor, so the second parameter is the object itself (`this` twice) and there is no state table. Write them as `(this, _actor, room)` — naming it `state` and assigning to it silently writes a persisted attribute, because object tables support property-assignment sugar.
 
 | Hook | Fires when |
 |------|------------|
@@ -192,7 +192,7 @@ end
 
 ## Modules (require)
 
-Shared Luau code in `<game_dir>/lib/*.luau` is loaded with `require("name")`. Modules return a table, can require other modules, and are cached until `@reload-world`. Modules have stdlib + require but **not** the write API.
+Shared Luau code in `<game_dir>/lib/*.luau` is loaded with `require("name")`. Modules return a table, can require other modules, and are cached until `@reload-world`. Modules resolve their free names against the **calling hook's environment**, so a module function can use the full API that hook has — `emit`, `set_attr`, `grid_move`, `ink_*`. A module is shared code running with the caller's authority, not a sandbox boundary. With no hook running (unit-mode `.test.luau`) they fall back to plain globals.
 
 Bundled modules (embedded in the binary, overridable by game): `random` (dice, weighted, shuffle), `collections` (Set, Array helpers), `state_machine` (sync FSM), `signal` (pub/sub), `Grid3D` (3D grid), `text` (rich BBCode formatting with accessible mode), `str` (string utilities), `grids` (re-export of Grid3D).
 

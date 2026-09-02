@@ -53,7 +53,7 @@ model. Almost every MUSH idiom maps onto something simpler.
 | `@trigger obj/CODE=args` | `trigger(ref, "on_code", { ... })` |
 | `@force player=cmd`, puppets | `run_command_as(actor, "cmd")` |
 | `@lock obj=FLAG^WIZARD` | `@lock <ref>/get = perm(admin)` — see the [lock DSL](softcode-guide.md#locks) |
-| `@startup` | `function on_startup(this, state, room)` |
+| `@startup` | `function on_startup(this, _actor, room)` |
 | `@aahear` / `^*:` listen patterns | `function on_say(this, actor, room)` |
 | `@parent obj=template` | [Archetypes](archetypes.md) (`is-a` delegation) |
 | `setq(0,...)` / `r(0)` registers | Ordinary Lua `local`s |
@@ -951,7 +951,7 @@ function on_hour(this)
   log("day phase → " .. phase)
 end
 
-function on_startup(this, state, room)
+function on_startup(this, _actor, room)
   on_hour(this)   -- get the world into the right phase at boot
 end
 ```

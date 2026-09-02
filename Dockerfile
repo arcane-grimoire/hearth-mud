@@ -17,7 +17,7 @@ RUN cargo build --release --features bundle-web
 
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /build/target/release/hearth-mud /usr/local/bin/hearth-mud
+COPY --from=builder /build/target/release/hearth /usr/local/bin/hearth
 WORKDIR /data
 EXPOSE 4000 8000
-ENTRYPOINT ["hearth-mud"]
+ENTRYPOINT ["hearth"]

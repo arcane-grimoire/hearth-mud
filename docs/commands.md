@@ -109,7 +109,7 @@ retroactively for callers that already required it. See
 
 | Command | Description |
 |---------|-------------|
-| `@lock <ref>/<type> = <expr>` | Set a lock (types: traverse, get, drop, enter, use, look, teleport) |
+| `@lock <ref>/<type> = <expr>` | Set a lock (types: traverse, get, drop, enter, use, look, put) |
 | `@unlock <ref>/<type>` | Remove a lock |
 | `@locks [<ref>]` | View locks on an object or exit (default: current room) |
 

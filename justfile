@@ -32,7 +32,7 @@ bundle:
 
 install dest="~/.local/bin":
     just bundle
-    install -m 755 target/release/hearth-mud "{{dest}}/"
+    install -m 755 target/release/hearth "{{dest}}/"
 
 clean:
     cargo clean

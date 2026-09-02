@@ -3,6 +3,14 @@ name = "hearth-mud"
 version = "0.1.0-rc.20"
 edition = "2024"
 
+# The docs, the CLI's own usage text, and the config file all call this
+# `hearth`; without an explicit [[bin]] cargo names it after the package and
+# ships `hearth-mud`, so every documented `hearth <subcommand>` example named a
+# command nobody had.
+[[bin]]
+name = "hearth"
+path = "src/main.rs"
+
 [features]
 default = []
 bundle-web = ["dep:rust-embed"]

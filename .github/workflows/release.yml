@@ -74,7 +74,7 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/hearth-mud dist/${{ matrix.name }}
+          cp target/${{ matrix.target }}/release/hearth dist/${{ matrix.name }}
           cp LICENSE dist/
           cd dist
           tar czf ${{ matrix.name }}.tar.gz ${{ matrix.name }} LICENSE

@@ -97,7 +97,7 @@ _Avoid_: pulse, frame, cycle, heartbeat
 ### Locks
 
 **Lock:**
-A DSL expression on an Object or Exit that gates an action (traverse, get, drop, enter, use, look, teleport). Evaluated against an AccessContext.
+A DSL expression on an Object or Exit that gates an action (traverse, get, drop, enter, use, look, put). Evaluated against an AccessContext.
 _Avoid_: permission, guard, ACL
 
 **AccessContext:**
